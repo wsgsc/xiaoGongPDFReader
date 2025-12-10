@@ -128,21 +128,23 @@ BOOL CXiaoGongPDFApp::InitInstance()
 	if (dwError == ERROR_ALREADY_EXISTS)
 	{
 		// 已有实例在运行
-		// 获取命令行参数
 		CString cmdLine = m_lpCmdLine;
 		cmdLine.Trim();
 
-		// 去除引号
+		// 去除引号(支持多种引号格式)
 		if (!cmdLine.IsEmpty())
 		{
-			if (cmdLine[0] == _T('"'))
+			// 去除开头的引号
+			while (!cmdLine.IsEmpty() && (cmdLine[0] == _T('"') || cmdLine[0] == _T('\'')))
 			{
 				cmdLine = cmdLine.Mid(1);
 			}
-			if (!cmdLine.IsEmpty() && cmdLine[cmdLine.GetLength() - 1] == _T('"'))
+			// 去除结尾的引号
+			while (!cmdLine.IsEmpty() && (cmdLine[cmdLine.GetLength() - 1] == _T('"') || cmdLine[cmdLine.GetLength() - 1] == _T('\'')))
 			{
 				cmdLine = cmdLine.Left(cmdLine.GetLength() - 1);
 			}
+			cmdLine.Trim();
 		}
 
 		// 如果有要打开的文件，发送给已存在的实例
@@ -208,27 +210,40 @@ BOOL CXiaoGongPDFApp::InitInstance()
 	CString cmdLine = m_lpCmdLine;
 	cmdLine.Trim();
 
-	// 去除命令行参数中的引号
+	// 去除命令行参数中的引号(支持多种引号格式)
 	if (!cmdLine.IsEmpty())
 	{
-		if (cmdLine[0] == _T('"'))
+		// 去除开头的引号
+		while (!cmdLine.IsEmpty() && (cmdLine[0] == _T('"') || cmdLine[0] == _T('\'')))
 		{
 			cmdLine = cmdLine.Mid(1);
 		}
-		if (!cmdLine.IsEmpty() && cmdLine[cmdLine.GetLength() - 1] == _T('"'))
+		// 去除结尾的引号
+		while (!cmdLine.IsEmpty() && (cmdLine[cmdLine.GetLength() - 1] == _T('"') || cmdLine[cmdLine.GetLength() - 1] == _T('\'')))
 		{
 			cmdLine = cmdLine.Left(cmdLine.GetLength() - 1);
 		}
+		cmdLine.Trim();
 	}
 
 	CXiaoGongPDFDlg dlg;
 	m_pMainWnd = &dlg;
 
-	// 如果有命令行参数（PDF文件路径），在对话框显示前先打开文件
-	if (!cmdLine.IsEmpty() && PathFileExists(cmdLine))
+	// 检查文件是否为PDF格式并存在
+	if (!cmdLine.IsEmpty())
 	{
-		// 将文件路径传递给对话框
-		dlg.m_initialFilePath = cmdLine;
+		// 先检查文件是否存在
+		if (PathFileExists(cmdLine))
+		{
+			// 检查是否是PDF文件
+			CString ext = cmdLine.Right(4);
+			ext.MakeLower();
+			if (ext == _T(".pdf"))
+			{
+				// 将文件路径传递给对话框
+				dlg.m_initialFilePath = cmdLine;
+			}
+		}
 	}
 
 	INT_PTR nResponse = dlg.DoModal();

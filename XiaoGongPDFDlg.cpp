@@ -294,6 +294,7 @@ BEGIN_MESSAGE_MAP(CXiaoGongPDFDlg, CDialogEx)
 	ON_MESSAGE(WM_APP + 100, &CXiaoGongPDFDlg::OnTabCloseButton)  // 标签页关闭按钮消息
 	ON_WM_SIZE()
 	ON_MESSAGE(WM_USER + 100, &CXiaoGongPDFDlg::OnRenderThumbnailsAsync)
+	ON_MESSAGE(WM_USER + 101, &CXiaoGongPDFDlg::OnOpenInitialFile)  // 延迟打开初始文件
 	ON_WM_MOUSEWHEEL()
 	ON_BN_CLICKED(IDC_BTN_FIRST, &CXiaoGongPDFDlg::OnBtnFirst)
 	ON_BN_CLICKED(IDC_BTN_LAST, &CXiaoGongPDFDlg::OnBtnLast)
@@ -362,6 +363,7 @@ void CXiaoGongPDFDlg::onMenuSetDefault()
 
 	CString exePath = szPath;
 	CString commandLine;
+	// 设置命令行格式，%1 会被 Windows 替换为文件路径
 	commandLine.Format(_T("\"%s\" \"%%1\""), exePath);
 
 	// 设置注册表项，将此程序设为PDF默认阅读器
@@ -386,6 +388,18 @@ void CXiaoGongPDFDlg::onMenuSetDefault()
 	{
 		RegSetValueEx(hKey, NULL, 0, REG_SZ, (BYTE*)_T("PDF Document"),
 			(_tcslen(_T("PDF Document")) + 1) * sizeof(TCHAR));
+		RegCloseKey(hKey);
+	}
+
+	// 2.5. 设置默认图标
+	CString iconPath;
+	iconPath.Format(_T("\"%s\",0"), exePath);  // 使用程序的第一个图标资源
+	result = RegCreateKeyEx(HKEY_CURRENT_USER, _T("Software\\Classes\\XiaoGongPDF.Document\\DefaultIcon"),
+		0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, &dwDisposition);
+	if (result == ERROR_SUCCESS)
+	{
+		RegSetValueEx(hKey, NULL, 0, REG_SZ, (BYTE*)(LPCTSTR)iconPath,
+			(iconPath.GetLength() + 1) * sizeof(TCHAR));
 		RegCloseKey(hKey);
 	}
 
@@ -583,11 +597,12 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	// 更新最近文件菜单
 	UpdateRecentFilesMenu();
 
-	// 如果有从命令行传入的初始文件路径，打开该文件
+	// 如果有从命令行传入的初始文件路径，延迟打开该文件
+	// 使用PostMessage延迟打开，避免阻塞窗口显示
 	if (!m_initialFilePath.IsEmpty())
 	{
-		// 在新标签页中打开PDF
-		OpenPDFInNewTab(m_initialFilePath);
+		// 使用PostMessage延迟打开，让窗口先显示
+		PostMessage(WM_USER + 101, 0, 0);
 	}
 
 
@@ -1840,6 +1855,17 @@ LRESULT CXiaoGongPDFDlg::OnRenderThumbnailsAsync(WPARAM wParam, LPARAM lParam)
 #ifdef _DEBUG
 		TRACE(_T("所有缩略图渲染完成\n"));
 #endif
+	}
+
+	return 0;
+}
+
+// 延迟打开初始文件的消息处理函数
+LRESULT CXiaoGongPDFDlg::OnOpenInitialFile(WPARAM wParam, LPARAM lParam)
+{
+	if (!m_initialFilePath.IsEmpty())
+	{
+		OpenPDFInNewTab(m_initialFilePath);
 	}
 
 	return 0;

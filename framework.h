@@ -31,7 +31,9 @@
 // Windows Shell API
 #include <shlobj.h>             // Shell 对象和通知
 #include <shlwapi.h>            // Shell 路径函数（PathFileExists等）
+#include <shellapi.h>           // Shell API（CommandLineToArgvW等）
 #pragma comment(lib, "shlwapi.lib")  // 链接 shlwapi 库
+#pragma comment(lib, "shell32.lib")  // 链接 shell32 库
 
 
 

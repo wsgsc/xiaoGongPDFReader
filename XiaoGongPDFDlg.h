@@ -275,6 +275,7 @@ protected:
     afx_msg void OnThumbnailItemChanged(NMHDR* pNMHDR, LRESULT* pResult);
     afx_msg void OnSize(UINT nType, int cx, int cy);
     afx_msg LRESULT OnRenderThumbnailsAsync(WPARAM wParam, LPARAM lParam);  // 异步渲染缩略图
+    afx_msg LRESULT OnOpenInitialFile(WPARAM wParam, LPARAM lParam);  // 延迟打开初始文件
 
     // 工具栏相关函数
     void InitializeToolbar();  // 新增初始化工具栏函数
