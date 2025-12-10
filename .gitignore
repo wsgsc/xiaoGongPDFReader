@@ -1,0 +1,102 @@
+# Visual Studio 临时文件和编译输出
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# 编译输出
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+[Ww][Ii][Nn]32/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# Visual Studio IntelliSense 数据库
+*.VC.db
+*.VC.VC.opendb
+ipch/
+
+# Visual Studio 性能分析文件
+*.psess
+*.vsp
+*.vspx
+*.sap
+
+# ReSharper 缓存
+_ReSharper*/
+*.[Rr]e[Ss]harper
+*.DotSettings.user
+
+# 测试结果
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+
+# NuGet 包
+packages/
+*.nupkg
+*.snupkg
+
+# 资源编辑器临时文件
+*.aps
+
+# NCrunch
+_NCrunch_*
+.*crunch*.local.xml
+nCrunchTemp_*
+
+# 预编译头文件
+*.pch
+
+# Windows 图像缓存
+Thumbs.db
+ehthumbs.db
+
+# 文件夹配置文件
+Desktop.ini
+
+# 回收站
+$RECYCLE.BIN/
+
+# VS Code 配置
+.vscode/
+*.code-workspace
+
+# Claude Code 配置
+.claude/
+
+# Windows 临时文件
+*.tmp
+*.temp
+
+# 编译生成的中间文件
+*.obj
+*.iobj
+*.pdb
+*.ipdb
+*.ilk
+*.exp
+*.lib (如果不是第三方库)
+*.dll (如果不是第三方库)
+*.exe (如果不是最终发布的)
+
+# 其他
+*.log
+*.tlog
+*.lastbuildstate
+*.idb
+*.res
+*.manifest
+*.cache
+*.intermediate.manifest
+*.CopyComplete
+*.recipe
