@@ -2454,28 +2454,11 @@ void CXiaoGongPDFDlg::UpdateStatusBar()
 		return;
 	}
 
-	// 在状态栏显示当前缩放比例
-	CString zoomText;
-	int zoomPercent = (int)(m_customZoom * 100);
-
-	switch (m_zoomMode)
-	{
-	case ZOOM_FIT_WIDTH:
-		zoomText = _T("适应宽度");
-		break;
-	case ZOOM_FIT_PAGE:
-		zoomText = _T("适应页面");
-		break;
-	case ZOOM_CUSTOM:
-		zoomText.Format(_T("缩放: %d%%"), zoomPercent);
-		break;
-	}
-
 	CString title;
-	title.Format(_T("第 %d/%d 页 - %s"),
-		m_currentPage + 1, m_totalPages, zoomText);
+	title.Format(_T("第 %d/%d 页"),
+		m_currentPage + 1, m_totalPages);
 	m_statusBar.SetWindowText(title);
-	
+
 }
 
 void CXiaoGongPDFDlg::OnBtnFirst()
@@ -3839,7 +3822,11 @@ void CXiaoGongPDFDlg::InitializeTabControl()
 	// m_tabCtrl.SetColors(RGB(240, 240, 240), RGB(230, 230, 230), RGB(255, 255, 255));
 
 	// 添加滚动按钮样式和工具提示（ModernTabCtrl也支持这些）
-	m_tabCtrl.ModifyStyle(0, TCS_SCROLLOPPOSITE | TCS_TOOLTIPS);
+	// 添加TCS_FIXEDWIDTH样式使所有标签页宽度一致
+	m_tabCtrl.ModifyStyle(0, TCS_SCROLLOPPOSITE | TCS_TOOLTIPS | TCS_FIXEDWIDTH);
+
+	// 设置标签页固定宽度为100像素
+	m_tabCtrl.SendMessage(TCM_SETITEMSIZE, 0, MAKELPARAM(100, 36));
 
 #ifdef _DEBUG
 	TRACE(_T("现代化标签页控件初始化完成\n"));
@@ -3950,6 +3937,11 @@ bool CXiaoGongPDFDlg::OpenPDFInNewTab(const CString& filePath)
 #ifdef _DEBUG
 	TRACE(_T("创建新文档对象...\n"));
 #endif
+
+	// 显示"正在加载..."提示
+	m_statusBar.SetWindowText(_T("正在加载..."));
+	m_statusBar.UpdateWindow();  // 立即刷新显示
+
 	CPDFDocument* newDoc = new CPDFDocument(m_ctx);
 	if (!newDoc->OpenDocument(utf8Path.data()))
 	{
@@ -3958,6 +3950,9 @@ bool CXiaoGongPDFDlg::OpenPDFInNewTab(const CString& filePath)
 		TRACE(_T("打开PDF文件失败\n"));
 #endif
 		MessageBox(_T("无法打开PDF文件"), _T("错误"), MB_OK | MB_ICONERROR);
+
+		// 恢复状态栏显示
+		UpdateStatusBar();
 		return false;
 	}
 
@@ -3986,8 +3981,20 @@ bool CXiaoGongPDFDlg::OpenPDFInNewTab(const CString& filePath)
 		CString fullFileName = newDoc->GetFileName();
 		CString tabTitle = fullFileName;
 
+		// 去掉.pdf后缀
+		int dotPos = tabTitle.ReverseFind(_T('.'));
+		if (dotPos != -1)
+		{
+			CString ext = tabTitle.Mid(dotPos);
+			ext.MakeLower();
+			if (ext == _T(".pdf"))
+			{
+				tabTitle = tabTitle.Left(dotPos);
+			}
+		}
+
 		// 截断过长的文件名，避免标签太宽
-		const int MAX_TAB_LENGTH = 35;  // 最大显示35个字符
+		const int MAX_TAB_LENGTH = 12;  // 固定宽度100像素，大约可显示12个字符
 		if (tabTitle.GetLength() > MAX_TAB_LENGTH)
 		{
 			// 截断并添加省略号
