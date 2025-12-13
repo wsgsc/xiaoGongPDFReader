@@ -3056,7 +3056,7 @@ BOOL CXiaoGongPDFDlg::PreTranslateMessage(MSG* pMsg)
 			return TRUE;
 		}
 
-		// 处理Enter键 - 在页码编辑框中按Enter键立即跳转
+		// 处理Enter键 - 在页码编辑框或搜索框中按Enter键
 		if (pMsg->wParam == VK_RETURN)
 		{
 			// 检查焦点是否在页码编辑框上
@@ -3091,6 +3091,13 @@ BOOL CXiaoGongPDFDlg::PreTranslateMessage(MSG* pMsg)
 					}
 				}
 
+				return TRUE;
+			}
+			// 检查焦点是否在搜索框上
+			else if (pFocusWnd && pFocusWnd->GetSafeHwnd() == m_editSearch.GetSafeHwnd())
+			{
+				// 执行搜索
+				OnBtnFind();
 				return TRUE;
 			}
 		}

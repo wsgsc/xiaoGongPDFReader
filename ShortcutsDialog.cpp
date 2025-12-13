@@ -73,16 +73,9 @@ void CShortcutsDialog::InitializeShortcutsList()
 	AddShortcut(_T("鼠标滚轮"), _T("向上滚动页面/向下滚动页面"));
 	AddShortcut(_T(""), _T(""));
 
-	/* 先取消查找功能
 	AddShortcut(_T("Ctrl + F"), _T("打开搜索"));
 	AddShortcut(_T("F3"), _T("查找下一个"));
 	AddShortcut(_T("Shift + F3"), _T("查找上一个"));
-	AddShortcut(_T(""), _T(""));
-	*/
-
-	AddShortcut(_T("Ctrl + +"), _T("放大"));
-	AddShortcut(_T("Ctrl + -"), _T("缩小"));
-	AddShortcut(_T("Ctrl + 0"), _T("适合页面"));
 	AddShortcut(_T(""), _T(""));
 
 	AddShortcut(_T("Ctrl + L"), _T("向左旋转（逆时针90度）"));
