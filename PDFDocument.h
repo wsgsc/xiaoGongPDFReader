@@ -7,6 +7,7 @@
 #include <map>
 #include <vector>
 #include <list>
+#include "SearchTypes.h"  // 包含搜索相关类型定义
 
 // 缩略图信息结构
 struct ThumbnailInfo {
@@ -132,6 +133,14 @@ public:
 	int GetThumbnailPicHeight() const { return m_thumbnailPicHeight; }
 	void SetThumbnailPicHeight(int height) { m_thumbnailPicHeight = height; }
 
+	// 搜索信息管理
+	std::vector<SearchMatch>& GetSearchMatches() { return m_searchMatches; }
+	void SetSearchMatches(const std::vector<SearchMatch>& matches) { m_searchMatches = matches; }
+	int GetCurrentMatchIndex() const { return m_currentMatchIndex; }
+	void SetCurrentMatchIndex(int index) { m_currentMatchIndex = index; }
+	CString GetSearchKeyword() const { return m_searchKeyword; }
+	void SetSearchKeyword(const CString& keyword) { m_searchKeyword = keyword; }
+
 private:
 	// MuPDF对象（不拥有ctx，由外部管理）
 	fz_context* m_ctx;
@@ -171,4 +180,9 @@ private:
 
 	// 当前位图
 	HBITMAP m_hCurrentBitmap;
+
+	// 搜索信息
+	std::vector<SearchMatch> m_searchMatches;
+	int m_currentMatchIndex;
+	CString m_searchKeyword;
 };

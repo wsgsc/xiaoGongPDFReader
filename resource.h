@@ -39,6 +39,11 @@
 #define IDC_TAB_CONTROL                 1037
 #define IDC_TAB1                        1038
 #define IDC_CHECK_THUMBNAIL             1039
+#define IDC_EDIT_SEARCH                 1040
+#define IDC_BTN_FIND                    1041
+#define IDC_BTN_PREV_MATCH              1042
+#define IDC_BTN_NEXT_MATCH              1043
+#define IDC_CHECK_CASE_SENSITIVE        1044
 #define ID_32771                        32771
 #define ID_32772                        32772
 #define ID_MENU_OPEN                    32773
@@ -64,7 +69,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        132
 #define _APS_NEXT_COMMAND_VALUE         32789
-#define _APS_NEXT_CONTROL_VALUE         1039
+#define _APS_NEXT_CONTROL_VALUE         1045
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

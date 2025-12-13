@@ -97,6 +97,8 @@ CXiaoGongPDFDlg::CXiaoGongPDFDlg(CWnd* pParent /*=nullptr*/)
 	, m_isDraggingScrollbar(false)  // 初始化滚动条拖拽状态
 	, m_scrollbarDragStartY(0)      // 初始化滚动条拖拽起始Y
 	, m_scrollbarDragStartPos(0)    // 初始化滚动条拖拽起始位置
+	, m_currentMatchIndex(-1)       // 初始化当前匹配项索引
+	, m_searchCaseSensitive(false)  // 默认不区分大小写
 {
 	m_hIcon = AfxGetApp()->LoadIcon(IDR_MAINFRAME);
 	m_highlightBrush.CreateSolidBrush(RGB(173, 216, 230));  // 浅蓝色
@@ -275,6 +277,12 @@ void CXiaoGongPDFDlg::DoDataExchange(CDataExchange* pDX)
 	DDX_Control(pDX, IDC_CHECK_THUMBNAIL, m_checkThumbnail);
 	DDX_Control(pDX, IDC_EDIT_CURRENT, m_editCurrent);
 	DDX_Control(pDX, IDC_STATUS_BAR, m_statusBar);
+
+	// 搜索控件绑定
+	DDX_Control(pDX, IDC_EDIT_SEARCH, m_editSearch);
+	DDX_Control(pDX, IDC_BTN_FIND, m_btnFind);
+	DDX_Control(pDX, IDC_BTN_PREV_MATCH, m_btnPrevMatch);
+	DDX_Control(pDX, IDC_BTN_NEXT_MATCH, m_btnNextMatch);
 }
 
 BEGIN_MESSAGE_MAP(CXiaoGongPDFDlg, CDialogEx)
@@ -304,6 +312,10 @@ BEGIN_MESSAGE_MAP(CXiaoGongPDFDlg, CDialogEx)
 	ON_BN_CLICKED(IDC_CHECK_THUMBNAIL, &CXiaoGongPDFDlg::OnCheckThumbnail)
 	ON_EN_CHANGE(IDC_EDIT_CURRENT, &CXiaoGongPDFDlg::OnEnChangeEditCurrent)
 	ON_EN_KILLFOCUS(IDC_EDIT_CURRENT, &CXiaoGongPDFDlg::OnEditCurrentKillFocus)
+	ON_EN_CHANGE(IDC_EDIT_SEARCH, &CXiaoGongPDFDlg::OnEnChangeEditSearch)
+	ON_BN_CLICKED(IDC_BTN_FIND, &CXiaoGongPDFDlg::OnBtnFind)
+	ON_BN_CLICKED(IDC_BTN_PREV_MATCH, &CXiaoGongPDFDlg::OnBtnPrevMatch)
+	ON_BN_CLICKED(IDC_BTN_NEXT_MATCH, &CXiaoGongPDFDlg::OnBtnNextMatch)
 	ON_WM_KEYDOWN()
 	ON_WM_GETMINMAXINFO()
 	ON_WM_DROPFILES()
@@ -443,7 +455,7 @@ void CXiaoGongPDFDlg::onMenuSetDefault()
 	if (result == ERROR_SUCCESS)
 	{
 		RegSetValueEx(hKey, _T(".pdf"), 0, REG_SZ, (BYTE*)_T("XiaoGongPDF.Document"),
-			(_tcslen(_T("XiaoGongPDF.Document")) + 1) * sizeof(TCHAR));
+			(DWORD)((_tcslen(_T("XiaoGongPDF.Document")) + 1) * sizeof(TCHAR)));
 		RegCloseKey(hKey);
 	}
 
@@ -794,6 +806,21 @@ bool CXiaoGongPDFDlg::RenderPage(int pageNumber)
 		}
 		else
 		{
+			// 在位图上绘制搜索高亮（如果有搜索结果）
+			if (!m_searchMatches.empty() && m_hCurrentBitmap)
+			{
+				CDC* pDC = m_pdfView.GetDC();
+				CDC memDCHighlight;
+				memDCHighlight.CreateCompatibleDC(pDC);
+				HBITMAP hOldBmpHighlight = (HBITMAP)memDCHighlight.SelectObject(m_hCurrentBitmap);
+
+				// 调用高亮绘制函数
+				HighlightSearchMatches(&memDCHighlight, pageNumber);
+
+				memDCHighlight.SelectObject(hOldBmpHighlight);
+				m_pdfView.ReleaseDC(pDC);
+			}
+
 			// 设置复制后的位图到控件
 			m_pdfView.SetBitmap(m_hCurrentBitmap);
 		}
@@ -1058,6 +1085,19 @@ bool CXiaoGongPDFDlg::RenderPage(int pageNumber)
 					DeleteObject(m_hCurrentBitmap);
 					m_hCurrentBitmap = hNewBitmap;
 				}
+			}
+
+			// 在位图上绘制搜索高亮（如果有搜索结果）
+			if (!m_searchMatches.empty() && m_hCurrentBitmap)
+			{
+				CDC memDCHighlight;
+				memDCHighlight.CreateCompatibleDC(pDC);
+				HBITMAP hOldBmpHighlight = (HBITMAP)memDCHighlight.SelectObject(m_hCurrentBitmap);
+
+				// 调用高亮绘制函数
+				HighlightSearchMatches(&memDCHighlight, pageNumber);
+
+				memDCHighlight.SelectObject(hOldBmpHighlight);
 			}
 
 			// 设置新位图到控件
@@ -2135,6 +2175,22 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		const int CHECK_WIDTH = 100;  // 复选框宽度
 		m_checkThumbnail.MoveWindow(x, btnY, CHECK_WIDTH, BTN_HEIGHT);
 
+		// 搜索控件（紧跟在缩略图复选框后面）
+		x += CHECK_WIDTH + spacing;
+		const int SEARCH_EDIT_WIDTH = 150;  // 搜索框宽度
+		m_editSearch.MoveWindow(x, btnY, SEARCH_EDIT_WIDTH, BTN_HEIGHT);
+
+		x += SEARCH_EDIT_WIDTH + spacing;
+		const int BTN_FIND_WIDTH = 50;  // 查找按钮宽度
+		m_btnFind.MoveWindow(x, btnY, BTN_FIND_WIDTH, BTN_HEIGHT);
+
+		x += BTN_FIND_WIDTH + spacing;
+		const int BTN_NAV_WIDTH = 80;  // 导航按钮宽度
+		m_btnPrevMatch.MoveWindow(x, btnY, BTN_NAV_WIDTH, BTN_HEIGHT);
+
+		x += BTN_NAV_WIDTH + spacing;
+		m_btnNextMatch.MoveWindow(x, btnY, BTN_NAV_WIDTH, BTN_HEIGHT);
+
 		// 根据缩略图面板可见性调整布局
 		int pdfX, pdfWidth;
 		const int STATUS_BAR_HEIGHT = 25;  // 状态栏高度
@@ -2768,6 +2824,35 @@ void CXiaoGongPDFDlg::OnEnChangeEditCurrent()
 	// 这里保持空实现，避免输入时频繁触发
 }
 
+void CXiaoGongPDFDlg::OnEnChangeEditSearch()
+{
+	// 获取搜索框当前文本
+	CString searchText;
+	m_editSearch.GetWindowText(searchText);
+	searchText.Trim();
+
+	// 如果搜索框为空，清除搜索结果和标记
+	if (searchText.IsEmpty())
+	{
+		// 清除搜索结果
+		m_searchMatches.clear();
+		m_currentMatchIndex = -1;
+
+		// 清除状态栏显示
+		m_statusBar.SetWindowText(_T(""));
+
+		// 重新渲染页面以移除高亮标记
+		if (m_continuousScrollMode)
+		{
+			RenderVisiblePages();
+		}
+		else
+		{
+			RenderPage(m_currentPage);
+		}
+	}
+}
+
 void CXiaoGongPDFDlg::OnEditCurrentKillFocus()
 {
 	if (!m_doc || m_totalPages <= 0)
@@ -2849,6 +2934,8 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_btnFullscreen.SetWindowText(_T("全屏"));
 	m_btnRotateLeft.SetWindowText(_T("左旋"));
 	m_btnRotateRight.SetWindowText(_T("右旋"));
+	m_btnPrevMatch.SetWindowText(_T("上一个"));
+	m_btnNextMatch.SetWindowText(_T("下一个"));
 
 	// 设置初始文本
 	m_editCurrent.SetWindowText(_T("0"));
@@ -2939,6 +3026,30 @@ BOOL CXiaoGongPDFDlg::PreTranslateMessage(MSG* pMsg)
 		if (pMsg->wParam == VK_F9)
 		{
 			ToggleThumbnailPanel();
+			return TRUE;
+		}
+
+		// 处理Ctrl + F - 聚焦到搜索框
+		if ((GetKeyState(VK_CONTROL) & 0x8000) && pMsg->wParam == 'F')
+		{
+			m_editSearch.SetFocus();
+			m_editSearch.SetSel(0, -1);  // 全选文本
+			return TRUE;
+		}
+
+		// 处理F3 - 查找下一个
+		if (pMsg->wParam == VK_F3)
+		{
+			if (GetKeyState(VK_SHIFT) & 0x8000)
+			{
+				// Shift+F3 - 查找上一个
+				GoToPrevMatch();
+			}
+			else
+			{
+				// F3 - 查找下一个
+				GoToNextMatch();
+			}
 			return TRUE;
 		}
 
@@ -3983,6 +4094,13 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 			oldDoc->SetThumbnailPicWidth(m_thumbnailPicWidth);
 			oldDoc->SetThumbnailPicHeight(m_thumbnailPicHeight);
 
+			// ★★★ 保存搜索信息到文档对象
+			oldDoc->SetSearchMatches(m_searchMatches);
+			oldDoc->SetCurrentMatchIndex(m_currentMatchIndex);
+			CString searchKeyword;
+			m_editSearch.GetWindowText(searchKeyword);
+			oldDoc->SetSearchKeyword(searchKeyword);
+
 #ifdef _DEBUG
 			TRACE(_T("已保存缩略图缓存到文档对象，尺寸: %d x %d\n"),
 				m_thumbnailPicWidth, m_thumbnailPicHeight);
@@ -4068,6 +4186,16 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 
 #ifdef _DEBUG
 	TRACE(_T("已清空页面缓存，准备渲染新文档\n"));
+#endif
+
+	// ★★★ 恢复搜索信息（每个文档的搜索结果应该独立）
+	m_searchMatches = newDoc->GetSearchMatches();
+	m_currentMatchIndex = newDoc->GetCurrentMatchIndex();
+	m_editSearch.SetWindowText(newDoc->GetSearchKeyword());
+
+#ifdef _DEBUG
+	TRACE(_T("已恢复搜索信息: %d 个匹配项, 当前索引=%d\n"),
+		(int)m_searchMatches.size(), m_currentMatchIndex);
 #endif
 
 	// ★★★ 重置滚动位置（新文档应该从头开始显示）
@@ -5278,6 +5406,11 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 	int visibleTop = m_scrollPosition;
 	int visibleBottom = m_scrollPosition + viewHeight;
 
+#ifdef _DEBUG
+	TRACE(_T("RenderVisiblePages: viewSize=(%d,%d), visibleTop=%d\n"),
+		viewWidth, viewHeight, visibleTop);
+#endif
+
 	// 创建内存DC和位图
 	CDC* pDC = m_pdfView.GetDC();
 	CDC memDC;
@@ -5314,6 +5447,12 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 			fz_rect bounds = fz_bound_page(m_ctx, page);
 			float pageWidth = bounds.x1 - bounds.x0;
 			float pageHeightF = bounds.y1 - bounds.y0;
+
+#ifdef _DEBUG
+			if (i == 0)  // 只打印第0页
+				TRACE(_T("  Page bounds: x0=%.1f, y0=%.1f, x1=%.1f, y1=%.1f\n"),
+					bounds.x0, bounds.y0, bounds.x1, bounds.y1);
+#endif
 
 			// 根据旋转角度调整
 			int rotation = GetPageRotation(i);
@@ -5390,7 +5529,92 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 				int destY = pageY - visibleTop;
 				int destX = (viewWidth - width) / 2;  // 居中显示
 
+#ifdef _DEBUG
+				TRACE(_T("  Page %d: pageY=%d, size=(%d,%d), dest=(%d,%d)\n"),
+					i, pageY, width, height, destX, destY);
+#endif
+
 				memDC.BitBlt(destX, destY, width, height, &pageDC, 0, 0, SRCCOPY);
+
+				// 绘制搜索高亮（如果有搜索结果）
+				if (!m_searchMatches.empty())
+				{
+					// 获取原始页面尺寸（未旋转）
+					float origPageWidth = bounds.x1 - bounds.x0;
+					float origPageHeight = bounds.y1 - bounds.y0;
+
+					for (size_t matchIdx = 0; matchIdx < m_searchMatches.size(); matchIdx++)
+					{
+						if (m_searchMatches[matchIdx].pageNumber != i)
+							continue;
+
+						// 将quad坐标转换为屏幕坐标
+						fz_quad quad = m_searchMatches[matchIdx].quad;
+
+						// 计算高亮矩形（在原始PDF坐标系中）
+						float minX = min(min(quad.ul.x, quad.ur.x), min(quad.ll.x, quad.lr.x));
+						float maxX = max(max(quad.ul.x, quad.ur.x), max(quad.ll.x, quad.lr.x));
+						float minY = min(min(quad.ul.y, quad.ur.y), min(quad.ll.y, quad.lr.y));
+						float maxY = max(max(quad.ul.y, quad.ur.y), max(quad.ll.y, quad.lr.y));
+
+#ifdef _DEBUG
+						TRACE(_T("  quad corners: ul=(%.1f,%.1f) ur=(%.1f,%.1f) ll=(%.1f,%.1f) lr=(%.1f,%.1f)\n"),
+							quad.ul.x, quad.ul.y, quad.ur.x, quad.ur.y,
+							quad.ll.x, quad.ll.y, quad.lr.x, quad.lr.y);
+#endif
+
+						// 转换为屏幕坐标（PDF坐标系原点在左下，屏幕坐标系原点在左上）
+						// ★★★ 修复：MuPDF返回的quad坐标是相对于页面bounds的绝对坐标，需要减去bounds.x0
+						// 且Y轴变换应使用bounds.y1（PDF坐标系的顶部）而非origPageHeight
+						int x1 = destX + (int)((minX - bounds.x0) * m_uniformScale);
+						int y1 = destY + (int)(minY * m_uniformScale);
+						int x2 = destX + (int)((maxX - bounds.x0) * m_uniformScale);
+						int y2 = destY + (int)(maxY * m_uniformScale);
+
+						CRect highlightRect(x1, y1, x2, y2);
+
+#ifdef _DEBUG
+						TRACE(_T("Page %d, Match %d: destX=%d, destY=%d, scale=%.3f, origH=%.1f\n"),
+							i, (int)matchIdx, destX, destY, m_uniformScale, origPageHeight);
+						TRACE(_T("  quad: minX=%.1f, maxX=%.1f, minY=%.1f, maxY=%.1f\n"),
+							minX, maxX, minY, maxY);
+						TRACE(_T("  rect: (%d,%d,%d,%d)\n"), x1, y1, x2, y2);
+#endif
+
+						// 选择颜色
+						COLORREF fillColor;
+						if ((int)matchIdx == m_currentMatchIndex)
+							fillColor = RGB(255, 150, 0);  // 当前匹配项用橙色
+						else
+							fillColor = RGB(255, 200, 0);  // 其他匹配项用深黄色（更明显）
+
+						// 创建临时DC用于AlphaBlend
+					CDC tempDC;
+					tempDC.CreateCompatibleDC(&memDC);
+					CBitmap tempBmp;
+					tempBmp.CreateCompatibleBitmap(&memDC, highlightRect.Width(), highlightRect.Height());
+					CBitmap* pOldTempBmp = tempDC.SelectObject(&tempBmp);
+					tempDC.FillSolidRect(0, 0, highlightRect.Width(), highlightRect.Height(), fillColor);
+
+					// 使用AlphaBlend提高不透明度
+					BLENDFUNCTION bf;
+					bf.BlendOp = AC_SRC_OVER;
+					bf.BlendFlags = 0;
+					bf.SourceConstantAlpha = ((int)matchIdx == m_currentMatchIndex) ? 200 : 180;
+					bf.AlphaFormat = 0;
+					memDC.AlphaBlend(highlightRect.left, highlightRect.top,
+						highlightRect.Width(), highlightRect.Height(),
+						&tempDC, 0, 0, highlightRect.Width(), highlightRect.Height(), bf);
+					tempDC.SelectObject(pOldTempBmp);
+
+						// 绘制边框使其更明显
+						CPen borderPen(PS_SOLID, 1, RGB(255, 140, 0));
+						CPen* pOldPen = memDC.SelectObject(&borderPen);
+						memDC.SelectStockObject(NULL_BRUSH);
+						memDC.Rectangle(highlightRect);
+						memDC.SelectObject(pOldPen);
+					}
+				}
 
 				pageDC.SelectObject(oldPageBmp);
 				DeleteObject(hBitmap);
@@ -5423,6 +5647,32 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 
 	// 设置位图到控件（控件会自动处理重绘）
 	m_pdfView.SetBitmap(m_hContinuousViewBitmap);
+
+#ifdef _DEBUG
+	CRect ctrlRect;
+	m_pdfView.GetClientRect(&ctrlRect);
+	TRACE(_T("m_pdfView control size: (%d,%d), bitmap size: (%d,%d)\n"),
+		ctrlRect.Width(), ctrlRect.Height(), viewWidth, viewHeight);
+
+	// 保存位图到文件用于调试
+	if (!m_searchMatches.empty())
+	{
+		CDC tempDC;
+		tempDC.CreateCompatibleDC(NULL);
+		HBITMAP oldBmp = (HBITMAP)tempDC.SelectObject(m_hContinuousViewBitmap);
+
+		BITMAP bmpInfo;
+		GetObject(m_hContinuousViewBitmap, sizeof(BITMAP), &bmpInfo);
+
+		CImage img;
+		img.Attach(m_hContinuousViewBitmap);
+		img.Save(_T("D:\\debug_highlight.png"));
+		img.Detach();
+
+		tempDC.SelectObject(oldBmp);
+		TRACE(_T("Saved debug bitmap to D:\\debug_highlight.png\n"));
+	}
+#endif
 
 	m_pdfView.ReleaseDC(pDC);
 
@@ -5516,4 +5766,487 @@ int CXiaoGongPDFDlg::GetPageAtPosition(int yPos)
 			return i;
 	}
 	return 0;
+}
+
+// ============================================================================
+// 搜索功能实现
+// ============================================================================
+
+// 清除搜索结果
+void CXiaoGongPDFDlg::ClearSearchResults()
+{
+	m_searchMatches.clear();
+	m_currentMatchIndex = -1;
+	m_searchKeyword.Empty();
+
+	// 刷新当前页面以移除高亮
+	if (m_doc && m_currentPage >= 0)
+	{
+		m_pdfView.Invalidate();
+	}
+}
+
+// 搜索PDF文档
+void CXiaoGongPDFDlg::SearchPDF(const CString& keyword, bool caseSensitive)
+{
+	if (!m_doc || m_totalPages <= 0 || keyword.IsEmpty())
+	{
+		MessageBox(_T("请输入搜索关键词"), _T("提示"), MB_OK | MB_ICONINFORMATION);
+		return;
+	}
+
+	// 清除之前的搜索结果
+	ClearSearchResults();
+
+	// 保存搜索参数
+	m_searchKeyword = keyword;
+	m_searchCaseSensitive = caseSensitive;
+
+	// 将CString转换为UTF-8
+	int utf8Len = WideCharToMultiByte(CP_UTF8, 0, keyword, -1, NULL, 0, NULL, NULL);
+	char* utf8Keyword = new char[utf8Len];
+	WideCharToMultiByte(CP_UTF8, 0, keyword, -1, utf8Keyword, utf8Len, NULL, NULL);
+
+	// 如果不区分大小写，转换为小写
+	char* searchKeyword = utf8Keyword;
+	if (!caseSensitive)
+	{
+		searchKeyword = new char[utf8Len];
+		strcpy(searchKeyword, utf8Keyword);
+		_strlwr_s(searchKeyword, utf8Len);  // 转换为小写
+	}
+
+	// 遍历所有页面
+	for (int i = 0; i < m_totalPages; i++)
+	{
+		fz_page* page = nullptr;
+		fz_stext_page* stext = nullptr;
+
+		fz_try(m_ctx)
+		{
+			// 加载页面
+			page = fz_load_page(m_ctx, m_doc, i);
+
+			// 提取文本
+			stext = fz_new_stext_page_from_page(m_ctx, page, nullptr);
+
+			// 搜索关键词
+			fz_quad quads[512];
+			int hit_marks[512];  // 用于接收匹配标记
+			int hit_count = fz_search_stext_page(m_ctx, stext, searchKeyword, hit_marks, quads, 512);
+
+#ifdef _DEBUG
+			if (hit_count > 0)
+			{
+				TRACE(_T("SearchPDF: 在第 %d 页找到 %d 个匹配项\n"), i, hit_count);
+			}
+#endif
+
+			// 保存匹配项
+			for (int j = 0; j < hit_count; j++)
+			{
+				SearchMatch match;
+				match.pageNumber = i;
+				match.quad = quads[j];
+				match.context = _T("");  // 暂时不提取上下文
+				m_searchMatches.push_back(match);
+
+#ifdef _DEBUG
+				TRACE(_T("  Match %d: quad=(%f,%f,%f,%f,%f,%f,%f,%f)\n"), j,
+					quads[j].ul.x, quads[j].ul.y,
+					quads[j].ur.x, quads[j].ur.y,
+					quads[j].ll.x, quads[j].ll.y,
+					quads[j].lr.x, quads[j].lr.y);
+#endif
+			}
+		}
+		fz_catch(m_ctx)
+		{
+			// 搜索出错，跳过当前页
+#ifdef _DEBUG
+			TRACE(_T("SearchPDF: 搜索第 %d 页时出错\n"), i);
+#endif
+		}
+
+		// 清理资源
+		if (stext)
+			fz_drop_stext_page(m_ctx, stext);
+		if (page)
+			fz_drop_page(m_ctx, page);
+	}
+
+	// 清理内存
+	if (!caseSensitive && searchKeyword != utf8Keyword)
+		delete[] searchKeyword;
+	delete[] utf8Keyword;
+
+	// 显示搜索结果
+	CString msg;
+	if (!m_searchMatches.empty())
+	{
+		msg.Format(_T("找到 %d 个匹配项"), (int)m_searchMatches.size());
+		m_statusBar.SetWindowText(msg);
+
+		// 跳转到第一个匹配项
+		m_currentMatchIndex = 0;
+		GoToPage(m_searchMatches[0].pageNumber);
+	}
+	else
+	{
+		MessageBox(_T("未找到匹配项"), _T("搜索结果"), MB_OK | MB_ICONINFORMATION);
+		m_statusBar.SetWindowText(_T("未找到匹配项"));
+	}
+}
+
+// 跳转到下一个匹配项
+void CXiaoGongPDFDlg::GoToNextMatch()
+{
+	if (m_searchMatches.empty())
+	{
+		MessageBox(_T("请先执行搜索"), _T("提示"), MB_OK | MB_ICONINFORMATION);
+		return;
+	}
+
+	m_currentMatchIndex = (m_currentMatchIndex + 1) % m_searchMatches.size();
+	int pageNum = m_searchMatches[m_currentMatchIndex].pageNumber;
+	fz_quad quad = m_searchMatches[m_currentMatchIndex].quad;
+
+	// 跳转到对应页面
+	GoToPage(pageNum);
+
+	// 如果是连续滚动模式，滚动到匹配项位置
+	if (m_continuousScrollMode)
+	{
+		CRect viewRect;
+		m_pdfView.GetClientRect(&viewRect);
+
+		// 计算匹配项在页面内的Y坐标范围
+		float minY = min(min(quad.ul.y, quad.ur.y), min(quad.ll.y, quad.lr.y));
+		float maxY = max(max(quad.ul.y, quad.ur.y), max(quad.ll.y, quad.lr.y));
+
+		// 转换为连续视图中的绝对Y坐标
+		int pageYPos = m_pageYPositions[pageNum];
+		int matchTop = pageYPos + (int)(minY * m_uniformScale);
+		int matchBottom = pageYPos + (int)(maxY * m_uniformScale);
+
+		// 计算当前可见区域
+		int visibleTop = m_scrollPosition;
+		int visibleBottom = m_scrollPosition + viewRect.Height();
+
+		// 只有当匹配项不完全可见时才滚动
+		int margin = 50;  // 留出一些边距
+		bool needScroll = false;
+
+		if (matchTop < visibleTop + margin)
+		{
+			// 匹配项在可见区域上方，滚动到使其在顶部可见
+			m_scrollPosition = matchTop - margin;
+			needScroll = true;
+		}
+		else if (matchBottom > visibleBottom - margin)
+		{
+			// 匹配项在可见区域下方，滚动到使其在底部可见
+			m_scrollPosition = matchBottom - viewRect.Height() + margin;
+			needScroll = true;
+		}
+
+		if (needScroll)
+		{
+			// 限制范围
+			int maxScroll = m_totalScrollHeight - viewRect.Height();
+			if (maxScroll < 0) maxScroll = 0;
+			if (m_scrollPosition < 0) m_scrollPosition = 0;
+			if (m_scrollPosition > maxScroll) m_scrollPosition = maxScroll;
+
+			UpdateScrollBar();
+			RenderVisiblePages();
+		}
+	}
+
+	// 更新状态栏
+	CString msg;
+	msg.Format(_T("匹配项 %d / %d"), m_currentMatchIndex + 1, (int)m_searchMatches.size());
+	m_statusBar.SetWindowText(msg);
+}
+
+// 跳转到上一个匹配项
+void CXiaoGongPDFDlg::GoToPrevMatch()
+{
+	if (m_searchMatches.empty())
+	{
+		MessageBox(_T("请先执行搜索"), _T("提示"), MB_OK | MB_ICONINFORMATION);
+		return;
+	}
+
+	m_currentMatchIndex = (m_currentMatchIndex - 1 + m_searchMatches.size()) % m_searchMatches.size();
+	int pageNum = m_searchMatches[m_currentMatchIndex].pageNumber;
+	fz_quad quad = m_searchMatches[m_currentMatchIndex].quad;
+
+	// 跳转到对应页面
+	GoToPage(pageNum);
+
+	// 如果是连续滚动模式，滚动到匹配项位置
+	if (m_continuousScrollMode)
+	{
+		CRect viewRect;
+		m_pdfView.GetClientRect(&viewRect);
+
+		// 计算匹配项在页面内的Y坐标范围
+		float minY = min(min(quad.ul.y, quad.ur.y), min(quad.ll.y, quad.lr.y));
+		float maxY = max(max(quad.ul.y, quad.ur.y), max(quad.ll.y, quad.lr.y));
+
+		// 转换为连续视图中的绝对Y坐标
+		int pageYPos = m_pageYPositions[pageNum];
+		int matchTop = pageYPos + (int)(minY * m_uniformScale);
+		int matchBottom = pageYPos + (int)(maxY * m_uniformScale);
+
+		// 计算当前可见区域
+		int visibleTop = m_scrollPosition;
+		int visibleBottom = m_scrollPosition + viewRect.Height();
+
+		// 只有当匹配项不完全可见时才滚动
+		int margin = 50;  // 留出一些边距
+		bool needScroll = false;
+
+		if (matchTop < visibleTop + margin)
+		{
+			// 匹配项在可见区域上方，滚动到使其在顶部可见
+			m_scrollPosition = matchTop - margin;
+			needScroll = true;
+		}
+		else if (matchBottom > visibleBottom - margin)
+		{
+			// 匹配项在可见区域下方，滚动到使其在底部可见
+			m_scrollPosition = matchBottom - viewRect.Height() + margin;
+			needScroll = true;
+		}
+
+		if (needScroll)
+		{
+			// 限制范围
+			int maxScroll = m_totalScrollHeight - viewRect.Height();
+			if (maxScroll < 0) maxScroll = 0;
+			if (m_scrollPosition < 0) m_scrollPosition = 0;
+			if (m_scrollPosition > maxScroll) m_scrollPosition = maxScroll;
+
+			UpdateScrollBar();
+			RenderVisiblePages();
+		}
+	}
+
+	// 更新状态栏
+	CString msg;
+	msg.Format(_T("匹配项 %d / %d"), m_currentMatchIndex + 1, (int)m_searchMatches.size());
+	m_statusBar.SetWindowText(msg);
+}
+
+// 查找按钮点击事件
+void CXiaoGongPDFDlg::OnBtnFind()
+{
+	CString keyword;
+	m_editSearch.GetWindowText(keyword);
+
+	// 默认区分大小写（MuPDF搜索API的限制）
+	bool caseSensitive = true;
+
+	SearchPDF(keyword, caseSensitive);
+}
+
+// 下一个匹配按钮点击事件
+void CXiaoGongPDFDlg::OnBtnNextMatch()
+{
+	GoToNextMatch();
+}
+
+// 上一个匹配按钮点击事件
+void CXiaoGongPDFDlg::OnBtnPrevMatch()
+{
+	GoToPrevMatch();
+}
+
+// 将PDF坐标转换为位图坐标
+CRect CXiaoGongPDFDlg::TransformQuadToScreen(const fz_quad& quad, int pageNumber)
+{
+	if (!m_currentPageObj)
+		return CRect(0, 0, 0, 0);
+
+	// 获取页面大小
+	fz_rect bounds = fz_bound_page(m_ctx, m_currentPageObj);
+	float origPageWidth = bounds.x1 - bounds.x0;
+	float origPageHeight = bounds.y1 - bounds.y0;
+
+	// 获取旋转角度
+	int rotation = GetPageRotation(pageNumber);
+
+	// 计算有效页面尺寸（考虑旋转）
+	float effectivePageWidth = origPageWidth;
+	float effectivePageHeight = origPageHeight;
+	if (rotation == 90 || rotation == 270)
+	{
+		effectivePageWidth = origPageHeight;
+		effectivePageHeight = origPageWidth;
+	}
+
+	// 获取视图尺寸
+	CRect viewRect;
+	m_pdfView.GetClientRect(&viewRect);
+	int viewWidth = viewRect.Width();
+	int viewHeight = viewRect.Height();
+
+	// 计算缩放比例（与RenderPage中的逻辑一致）
+	float scale;
+	switch (m_zoomMode)
+	{
+	case ZOOM_FIT_WIDTH:
+		scale = viewWidth / effectivePageWidth * 0.95f;
+		break;
+	case ZOOM_FIT_PAGE:
+	{
+		float scaleX = viewWidth / effectivePageWidth;
+		float scaleY = viewHeight / effectivePageHeight;
+		scale = min(scaleX, scaleY) * 0.95f;
+	}
+	break;
+	case ZOOM_CUSTOM:
+		scale = m_customZoom;
+		break;
+	default:
+	{
+		float scaleX = viewWidth / effectivePageWidth;
+		float scaleY = viewHeight / effectivePageHeight;
+		scale = min(scaleX, scaleY) * 0.95f;
+	}
+	}
+
+	// 计算渲染后的页面尺寸（使用原始尺寸，因为MuPDF总是按原始方向渲染）
+	int width = (int)(origPageWidth * scale);
+	int height = (int)(origPageHeight * scale);
+
+	// ★★★ 考虑旋转后的实际尺寸
+	int actualWidth = width;
+	int actualHeight = height;
+	if (rotation == 90 || rotation == 270)
+	{
+		actualWidth = height;
+		actualHeight = width;
+	}
+
+	// ★★★ 检查是否需要背景（与RenderPage中的逻辑一致）
+	bool needsBackground = (m_zoomMode == ZOOM_CUSTOM && (m_panOffset.x != 0 || m_panOffset.y != 0));
+
+	// 计算偏移量
+	int offsetX, offsetY;
+	if (needsBackground)
+	{
+		// ★★★ 有平移偏移时，使用视图大小的位图，页面在其中居中并偏移
+		offsetX = (viewWidth - actualWidth) / 2 + m_panOffset.x;
+		offsetY = (viewHeight - actualHeight) / 2 + m_panOffset.y;
+	}
+	else
+	{
+		// ★★★ 无平移偏移时，使用页面大小的位图，坐标从(0,0)开始
+		offsetX = 0;
+		offsetY = 0;
+	}
+
+	// 转换quad坐标（PDF坐标系 -> 位图坐标系）
+	// PDF坐标原点在左下，Y轴向上；位图坐标原点在左上，Y轴向下
+	// 使用quad的四个角来确定矩形范围
+	float minX = min(min(quad.ul.x, quad.ur.x), min(quad.ll.x, quad.lr.x));
+	float maxX = max(max(quad.ul.x, quad.ur.x), max(quad.ll.x, quad.lr.x));
+	float minY = min(min(quad.ul.y, quad.ur.y), min(quad.ll.y, quad.lr.y));
+	float maxY = max(max(quad.ul.y, quad.ur.y), max(quad.ll.y, quad.lr.y));
+
+	// ★★★ 转换到位图坐标（在原始页面坐标系中）
+	// ★★★ 修复：MuPDF返回的quad坐标是相对于页面bounds的绝对坐标，需要减去bounds.x0
+	// 且Y轴变换应使用bounds.y1（PDF坐标系的顶部）而非origPageHeight
+	int x1 = (int)((minX - bounds.x0) * scale);
+	int y1 = (int)(minY * scale);
+	int x2 = (int)((maxX - bounds.x0) * scale);
+	int y2 = (int)(maxY * scale);
+
+	// ★★★ TODO: 如果有旋转，需要对坐标应用旋转变换
+	// 目前暂不支持旋转页面的搜索高亮，需要实现坐标旋转变换
+
+	// ★★★ 添加偏移量
+	x1 += offsetX;
+	y1 += offsetY;
+	x2 += offsetX;
+	y2 += offsetY;
+
+#ifdef _DEBUG
+	TRACE(_T("TransformQuadToScreen: quad=(%f,%f,%f,%f) -> rect=(%d,%d,%d,%d), offset=(%d,%d), scale=%.2f\n"),
+		minX, minY, maxX, maxY, x1, y1, x2, y2, offsetX, offsetY, scale);
+#endif
+
+	return CRect(x1, y1, x2, y2);
+}
+
+// 高亮显示搜索匹配项
+void CXiaoGongPDFDlg::HighlightSearchMatches(CDC* pDC, int pageNumber)
+{
+	if (m_searchMatches.empty() || !pDC)
+		return;
+
+#ifdef _DEBUG
+	TRACE(_T("HighlightSearchMatches: pageNumber=%d, matchCount=%d\n"), pageNumber, (int)m_searchMatches.size());
+#endif
+
+	// 遍历所有匹配项
+	for (size_t i = 0; i < m_searchMatches.size(); i++)
+	{
+		if (m_searchMatches[i].pageNumber != pageNumber)
+			continue;
+
+		// 将PDF坐标转换为位图坐标
+		CRect highlightRect = TransformQuadToScreen(m_searchMatches[i].quad, pageNumber);
+
+#ifdef _DEBUG
+		TRACE(_T("Match %d: rect=(%d,%d,%d,%d)\n"), (int)i,
+			highlightRect.left, highlightRect.top, highlightRect.right, highlightRect.bottom);
+#endif
+
+		// 确保矩形有效且在合理范围内
+		if (highlightRect.IsRectEmpty() || highlightRect.Width() <= 0 || highlightRect.Height() <= 0)
+			continue;
+
+		// 选择颜色
+		COLORREF fillColor;
+		if ((int)i == m_currentMatchIndex)
+		{
+			// 当前匹配项用亮橙色
+			fillColor = RGB(255, 150, 0);
+		}
+		else
+		{
+			// 其他匹配项用亮黄色
+			fillColor = RGB(255, 200, 0);
+		}
+
+		// 创建临时DC用于AlphaBlend
+	CDC tempDC;
+	tempDC.CreateCompatibleDC(pDC);
+	CBitmap tempBmp;
+	tempBmp.CreateCompatibleBitmap(pDC, highlightRect.Width(), highlightRect.Height());
+	CBitmap* pOldTempBmp = tempDC.SelectObject(&tempBmp);
+	tempDC.FillSolidRect(0, 0, highlightRect.Width(), highlightRect.Height(), fillColor);
+
+	// 使用AlphaBlend提高不透明度
+	BLENDFUNCTION bf;
+	bf.BlendOp = AC_SRC_OVER;
+	bf.BlendFlags = 0;
+	bf.SourceConstantAlpha = ((int)i == m_currentMatchIndex) ? 200 : 180;
+	bf.AlphaFormat = 0;
+	pDC->AlphaBlend(highlightRect.left, highlightRect.top,
+		highlightRect.Width(), highlightRect.Height(),
+		&tempDC, 0, 0, highlightRect.Width(), highlightRect.Height(), bf);
+	tempDC.SelectObject(pOldTempBmp);
+
+		// 绘制边框使其更明显
+		CPen borderPen(PS_SOLID, 1, RGB(255, 140, 0));  // 橙色边框
+		CPen* pOldPen = pDC->SelectObject(&borderPen);
+		pDC->SelectStockObject(NULL_BRUSH);
+		pDC->Rectangle(highlightRect);
+		pDC->SelectObject(pOldPen);
+	}
 }

@@ -18,6 +18,7 @@ CPDFDocument::CPDFDocument(fz_context* ctx)
 	, m_thumbnailPicWidth(0)
 	, m_thumbnailPicHeight(0)
 	, m_hCurrentBitmap(NULL)
+	, m_currentMatchIndex(-1)
 {
 }
 

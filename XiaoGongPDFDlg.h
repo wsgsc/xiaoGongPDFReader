@@ -23,6 +23,9 @@
 // 前向声明
 class CXiaoGongPDFDlg;
 
+// 搜索匹配项结构（从 SearchTypes.h 包含）
+#include "SearchTypes.h"
+
 // ★★★ 自定义PDF预览控件（支持滚动条消息）
 class CPDFViewCtrl : public CStatic
 {
@@ -128,6 +131,12 @@ private:
 	CButton m_checkThumbnail;         // 缩略图复选框
 	CEdit m_editCurrent;
 	CStatic m_statusBar;        // 状态栏
+
+	// 搜索相关控件
+	CEdit m_editSearch;              // 搜索输入框
+	CCustomButton m_btnFind;         // 查找按钮
+	CCustomButton m_btnPrevMatch;    // 上一个匹配按钮
+	CCustomButton m_btnNextMatch;    // 下一个匹配按钮
 	CFont m_buttonFont;      // 按钮字体
 	CFont m_labelFont;       // 标签字体
 	
@@ -253,6 +262,12 @@ private:
 	std::map<int, HBITMAP> m_continuousPageBitmaps;  // 连续滚动模式下的页面位图缓存
 	HBITMAP m_hContinuousViewBitmap;         // ★★★ 当前连续滚动视图的位图（用于处理重绘）
 
+	// 搜索相关成员变量
+	std::vector<SearchMatch> m_searchMatches;  // 所有搜索匹配项
+	int m_currentMatchIndex;                    // 当前匹配项索引 (-1表示无匹配)
+	CString m_searchKeyword;                    // 当前搜索关键词
+	bool m_searchCaseSensitive;                 // 是否区分大小写
+
 // 实现
 protected:
 	HICON m_hIcon;
@@ -284,6 +299,7 @@ protected:
     afx_msg void OnBtnFirst();
     afx_msg void OnBtnLast();
     afx_msg void OnEnChangeEditCurrent();
+    afx_msg void OnEnChangeEditSearch();  // 搜索框文本变化事件
     afx_msg void OnEditCurrentKillFocus();
     afx_msg void OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags); // 添加键盘事件处理
     afx_msg void OnBtnFullscreen();  // 全屏按钮点击事件
@@ -368,6 +384,17 @@ protected:
     afx_msg void OnVScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar);  // 垂直滚动条消息处理
     void UpdateScrollBar();  // 更新滚动条
     int GetPageAtPosition(int yPos);  // 获取指定位置的页面索引
+
+    // 搜索相关函数
+    void SearchPDF(const CString& keyword, bool caseSensitive);  // 搜索PDF文档
+    void GoToNextMatch();  // 跳转到下一个匹配项
+    void GoToPrevMatch();  // 跳转到上一个匹配项
+    void ClearSearchResults();  // 清除搜索结果
+    void HighlightSearchMatches(CDC* pDC, int pageNumber);  // 高亮显示搜索匹配项
+    CRect TransformQuadToScreen(const fz_quad& quad, int pageNumber);  // 将PDF坐标转换为屏幕坐标
+    afx_msg void OnBtnFind();  // 查找按钮点击事件
+    afx_msg void OnBtnNextMatch();  // 下一个匹配按钮点击事件
+    afx_msg void OnBtnPrevMatch();  // 上一个匹配按钮点击事件
 
 public:
 	void RenderPDF(const char* filename);
