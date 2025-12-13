@@ -4133,6 +4133,10 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 	m_totalPages = newDoc->GetTotalPages();
 	m_currentPage = newDoc->GetCurrentPage();
 
+	// ★★★ 立即清空页面位置缓存，防止在CalculatePagePositions()调用前触发RenderVisiblePages()导致越界
+	m_pageYPositions.clear();
+	m_pageHeights.clear();
+
 #ifdef _DEBUG
 	TRACE(_T("m_doc: %p, 总页数: %d, 当前页: %d\n"), m_doc, m_totalPages, m_currentPage);
 #endif
@@ -5394,8 +5398,19 @@ void CXiaoGongPDFDlg::CalculatePagePositions()
 // 渲染可见的页面
 void CXiaoGongPDFDlg::RenderVisiblePages()
 {
+	// 添加更严格的边界检查，防止切换PDF时vector越界
 	if (!m_doc || m_totalPages <= 0 || m_pageYPositions.empty())
 		return;
+
+	// 确保vector大小与总页数匹配，避免切换文档时的时序问题导致越界
+	if ((int)m_pageYPositions.size() < m_totalPages || (int)m_pageHeights.size() < m_totalPages)
+	{
+#ifdef _DEBUG
+		TRACE(_T("RenderVisiblePages: vector大小不匹配，跳过渲染。m_totalPages=%d, m_pageYPositions.size()=%d, m_pageHeights.size()=%d\n"),
+			m_totalPages, (int)m_pageYPositions.size(), (int)m_pageHeights.size());
+#endif
+		return;
+	}
 
 	CRect viewRect;
 	m_pdfView.GetClientRect(&viewRect);
@@ -5760,6 +5775,10 @@ void CXiaoGongPDFDlg::UpdateScrollBar()
 // 获取指定位置的页面索引
 int CXiaoGongPDFDlg::GetPageAtPosition(int yPos)
 {
+	// 添加边界检查，防止vector越界
+	if ((int)m_pageYPositions.size() < m_totalPages || (int)m_pageHeights.size() < m_totalPages)
+		return 0;
+
 	for (int i = 0; i < m_totalPages; i++)
 	{
 		if (yPos >= m_pageYPositions[i] && yPos < m_pageYPositions[i] + m_pageHeights[i])
@@ -5917,6 +5936,10 @@ void CXiaoGongPDFDlg::GoToNextMatch()
 	// 如果是连续滚动模式，滚动到匹配项位置
 	if (m_continuousScrollMode)
 	{
+		// 添加边界检查，防止vector越界
+		if (pageNum < 0 || pageNum >= (int)m_pageYPositions.size() || pageNum >= (int)m_pageHeights.size())
+			return;
+
 		CRect viewRect;
 		m_pdfView.GetClientRect(&viewRect);
 
@@ -5988,6 +6011,10 @@ void CXiaoGongPDFDlg::GoToPrevMatch()
 	// 如果是连续滚动模式，滚动到匹配项位置
 	if (m_continuousScrollMode)
 	{
+		// 添加边界检查，防止vector越界
+		if (pageNum < 0 || pageNum >= (int)m_pageYPositions.size() || pageNum >= (int)m_pageHeights.size())
+			return;
+
 		CRect viewRect;
 		m_pdfView.GetClientRect(&viewRect);
 
