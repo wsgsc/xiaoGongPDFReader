@@ -3,6 +3,7 @@
 #include <commctrl.h>
 #include "XiaoGongPDF.h"
 #include "XiaoGongPDFDlg.h"
+#include "PDFEditDialog.h"
 #include "afxdialogex.h"
 #include <mupdf/fitz.h>
 #include <vector>
@@ -274,6 +275,7 @@ void CXiaoGongPDFDlg::DoDataExchange(CDataExchange* pDX)
 	DDX_Control(pDX, IDC_BTN_FULLSCREEN, m_btnFullscreen);
 	DDX_Control(pDX, IDC_BTN_ROTATE_LEFT, m_btnRotateLeft);
 	DDX_Control(pDX, IDC_BTN_ROTATE_RIGHT, m_btnRotateRight);
+	DDX_Control(pDX, IDC_BTN_EDIT, m_btnEdit);
 	DDX_Control(pDX, IDC_CHECK_THUMBNAIL, m_checkThumbnail);
 	DDX_Control(pDX, IDC_EDIT_CURRENT, m_editCurrent);
 	DDX_Control(pDX, IDC_STATUS_BAR, m_statusBar);
@@ -309,6 +311,7 @@ BEGIN_MESSAGE_MAP(CXiaoGongPDFDlg, CDialogEx)
 	ON_BN_CLICKED(IDC_BTN_FULLSCREEN, &CXiaoGongPDFDlg::OnBtnFullscreen)
 	ON_BN_CLICKED(IDC_BTN_ROTATE_LEFT, &CXiaoGongPDFDlg::OnBtnRotateLeft)
 	ON_BN_CLICKED(IDC_BTN_ROTATE_RIGHT, &CXiaoGongPDFDlg::OnBtnRotateRight)
+	ON_BN_CLICKED(IDC_BTN_EDIT, &CXiaoGongPDFDlg::OnBtnEdit)
 	ON_BN_CLICKED(IDC_CHECK_THUMBNAIL, &CXiaoGongPDFDlg::OnCheckThumbnail)
 	ON_EN_CHANGE(IDC_EDIT_CURRENT, &CXiaoGongPDFDlg::OnEnChangeEditCurrent)
 	ON_EN_KILLFOCUS(IDC_EDIT_CURRENT, &CXiaoGongPDFDlg::OnEditCurrentKillFocus)
@@ -636,6 +639,9 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	// 旋转按钮
 	m_btnRotateLeft.SetColors(RGB(70, 130, 180), RGB(100, 149, 237), RGB(65, 105, 225));
 	m_btnRotateRight.SetColors(RGB(70, 130, 180), RGB(100, 149, 237), RGB(65, 105, 225));
+
+	// 编辑按钮
+	m_btnEdit.SetColors(RGB(70, 130, 180), RGB(100, 149, 237), RGB(65, 105, 225));
 
 	// ===== 颜色配置结束 =====
 	return TRUE;  // 除非将焦点设置到控件，否则返回 TRUE
@@ -2077,13 +2083,14 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		const int BTN_WIDTH_LAST = 50;   // "末页"按钮宽度
 		const int BTN_WIDTH_FULLSCREEN = 50;  // "全屏"按钮宽度
 		const int BTN_WIDTH_ROTATE = 35;  // "旋转"按钮宽度
+		const int BTN_WIDTH_EDIT = 50;   // "编辑"按钮宽度
 		const int EDIT_WIDTH = 40;       // 编辑框宽度
 		const int CONTROL_SPACING = 8;  // 控件间距
 
-		// 计算所有控件的总宽度（6个按钮 + 编辑框 + 6个间距）
+		// 计算所有控件的总宽度（7个按钮 + 编辑框 + 7个间距）
 		int controlsTotalWidth = BTN_WIDTH_FIRST + BTN_WIDTH_LAST + BTN_WIDTH_FULLSCREEN +
-			EDIT_WIDTH + BTN_WIDTH_ROTATE * 2 +
-			CONTROL_SPACING * 6;
+			EDIT_WIDTH + BTN_WIDTH_ROTATE * 2 + BTN_WIDTH_EDIT +
+			CONTROL_SPACING * 7;
 		
 		// 计算工具栏的可用宽度
 		int availableWidth = cx - MARGIN * 4;
@@ -2118,13 +2125,14 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		int widthFullscreen = max(MIN_BTN_WIDTH, (int)(BTN_WIDTH_FULLSCREEN * scaleFactor));
 		int widthRotateLeft = max(MIN_BTN_WIDTH, (int)(BTN_WIDTH_ROTATE * scaleFactor));
 		int widthRotateRight = max(MIN_BTN_WIDTH, (int)(BTN_WIDTH_ROTATE * scaleFactor));
+		int widthEditBtn = max(MIN_BTN_WIDTH, (int)(BTN_WIDTH_EDIT * scaleFactor));
 		int widthEdit = max(MIN_EDIT_WIDTH, (int)(EDIT_WIDTH * scaleFactor));
 		int spacing = max(MIN_SPACING, (int)(CONTROL_SPACING * scaleFactor));
 
 		// 检查窗口总宽度，在极窄状态下，确保工具栏按钮间距不会太大
 		int actualTotalWidth = widthFirst + widthLast + widthFullscreen + widthEdit +
-			widthRotateLeft + widthRotateRight +
-			spacing * 6;
+			widthRotateLeft + widthRotateRight + widthEditBtn +
+			spacing * 7;
 
 		// 如果总宽度超过可用空间，重新调整
 		if (actualTotalWidth > availableWidth)
@@ -2132,8 +2140,8 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 			// 优先压缩间距
 			spacing = MIN_SPACING;
 			actualTotalWidth = widthFirst + widthLast + widthFullscreen + widthEdit +
-				widthRotateLeft + widthRotateRight +
-				spacing * 6;
+				widthRotateLeft + widthRotateRight + widthEditBtn +
+				spacing * 7;
 
 			// 如果仍然太宽，则等比压缩所有控件
 			if (actualTotalWidth > availableWidth)
@@ -2144,6 +2152,7 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 				widthFullscreen = max(MIN_BTN_WIDTH, (int)(widthFullscreen * adjustScale));
 				widthRotateLeft = max(MIN_BTN_WIDTH, (int)(widthRotateLeft * adjustScale));
 				widthRotateRight = max(MIN_BTN_WIDTH, (int)(widthRotateRight * adjustScale));
+				widthEditBtn = max(MIN_BTN_WIDTH, (int)(widthEditBtn * adjustScale));
 				widthEdit = max(MIN_EDIT_WIDTH, (int)(widthEdit * adjustScale));
 			}
 		}
@@ -2170,7 +2179,7 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		x += widthRotateLeft + spacing;
 		m_btnRotateRight.MoveWindow(x, btnY, widthRotateRight, BTN_HEIGHT);
 
-		// 缩略图复选框（在右旋按钮后面）
+		// 缩略图复选框
 		x += widthRotateRight + spacing;
 		const int CHECK_WIDTH = 100;  // 复选框宽度
 		m_checkThumbnail.MoveWindow(x, btnY, CHECK_WIDTH, BTN_HEIGHT);
@@ -2190,6 +2199,10 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 
 		x += BTN_NAV_WIDTH + spacing;
 		m_btnNextMatch.MoveWindow(x, btnY, BTN_NAV_WIDTH, BTN_HEIGHT);
+
+		// 编辑按钮（在下一个匹配按钮后面，工具栏最右侧）
+		x += BTN_NAV_WIDTH + spacing;
+		m_btnEdit.MoveWindow(x, btnY, widthEditBtn, BTN_HEIGHT);
 
 		// 根据缩略图面板可见性调整布局
 		int pdfX, pdfWidth;
@@ -2512,6 +2525,49 @@ void CXiaoGongPDFDlg::OnBtnRotateRight()
 
 	// 向右旋转（顺时针90度）
 	RotatePage(90);
+}
+
+// 编辑按钮点击事件
+void CXiaoGongPDFDlg::OnBtnEdit()
+{
+#ifdef _DEBUG
+	TRACE(_T("OnBtnEdit()\n"));
+#endif
+
+	// 检查是否有打开的文档
+	if (!m_doc || m_totalPages <= 0)
+	{
+		MessageBox(_T("请先打开PDF文件"), _T("提示"), MB_OK | MB_ICONINFORMATION);
+		return;
+	}
+
+	// 获取当前活动文档
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (!pDoc)
+	{
+		MessageBox(_T("无法获取当前文档"), _T("错误"), MB_OK | MB_ICONERROR);
+		return;
+	}
+
+	// 创建编辑对话框
+	CPDFEditDialog editDlg(m_ctx, m_doc, pDoc->GetFilePath(), this);
+
+	// 显示对话框
+	if (editDlg.DoModal() == IDOK)
+	{
+		// 编辑成功，获取保存的文件路径
+		CString newFilePath = editDlg.GetSavedFilePath();
+		if (!newFilePath.IsEmpty())
+		{
+			// 在新标签页中打开编辑后的文件
+			OpenPDFInNewTab(newFilePath);
+
+			// 提示用户
+			CString msg;
+			msg.Format(_T("PDF已保存为：\n%s\n\n已在新标签页中打开编辑后的文件。"), newFilePath);
+			MessageBox(msg, _T("编辑成功"), MB_OK | MB_ICONINFORMATION);
+		}
+	}
 }
 
 // 缩略图复选框点击事件
@@ -2907,6 +2963,7 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_btnFullscreen.SetFont(&m_buttonFont);
 	m_btnRotateLeft.SetFont(&m_buttonFont);
 	m_btnRotateRight.SetFont(&m_buttonFont);
+	m_btnEdit.SetFont(&m_buttonFont);
 
 	// 设置编辑框的字体和外观
 	m_editCurrent.SetFont(&m_buttonFont);
@@ -2917,6 +2974,7 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_btnFullscreen.SetWindowText(_T("全屏"));
 	m_btnRotateLeft.SetWindowText(_T("左旋"));
 	m_btnRotateRight.SetWindowText(_T("右旋"));
+	m_btnEdit.SetWindowText(_T("编辑"));
 	m_btnPrevMatch.SetWindowText(_T("上一个"));
 	m_btnNextMatch.SetWindowText(_T("下一个"));
 
@@ -2929,6 +2987,7 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_btnFullscreen.EnableWindow(TRUE);
 	m_btnRotateLeft.EnableWindow(TRUE);
 	m_btnRotateRight.EnableWindow(TRUE);
+	m_btnEdit.EnableWindow(TRUE);
 	m_editCurrent.EnableWindow(TRUE);
 }
 
@@ -3175,6 +3234,9 @@ void CXiaoGongPDFDlg::EnterFullscreen()
 	if (m_btnRotateRight.GetSafeHwnd())
 		m_btnRotateRight.ShowWindow(SW_HIDE);
 
+	if (m_btnEdit.GetSafeHwnd())
+		m_btnEdit.ShowWindow(SW_HIDE);
+
 	if (m_editCurrent.GetSafeHwnd())
 		m_editCurrent.ShowWindow(SW_HIDE);
 
@@ -3238,6 +3300,9 @@ void CXiaoGongPDFDlg::ExitFullscreen()
 
 	if (m_btnRotateRight.GetSafeHwnd())
 		m_btnRotateRight.ShowWindow(SW_SHOW);
+
+	if (m_btnEdit.GetSafeHwnd())
+		m_btnEdit.ShowWindow(SW_SHOW);
 
 	if (m_editCurrent.GetSafeHwnd())
 		m_editCurrent.ShowWindow(SW_SHOW);
@@ -4006,7 +4071,7 @@ bool CXiaoGongPDFDlg::OpenPDFInNewTab(const CString& filePath)
 		{
 			// 截断并添加省略号
 			tabTitle = tabTitle.Left(MAX_TAB_LENGTH - 3) + _T("...");
-#ifdef _DEBUG
+#ifdef _DEBUG 
 			TRACE(_T("文件名过长，已截断: [%s] -> [%s]\n"), fullFileName, tabTitle);
 #endif
 		}

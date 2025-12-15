@@ -128,6 +128,7 @@ private:
 	CCustomButton m_btnFullscreen;    // 全屏按钮
 	CCustomButton m_btnRotateLeft;    // 向左旋转按钮
 	CCustomButton m_btnRotateRight;   // 向右旋转按钮
+	CCustomButton m_btnEdit;          // 编辑按钮
 	CButton m_checkThumbnail;         // 缩略图复选框
 	CEdit m_editCurrent;
 	CStatic m_statusBar;        // 状态栏
@@ -308,6 +309,9 @@ protected:
     afx_msg void OnBtnRotateLeft();   // 向左旋转按钮点击事件
     afx_msg void OnBtnRotateRight();  // 向右旋转按钮点击事件
     void RotatePage(int degrees);     // 旋转当前页面
+
+    // 编辑相关函数
+    afx_msg void OnBtnEdit();         // 编辑按钮点击事件
 
     // 缩略图复选框相关
     afx_msg void OnCheckThumbnail();  // 缩略图复选框点击事件

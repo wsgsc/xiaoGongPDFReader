@@ -44,6 +44,16 @@
 #define IDC_BTN_PREV_MATCH              1042
 #define IDC_BTN_NEXT_MATCH              1043
 #define IDC_CHECK_CASE_SENSITIVE        1044
+#define IDC_BTN_EDIT                    1045
+#define IDD_PDF_EDIT_DIALOG             105
+#define IDC_EDIT_THUMBNAIL_LIST         1046
+#define IDC_BTN_EDIT_SAVE               1047
+#define IDC_BTN_EDIT_CANCEL             1048
+#define IDC_BTN_EDIT_RESET              1049
+#define IDC_BTN_EDIT_UNDO               1050
+#define IDC_BTN_EDIT_DELETE             1051
+#define IDC_STATIC_EDIT_INFO            1052
+#define IDC_BTN_EDIT_ADD_PDF            1053
 #define ID_32771                        32771
 #define ID_32772                        32772
 #define ID_MENU_OPEN                    32773
@@ -67,9 +77,9 @@
 // 
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
-#define _APS_NEXT_RESOURCE_VALUE        132
+#define _APS_NEXT_RESOURCE_VALUE        133
 #define _APS_NEXT_COMMAND_VALUE         32789
-#define _APS_NEXT_CONTROL_VALUE         1045
+#define _APS_NEXT_CONTROL_VALUE         1054
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif
