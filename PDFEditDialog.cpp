@@ -86,8 +86,8 @@ BOOL CPDFEditDialog::OnInitDialog()
 
 void CPDFEditDialog::InitializeThumbnailList()
 {
-	// 设置列表控件样式为大图标
-	m_thumbnailList.ModifyStyle(0, LVS_ICON | LVS_SHOWSELALWAYS | LVS_SINGLESEL);
+	// 设置列表控件样式为大图标，支持多选
+	m_thumbnailList.ModifyStyle(LVS_SINGLESEL, LVS_ICON | LVS_SHOWSELALWAYS);
 
 	// 创建ImageList（220宽，根据常见PDF比例设置合适高度）
 	// 使用较大的高度（180）以适应大多数PDF页面比例，避免黑色填充
@@ -276,7 +276,7 @@ void CPDFEditDialog::RefreshThumbnailList()
 
 		// 添加到列表控件
 		CString pageText;
-		pageText.Format(_T("第 %d 页"), m_pages[i].originalIndex + 1);
+		pageText.Format(_T("第 %d 页"), displayIndex + 1);
 		m_thumbnailList.InsertItem(displayIndex, pageText, displayIndex);
 
 		displayIndex++;
@@ -712,9 +712,23 @@ void CPDFEditDialog::OnLButtonUp(UINT nFlags, CPoint point)
 
 // ========== 右键删除功能 ==========
 
-// 删除指定页面
-void CPDFEditDialog::DeletePage(int displayIndex)
+// 删除选中的页面
+void CPDFEditDialog::DeleteSelectedPages()
 {
+	// 获取所有选中项的索引
+	std::vector<int> selectedIndices;
+	POSITION pos = m_thumbnailList.GetFirstSelectedItemPosition();
+	while (pos) {
+		int nItem = m_thumbnailList.GetNextSelectedItem(pos);
+		selectedIndices.push_back(nItem);
+	}
+
+	// 如果没有选中项
+	if (selectedIndices.empty()) {
+		MessageBox(_T("请先选择要删除的页面！"), _T("提示"), MB_OK | MB_ICONWARNING);
+		return;
+	}
+
 	// 计算当前未删除的页面数
 	int activePages = 0;
 	for (const auto& page : m_pages) {
@@ -722,33 +736,44 @@ void CPDFEditDialog::DeletePage(int displayIndex)
 			activePages++;
 	}
 
-	// 至少保留一页
-	if (activePages <= 1) {
-		MessageBox(_T("至少需要保留一页，无法删除！"), _T("提示"), MB_OK | MB_ICONWARNING);
+	// 检查删除后是否至少保留一页
+	if (activePages - selectedIndices.size() < 1) {
+		MessageBox(_T("至少需要保留一页，无法删除所有页面！"), _T("提示"), MB_OK | MB_ICONWARNING);
 		return;
 	}
 
-	// 找到实际的页面索引
-	int actualIndex = -1;
-	int currentDisplayIndex = 0;
+	// 确认删除
+	CString confirmMsg;
+	if (selectedIndices.size() == 1) {
+		confirmMsg = _T("确定要删除选中的 1 页吗？");
+	} else {
+		confirmMsg.Format(_T("确定要删除选中的 %d 页吗？"), selectedIndices.size());
+	}
 
-	for (size_t i = 0; i < m_pages.size(); i++) {
-		if (m_pages[i].isDeleted)
-			continue;
+	if (MessageBox(confirmMsg, _T("确认删除"), MB_YESNO | MB_ICONQUESTION) != IDYES)
+		return;
 
-		if (currentDisplayIndex == displayIndex) {
-			actualIndex = static_cast<int>(i);
-			break;
+	// 将displayIndex转换为实际的页面索引并标记为删除
+	for (int displayIndex : selectedIndices) {
+		int actualIndex = -1;
+		int currentDisplayIndex = 0;
+
+		for (size_t i = 0; i < m_pages.size(); i++) {
+			if (m_pages[i].isDeleted)
+				continue;
+
+			if (currentDisplayIndex == displayIndex) {
+				actualIndex = static_cast<int>(i);
+				break;
+			}
+
+			currentDisplayIndex++;
 		}
 
-		currentDisplayIndex++;
+		if (actualIndex >= 0 && actualIndex < (int)m_pages.size()) {
+			m_pages[actualIndex].isDeleted = true;
+		}
 	}
-
-	if (actualIndex < 0 || actualIndex >= (int)m_pages.size())
-		return;
-
-	// 标记为删除
-	m_pages[actualIndex].isDeleted = true;
 
 	// 刷新列表
 	RefreshThumbnailList();
@@ -764,13 +789,36 @@ void CPDFEditDialog::OnNMRClick(NMHDR* pNMHDR, LRESULT* pResult)
 	*pResult = 0;
 
 	if (pNMListView->iItem >= 0) {
-		// 选中该项
-		m_thumbnailList.SetItemState(pNMListView->iItem, LVIS_SELECTED, LVIS_SELECTED);
+		// 检查右键点击的项是否已经被选中
+		UINT state = m_thumbnailList.GetItemState(pNMListView->iItem, LVIS_SELECTED);
+		bool isAlreadySelected = (state & LVIS_SELECTED) != 0;
+
+		// 如果右键点击的项未被选中，则清除其他选中项，只选中当前项
+		if (!isAlreadySelected) {
+			// 清除所有选中
+			POSITION pos = m_thumbnailList.GetFirstSelectedItemPosition();
+			while (pos) {
+				int nItem = m_thumbnailList.GetNextSelectedItem(pos);
+				m_thumbnailList.SetItemState(nItem, 0, LVIS_SELECTED);
+			}
+			// 选中当前项
+			m_thumbnailList.SetItemState(pNMListView->iItem, LVIS_SELECTED, LVIS_SELECTED);
+		}
+
+		// 统计选中的项数
+		int selectedCount = m_thumbnailList.GetSelectedCount();
 
 		// 创建右键菜单
 		CMenu menu;
 		menu.CreatePopupMenu();
-		menu.AppendMenu(MF_STRING, 1, _T("删除此页"));
+
+		CString menuText;
+		if (selectedCount > 1) {
+			menuText.Format(_T("删除选中的 %d 页"), selectedCount);
+		} else {
+			menuText = _T("删除此页");
+		}
+		menu.AppendMenu(MF_STRING, 1, menuText);
 
 		// 显示菜单
 		CPoint pt = pNMListView->ptAction;
@@ -780,7 +828,7 @@ void CPDFEditDialog::OnNMRClick(NMHDR* pNMHDR, LRESULT* pResult)
 
 		// 处理菜单命令
 		if (cmd == 1) {
-			DeletePage(pNMListView->iItem);
+			DeleteSelectedPages();
 		}
 	}
 }

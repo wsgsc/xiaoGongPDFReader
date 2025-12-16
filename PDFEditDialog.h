@@ -129,7 +129,7 @@ private:
 	void HandleAutoScroll(CPoint point);
 
 	// 删除功能
-	void DeletePage(int displayIndex);
+	void DeleteSelectedPages();
 
 	// 动画系统
 	void StartReflowAnimation();
