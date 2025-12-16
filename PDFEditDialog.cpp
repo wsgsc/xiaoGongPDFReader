@@ -901,6 +901,191 @@ void CPDFEditDialog::DeleteSelectedPages()
 	UpdateInfoBar();
 }
 
+// ========== 旋转功能 ==========
+
+// 旋转位图
+HBITMAP CPDFEditDialog::RotateBitmap(HBITMAP hBitmap, int angle)
+{
+	if (!hBitmap || (angle % 90 != 0))
+		return nullptr;
+
+	// 规范化角度到0-360范围
+	angle = angle % 360;
+	if (angle < 0) angle += 360;
+
+	// 如果角度是0，直接返回原图的副本
+	if (angle == 0) {
+		return (HBITMAP)::CopyImage(hBitmap, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
+	}
+
+	// 获取原始位图信息
+	BITMAP bm;
+	::GetObject(hBitmap, sizeof(BITMAP), &bm);
+
+	int srcWidth = bm.bmWidth;
+	int srcHeight = bm.bmHeight;
+
+	// 固定输出尺寸为220x180（与ImageList一致）
+	const int FIXED_WIDTH = 220;
+	const int FIXED_HEIGHT = 180;
+
+	// 创建源DC和目标DC
+	HDC hdcScreen = ::GetDC(NULL);
+	HDC hdcSrc = ::CreateCompatibleDC(hdcScreen);
+	HDC hdcDst = ::CreateCompatibleDC(hdcScreen);
+
+	// 创建固定尺寸的目标位图
+	BITMAPINFO bmi = { 0 };
+	bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+	bmi.bmiHeader.biWidth = FIXED_WIDTH;
+	bmi.bmiHeader.biHeight = -FIXED_HEIGHT;  // 负值表示自顶向下
+	bmi.bmiHeader.biPlanes = 1;
+	bmi.bmiHeader.biBitCount = 24;
+	bmi.bmiHeader.biCompression = BI_RGB;
+
+	void* pDstBits = nullptr;
+	HBITMAP hDstBitmap = ::CreateDIBSection(hdcScreen, &bmi, DIB_RGB_COLORS, &pDstBits, nullptr, 0);
+
+	if (!hDstBitmap) {
+		::DeleteDC(hdcSrc);
+		::DeleteDC(hdcDst);
+		::ReleaseDC(NULL, hdcScreen);
+		return nullptr;
+	}
+
+	// 选择位图到DC
+	HBITMAP hOldSrc = (HBITMAP)::SelectObject(hdcSrc, hBitmap);
+	HBITMAP hOldDst = (HBITMAP)::SelectObject(hdcDst, hDstBitmap);
+
+	// 设置白色背景
+	RECT rc = { 0, 0, FIXED_WIDTH, FIXED_HEIGHT };
+	HBRUSH hBrush = ::CreateSolidBrush(RGB(255, 255, 255));
+	::FillRect(hdcDst, &rc, hBrush);
+	::DeleteObject(hBrush);
+
+	// 计算旋转后的内容尺寸
+	int rotatedWidth = (angle == 90 || angle == 270) ? srcHeight : srcWidth;
+	int rotatedHeight = (angle == 90 || angle == 270) ? srcWidth : srcHeight;
+
+	// 计算居中偏移（旋转后居中显示）
+	int offsetX = (FIXED_WIDTH - rotatedWidth) / 2;
+	int offsetY = (FIXED_HEIGHT - rotatedHeight) / 2;
+
+	// 根据角度进行旋转绘制
+	int oldMode = ::SetGraphicsMode(hdcDst, GM_ADVANCED);
+
+	XFORM xform;
+	switch (angle) {
+	case 90:
+		// 向右旋转90度
+		xform.eM11 = 0.0f;
+		xform.eM12 = 1.0f;
+		xform.eM21 = -1.0f;
+		xform.eM22 = 0.0f;
+		xform.eDx = (float)(offsetX + rotatedWidth);
+		xform.eDy = (float)offsetY;
+		break;
+
+	case 180:
+		// 旋转180度
+		xform.eM11 = -1.0f;
+		xform.eM12 = 0.0f;
+		xform.eM21 = 0.0f;
+		xform.eM22 = -1.0f;
+		xform.eDx = (float)(offsetX + rotatedWidth);
+		xform.eDy = (float)(offsetY + rotatedHeight);
+		break;
+
+	case 270:
+		// 向右旋转270度
+		xform.eM11 = 0.0f;
+		xform.eM12 = -1.0f;
+		xform.eM21 = 1.0f;
+		xform.eM22 = 0.0f;
+		xform.eDx = (float)offsetX;
+		xform.eDy = (float)(offsetY + rotatedHeight);
+		break;
+
+	default:
+		xform.eM11 = 1.0f;
+		xform.eM12 = 0.0f;
+		xform.eM21 = 0.0f;
+		xform.eM22 = 1.0f;
+		xform.eDx = (float)offsetX;
+		xform.eDy = (float)offsetY;
+		break;
+	}
+
+	::SetWorldTransform(hdcDst, &xform);
+	::BitBlt(hdcDst, 0, 0, srcWidth, srcHeight, hdcSrc, 0, 0, SRCCOPY);
+
+	// 恢复
+	::SetGraphicsMode(hdcDst, oldMode);
+	::SelectObject(hdcSrc, hOldSrc);
+	::SelectObject(hdcDst, hOldDst);
+	::DeleteDC(hdcSrc);
+	::DeleteDC(hdcDst);
+	::ReleaseDC(NULL, hdcScreen);
+
+	return hDstBitmap;
+}
+
+// 旋转选中的页面
+void CPDFEditDialog::RotateSelectedPages(int angle)
+{
+	// 获取所有选中项的索引
+	std::vector<int> selectedIndices;
+	POSITION pos = m_thumbnailList.GetFirstSelectedItemPosition();
+	while (pos) {
+		int nItem = m_thumbnailList.GetNextSelectedItem(pos);
+		selectedIndices.push_back(nItem);
+	}
+
+	// 如果没有选中项
+	if (selectedIndices.empty()) {
+		MessageBox(_T("请先选择要旋转的页面！"), _T("提示"), MB_OK | MB_ICONWARNING);
+		return;
+	}
+
+	// 旋转每个选中的页面
+	for (int displayIndex : selectedIndices) {
+		// 找到实际的页面索引
+		int actualIndex = -1;
+		int currentDisplayIndex = 0;
+
+		for (size_t i = 0; i < m_pages.size(); i++) {
+			if (m_pages[i].isDeleted)
+				continue;
+
+			if (currentDisplayIndex == displayIndex) {
+				actualIndex = static_cast<int>(i);
+				break;
+			}
+
+			currentDisplayIndex++;
+		}
+
+		if (actualIndex >= 0 && actualIndex < (int)m_pages.size()) {
+			// 更新旋转角度
+			m_pages[actualIndex].rotationAngle = (m_pages[actualIndex].rotationAngle + angle) % 360;
+			if (m_pages[actualIndex].rotationAngle < 0)
+				m_pages[actualIndex].rotationAngle += 360;
+
+			// 旋转缩略图
+			if (m_pages[actualIndex].hThumbnail) {
+				HBITMAP hRotated = RotateBitmap(m_pages[actualIndex].hThumbnail, angle);
+				if (hRotated) {
+					::DeleteObject(m_pages[actualIndex].hThumbnail);
+					m_pages[actualIndex].hThumbnail = hRotated;
+				}
+			}
+		}
+	}
+
+	// 刷新列表显示
+	RefreshThumbnailList();
+}
+
 // 右键菜单
 void CPDFEditDialog::OnNMRClick(NMHDR* pNMHDR, LRESULT* pResult)
 {
@@ -931,6 +1116,16 @@ void CPDFEditDialog::OnNMRClick(NMHDR* pNMHDR, LRESULT* pResult)
 		CMenu menu;
 		menu.CreatePopupMenu();
 
+		// 旋转子菜单
+		CMenu rotateMenu;
+		rotateMenu.CreatePopupMenu();
+		rotateMenu.AppendMenu(MF_STRING, 2, _T("向右旋转 90°"));
+		rotateMenu.AppendMenu(MF_STRING, 3, _T("向右旋转 180°"));
+		rotateMenu.AppendMenu(MF_STRING, 4, _T("向右旋转 270°"));
+
+		// 添加主菜单项
+		menu.AppendMenu(MF_POPUP, (UINT_PTR)rotateMenu.m_hMenu, _T("旋转"));
+
 		CString menuText;
 		if (selectedCount > 1) {
 			menuText.Format(_T("删除选中的 %d 页"), selectedCount);
@@ -949,6 +1144,18 @@ void CPDFEditDialog::OnNMRClick(NMHDR* pNMHDR, LRESULT* pResult)
 		if (cmd == 1) {
 			DeleteSelectedPages();
 		}
+		else if (cmd == 2) {
+			RotateSelectedPages(90);
+		}
+		else if (cmd == 3) {
+			RotateSelectedPages(180);
+		}
+		else if (cmd == 4) {
+			RotateSelectedPages(270);
+		}
+
+		// 确保子菜单不被销毁前保持有效
+		rotateMenu.Detach();
 	}
 }
 
@@ -1068,9 +1275,18 @@ bool CPDFEditDialog::SaveToNewFile(const CString& newFilePath)
 					sizeMsg.Format(_T("  图片尺寸：%d x %d\n"), imgWidth, imgHeight);
 					OutputDebugString(sizeMsg);
 
-					// 创建合适的页面尺寸（基于图片比例）
+					// 考虑旋转角度调整尺寸判断
+					int effectiveWidth = imgWidth;
+					int effectiveHeight = imgHeight;
+					if (page.rotationAngle == 90 || page.rotationAngle == 270) {
+						// 90度或270度旋转时，宽高互换
+						effectiveWidth = imgHeight;
+						effectiveHeight = imgWidth;
+					}
+
+					// 创建合适的页面尺寸（基于图片比例和旋转）
 					fz_rect mediabox;
-					if (imgWidth > imgHeight) {
+					if (effectiveWidth > effectiveHeight) {
 						mediabox = fz_make_rect(0, 0, 842, 595);  // A4横向
 					}
 					else {
@@ -1078,8 +1294,8 @@ bool CPDFEditDialog::SaveToNewFile(const CString& newFilePath)
 					}
 
 					OutputDebugString(_T("  创建PDF页面...\n"));
-					// 创建页面对象
-					pdf_obj* page_obj = pdf_add_page(m_ctx, newPdf, mediabox, 0, nullptr, nullptr);
+					// 创建页面对象，设置旋转属性
+					pdf_obj* page_obj = pdf_add_page(m_ctx, newPdf, mediabox, page.rotationAngle, nullptr, nullptr);
 
 					// 将页面插入到文档中（在末尾）
 					pdf_insert_page(m_ctx, newPdf, -1, page_obj);
@@ -1183,6 +1399,26 @@ bool CPDFEditDialog::SaveToNewFile(const CString& newFilePath)
 
 				// 从源文档复制页面到新文档
 				pdf_graft_page(m_ctx, newPdf, -1, sourcePdf, page.sourcePageIndex);
+
+				// 应用旋转（如果有）
+				if (page.rotationAngle != 0) {
+					int newPageIndex = pdf_count_pages(m_ctx, newPdf) - 1;
+					pdf_obj* pageObj = pdf_lookup_page_obj(m_ctx, newPdf, newPageIndex);
+					if (pageObj) {
+						// 获取原始旋转角度
+						int originalRotate = pdf_to_int(m_ctx, pdf_dict_get(m_ctx, pageObj, PDF_NAME(Rotate)));
+						// 计算新的旋转角度
+						int newRotate = (originalRotate + page.rotationAngle) % 360;
+						// 设置旋转
+						pdf_dict_put_int(m_ctx, pageObj, PDF_NAME(Rotate), newRotate);
+
+						CString rotateMsg;
+						rotateMsg.Format(_T("  应用旋转：%d° (原始: %d°, 新: %d°)\n"),
+							page.rotationAngle, originalRotate, newRotate);
+						OutputDebugString(rotateMsg);
+					}
+				}
+
 				OutputDebugString(_T("  PDF页面处理完成\n"));
 			}
 		}

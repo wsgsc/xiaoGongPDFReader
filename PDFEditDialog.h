@@ -16,9 +16,10 @@ struct PageInfo {
 	CRect bounds;           // 当前位置（用于动画）
 	CString sourceFile;     // 源PDF文件路径（用于多文档合并）
 	int sourcePageIndex;    // 在源文件中的页码
+	int rotationAngle;      // 旋转角度（0, 90, 180, 270）
 
-	PageInfo() : originalIndex(0), isDeleted(false), hThumbnail(nullptr), displayIndex(0), sourcePageIndex(0) {}
-	PageInfo(int index) : originalIndex(index), isDeleted(false), hThumbnail(nullptr), displayIndex(index), sourcePageIndex(index) {}
+	PageInfo() : originalIndex(0), isDeleted(false), hThumbnail(nullptr), displayIndex(0), sourcePageIndex(0), rotationAngle(0) {}
+	PageInfo(int index) : originalIndex(index), isDeleted(false), hThumbnail(nullptr), displayIndex(index), sourcePageIndex(index), rotationAngle(0) {}
 };
 
 // 动画状态结构
@@ -132,6 +133,10 @@ private:
 
 	// 删除功能
 	void DeleteSelectedPages();
+
+	// 旋转功能
+	void RotateSelectedPages(int angle);
+	HBITMAP RotateBitmap(HBITMAP hBitmap, int angle);
 
 	// 动画系统
 	void StartReflowAnimation();
