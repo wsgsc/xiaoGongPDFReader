@@ -80,6 +80,8 @@ private:
 	CPoint m_dragStartPoint;        // 拖拽起始点（用于防误触）
 	CPoint m_clickOffset;           // 鼠标点击相对缩略图的偏移
 	CImageList* m_pDragImage;       // 拖拽图像
+	PageInfo m_draggedPage;         // 被拖拽的页面信息（临时保存）
+	int m_draggedPageOriginalPos;   // 被拖拽页面的原始位置（在m_pages中的索引）
 
 	// 动画系统
 	AnimState m_animState;          // 动画状态

@@ -41,6 +41,7 @@ CPDFEditDialog::CPDFEditDialog(fz_context* ctx, fz_document* doc, const CString&
 	, m_lastDropIndex(-1)
 	, m_pDragImage(nullptr)
 	, m_autoScrollSpeed(0)
+	, m_draggedPageOriginalPos(-1)
 {
 	if (m_doc)
 	{
@@ -68,9 +69,7 @@ BOOL CPDFEditDialog::OnInitDialog()
 	CDialogEx::OnInitDialog();
 
 	// 设置对话框标题
-	CString title;
-	title.Format(_T("编辑PDF - %s"), m_filePath);
-	SetWindowText(title);
+	SetWindowText(_T("PDF编辑工具箱"));
 
 	// 初始化缩略图列表
 	InitializeThumbnailList();
@@ -427,53 +426,62 @@ void CPDFEditDialog::UpdateInsertIndex(CPoint point)
 {
 	int newIndex = CalculateInsertIndex(point);
 
-	// 限制索引范围
+	// 限制索引范围（被拖拽的页面已经被移除，所以总数少1）
 	int activeCount = 0;
 	for (const auto& page : m_pages) {
 		if (!page.isDeleted) activeCount++;
 	}
 	newIndex = max(0, min(newIndex, activeCount));
 
-	// 只在索引变化时触发重排
-	if (newIndex != m_lastDropIndex && newIndex != m_dragIndex) {
+	// 只在索引变化时更新
+	if (newIndex != m_lastDropIndex) {
 		m_dropIndex = newIndex;
 		m_lastDropIndex = newIndex;
 
-		// 找到实际的页面索引
-		int actualDragIndex = -1;
-		int actualDropIndex = -1;
-		int displayIndex = 0;
+		// 临时插入到新位置并刷新显示
+		// 先移除之前临时插入的页面（如果存在）
+		// 然后在新位置插入
 
-		for (size_t i = 0; i < m_pages.size(); i++) {
-			if (m_pages[i].isDeleted) continue;
+		// 计算实际插入位置（考虑isDeleted的页面）
+		int insertActualPos = 0;
+		int displayIdx = 0;
 
-			if (displayIndex == m_dragIndex)
-				actualDragIndex = static_cast<int>(i);
-			if (displayIndex == m_dropIndex)
-				actualDropIndex = static_cast<int>(i);
-
-			displayIndex++;
-		}
-
-		if (actualDragIndex >= 0 && actualDropIndex >= 0) {
-			// 执行插入式重排
-			PageInfo draggedPage = m_pages[actualDragIndex];
-			m_pages.erase(m_pages.begin() + actualDragIndex);
-
-			int insertPos = actualDropIndex;
-			if (actualDragIndex < actualDropIndex) {
-				insertPos--;
+		if (m_dropIndex == 0) {
+			// 插入到最前面，找到第一个未删除的位置
+			for (size_t i = 0; i < m_pages.size(); i++) {
+				if (!m_pages[i].isDeleted) {
+					insertActualPos = static_cast<int>(i);
+					break;
+				}
 			}
+			if (insertActualPos == 0 && m_pages.empty()) {
+				insertActualPos = 0;
+			}
+		} else {
+			// 插入到第m_dropIndex个位置
+			for (size_t i = 0; i < m_pages.size(); i++) {
+				if (m_pages[i].isDeleted) continue;
 
-			m_pages.insert(m_pages.begin() + insertPos, draggedPage);
-
-			// 刷新显示
-			RefreshThumbnailList();
-
-			// 重新选中被拖动的项
-			m_thumbnailList.SetItemState(m_dropIndex, LVIS_SELECTED, LVIS_SELECTED);
-			m_dragIndex = m_dropIndex;
+				displayIdx++;
+				if (displayIdx == m_dropIndex) {
+					insertActualPos = static_cast<int>(i) + 1;
+					break;
+				}
+			}
+			// 如果到达末尾
+			if (displayIdx < m_dropIndex) {
+				insertActualPos = static_cast<int>(m_pages.size());
+			}
 		}
+
+		// 插入被拖拽的页面到新位置
+		m_pages.insert(m_pages.begin() + insertActualPos, m_draggedPage);
+
+		// 刷新列表显示临时效果
+		RefreshThumbnailList();
+
+		// 移除刚才临时插入的页面（保持m_pages不变，为下次移动做准备）
+		m_pages.erase(m_pages.begin() + insertActualPos);
 	}
 }
 
@@ -510,7 +518,6 @@ void CPDFEditDialog::BeginDragOperation()
 {
 	m_isDragging = true;
 	m_potentialDrag = false;
-	m_lastDropIndex = m_dragIndex;
 
 	// 创建拖拽图像
 	CPoint pt(0, 0);
@@ -518,6 +525,44 @@ void CPDFEditDialog::BeginDragOperation()
 	if (!m_pDragImage)
 		return;
 
+	// 找到被拖拽页面在m_pages中的实际索引（只计算未删除的页面）
+	m_draggedPageOriginalPos = -1;
+	int currentDisplayIndex = 0;
+	for (size_t i = 0; i < m_pages.size(); i++) {
+		if (m_pages[i].isDeleted)
+			continue;
+
+		if (currentDisplayIndex == m_dragIndex) {
+			m_draggedPageOriginalPos = static_cast<int>(i);
+			break;
+		}
+		currentDisplayIndex++;
+	}
+
+	if (m_draggedPageOriginalPos < 0)
+		return;
+
+	// 保存被拖拽的页面信息（深拷贝HBITMAP）
+	m_draggedPage = m_pages[m_draggedPageOriginalPos];
+	HBITMAP oldBitmap = m_draggedPage.hThumbnail;
+	if (oldBitmap) {
+		m_draggedPage.hThumbnail = (HBITMAP)::CopyImage(oldBitmap, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
+	}
+
+	// 从m_pages中移除被拖拽的页面（erase会自动清理，但HBITMAP需要手动删除）
+	if (oldBitmap) {
+		::DeleteObject(oldBitmap);
+	}
+	m_pages.erase(m_pages.begin() + m_draggedPageOriginalPos);
+
+	// 刷新列表，显示移除后的效果（其他页面补位）
+	RefreshThumbnailList();
+
+	// 初始化drop索引为当前拖拽位置
+	m_dropIndex = m_dragIndex;
+	m_lastDropIndex = m_dragIndex;
+
+	// 开始拖拽图像
 	m_pDragImage->BeginDrag(0, CPoint(0, 0));
 	m_pDragImage->DragEnter(GetDesktopWindow(), m_lastMousePoint);
 	m_pDragImage->DragShowNolock(TRUE);
@@ -545,11 +590,51 @@ void CPDFEditDialog::EndDragOperation()
 	KillTimer(TIMER_AUTO_SCROLL);
 	KillTimer(TIMER_ANIMATION);
 
-	// 重置状态
+	// 正式插入被拖拽的页面到最终位置
+	// 计算实际插入位置（考虑isDeleted的页面）
+	int insertActualPos = 0;
+	int displayIdx = 0;
+
+	if (m_dropIndex == 0) {
+		// 插入到最前面
+		for (size_t i = 0; i < m_pages.size(); i++) {
+			if (!m_pages[i].isDeleted) {
+				insertActualPos = static_cast<int>(i);
+				break;
+			}
+		}
+		if (m_pages.empty()) {
+			insertActualPos = 0;
+		}
+	} else {
+		// 插入到第m_dropIndex个位置
+		for (size_t i = 0; i < m_pages.size(); i++) {
+			if (m_pages[i].isDeleted) continue;
+
+			displayIdx++;
+			if (displayIdx == m_dropIndex) {
+				insertActualPos = static_cast<int>(i) + 1;
+				break;
+			}
+		}
+		// 如果到达末尾
+		if (displayIdx < m_dropIndex) {
+			insertActualPos = static_cast<int>(m_pages.size());
+		}
+	}
+
+	// 正式插入到最终位置
+	m_pages.insert(m_pages.begin() + insertActualPos, m_draggedPage);
+
+	// 刷新列表显示最终结果
+	RefreshThumbnailList();
+
+	// 清理拖拽状态
 	m_dragIndex = -1;
 	m_dropIndex = -1;
 	m_lastDropIndex = -1;
 	m_potentialDrag = false;
+	m_draggedPageOriginalPos = -1;
 
 	// 更新信息栏
 	UpdateInfoBar();
@@ -621,14 +706,48 @@ void CPDFEditDialog::OnBeginDrag(NMHDR* pNMHDR, LRESULT* pResult)
 	if (m_dragIndex < 0)
 		return;
 
-	// 初始化拖拽状态
-	m_lastDropIndex = m_dragIndex;
-
 	// 创建拖拽图像
 	CPoint pt(0, 0);
 	m_pDragImage = m_thumbnailList.CreateDragImage(m_dragIndex, &pt);
 	if (!m_pDragImage)
 		return;
+
+	// 找到被拖拽页面在m_pages中的实际索引（只计算未删除的页面）
+	m_draggedPageOriginalPos = -1;
+	int currentDisplayIndex = 0;
+	for (size_t i = 0; i < m_pages.size(); i++) {
+		if (m_pages[i].isDeleted)
+			continue;
+
+		if (currentDisplayIndex == m_dragIndex) {
+			m_draggedPageOriginalPos = static_cast<int>(i);
+			break;
+		}
+		currentDisplayIndex++;
+	}
+
+	if (m_draggedPageOriginalPos < 0)
+		return;
+
+	// 保存被拖拽的页面信息（深拷贝HBITMAP）
+	m_draggedPage = m_pages[m_draggedPageOriginalPos];
+	HBITMAP oldBitmap = m_draggedPage.hThumbnail;
+	if (oldBitmap) {
+		m_draggedPage.hThumbnail = (HBITMAP)::CopyImage(oldBitmap, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
+	}
+
+	// 从m_pages中移除被拖拽的页面（erase会自动清理，但HBITMAP需要手动删除）
+	if (oldBitmap) {
+		::DeleteObject(oldBitmap);
+	}
+	m_pages.erase(m_pages.begin() + m_draggedPageOriginalPos);
+
+	// 刷新列表，显示移除后的效果（其他页面补位）
+	RefreshThumbnailList();
+
+	// 初始化drop索引为当前拖拽位置
+	m_dropIndex = m_dragIndex;
+	m_lastDropIndex = m_dragIndex;
 
 	m_isDragging = true;
 
