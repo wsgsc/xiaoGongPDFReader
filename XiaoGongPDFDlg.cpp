@@ -4163,6 +4163,10 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 			// 保存当前页面状态
 			oldDoc->SaveCurrentPageZoomState();
 			oldDoc->SetCurrentPage(m_currentPage);
+
+			// ★★★ 保存文档级别的缩放状态（每个PDF文档有自己的缩放比例）
+			oldDoc->SetZoom(m_customZoom, m_zoomMode);
+
 			oldDoc->SetCurrentBitmap(m_hCurrentBitmap);
 			m_hCurrentBitmap = NULL;  // 转移所有权给文档对象
 
@@ -4180,9 +4184,16 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 			m_editSearch.GetWindowText(searchKeyword);
 			oldDoc->SetSearchKeyword(searchKeyword);
 
+			// ★★★ 保存滚动位置到文档对象
+			oldDoc->SetScrollPosition(m_scrollPosition);
+
+			// ★★★ 保存旋转状态到文档对象（使用swap避免浅拷贝）
+			oldDoc->GetPageRotations().swap(m_pageRotations);
+
 #ifdef _DEBUG
 			TRACE(_T("已保存缩略图缓存到文档对象，尺寸: %d x %d\n"),
 				m_thumbnailPicWidth, m_thumbnailPicHeight);
+			TRACE(_T("已保存滚动位置: %d\n"), m_scrollPosition);
 #endif
 		}
 	}
@@ -4197,11 +4208,10 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 	TRACE(_T("新文档文件名: %s\n"), newDoc->GetFileName());
 #endif
 
-	// ★★★ 清空旧文档的旋转和缩放状态（每个文档应该有独立的状态）
-	m_pageRotations.clear();
+	// ★★★ 清空旧文档的缩放状态（每个文档应该有独立的状态）
 	m_pageZoomStates.clear();
 
-	// ★★★ 重置缩放和平移状态为默认值
+	// ★★★ 重置缩放和平移状态为默认值（稍后会从新文档恢复）
 	m_zoomMode = ZOOM_FIT_PAGE;
 	m_customZoom = 1.0f;
 	m_panOffset = CPoint(0, 0);
@@ -4239,17 +4249,22 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 		(int)m_thumbnailCache.size(), m_thumbnailPicWidth, m_thumbnailPicHeight);
 #endif
 
-	// ★★★ 恢复页面缩放状态（先恢复到文档对象，再同步到对话框）
-	newDoc->RestorePageZoomState(m_currentPage);
-	// 从文档对象中读取恢复后的缩放状态
+	// ★★★ 恢复页面旋转状态（使用swap避免浅拷贝）
+	m_pageRotations.swap(newDoc->GetPageRotations());
+
+	// ★★★ 恢复文档级别的缩放状态（每个PDF文档有自己的缩放比例）
+	m_zoom = newDoc->GetZoom();
 	m_zoomMode = newDoc->GetZoomMode();
 	m_customZoom = newDoc->GetCustomZoom();
-	m_panOffset = newDoc->GetPanOffset();
-	m_canDrag = newDoc->GetCanDrag();
+
+	// ★★★ 在连续滚动模式下，重置平移位置（连续滚动不使用拖拽平移）
+	m_panOffset = CPoint(0, 0);
+	m_canDrag = false;
 
 #ifdef _DEBUG
-	TRACE(_T("恢复缩放状态: mode=%d, customZoom=%.2f, panOffset=(%d,%d)\n"),
-		m_zoomMode, m_customZoom, m_panOffset.x, m_panOffset.y);
+	TRACE(_T("恢复旋转状态，旋转信息数量: %d\n"), (int)m_pageRotations.size());
+	TRACE(_T("恢复文档缩放状态: zoom=%.2f, mode=%d, customZoom=%.2f\n"),
+		m_zoom, m_zoomMode, m_customZoom);
 #endif
 
 	// 更新窗口标题
@@ -4281,8 +4296,12 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 		(int)m_searchMatches.size(), m_currentMatchIndex);
 #endif
 
-	// ★★★ 重置滚动位置（新文档应该从头开始显示）
-	m_scrollPosition = 0;
+	// ★★★ 恢复滚动位置（保持用户之前的浏览位置）
+	m_scrollPosition = newDoc->GetScrollPosition();
+
+#ifdef _DEBUG
+	TRACE(_T("已恢复滚动位置: %d\n"), m_scrollPosition);
+#endif
 
 	// ★★★ 连续滚动模式：重新计算页面位置并渲染可见页面
 	CalculatePagePositions();

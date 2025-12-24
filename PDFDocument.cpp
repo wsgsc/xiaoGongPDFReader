@@ -19,6 +19,7 @@ CPDFDocument::CPDFDocument(fz_context* ctx)
 	, m_thumbnailPicHeight(0)
 	, m_hCurrentBitmap(NULL)
 	, m_currentMatchIndex(-1)
+	, m_scrollPosition(0)
 {
 }
 
@@ -101,6 +102,7 @@ bool CPDFDocument::OpenDocument(const char* filename)
 		m_zoom = 1.0f;
 		m_panOffset = CPoint(0, 0);
 		m_canDrag = false;
+		m_scrollPosition = 0;
 		return true;
 	}
 
@@ -177,6 +179,7 @@ void CPDFDocument::CloseDocument()
 	m_canDrag = false;
 	m_pageRotations.clear();
 	m_pageZoomStates.clear();
+	m_scrollPosition = 0;
 
 #ifdef _DEBUG
 	TRACE(_T("CloseDocument() 完成\n"));

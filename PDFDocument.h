@@ -90,6 +90,7 @@ public:
 	// 旋转操作
 	int GetPageRotation(int pageNumber);
 	void SetPageRotation(int pageNumber, int rotation);
+	std::map<int, int>& GetPageRotations() { return m_pageRotations; }
 
 	// 页面状态管理
 	void SaveCurrentPageZoomState();
@@ -102,6 +103,10 @@ public:
 	void ResetPanOffset() { m_panOffset = CPoint(0, 0); }
 	bool GetCanDrag() const { return m_canDrag; }
 	void SetCanDrag(bool canDrag) { m_canDrag = canDrag; }
+
+	// 滚动位置
+	int GetScrollPosition() const { return m_scrollPosition; }
+	void SetScrollPosition(int pos) { m_scrollPosition = pos; }
 
 
 	// 缩略图管理
@@ -185,4 +190,7 @@ private:
 	std::vector<SearchMatch> m_searchMatches;
 	int m_currentMatchIndex;
 	CString m_searchKeyword;
+
+	// 滚动位置
+	int m_scrollPosition;
 };
