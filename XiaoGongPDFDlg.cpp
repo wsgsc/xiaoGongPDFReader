@@ -4660,14 +4660,22 @@ void CXiaoGongPDFDlg::OnLButtonDown(UINT nFlags, CPoint point)
 
 	if (pdfRect.PtInRect(point))
 	{
-		// ★★★ 检查是否点击在滚动条区域
-		CPoint clientPoint = point;
-		clientPoint.Offset(-pdfRect.left, -pdfRect.top);  // 转换为PDF视图的客户区坐标
+		// ★★★ 将对话框客户区坐标转换为PDF视图客户区坐标（修复拖拽偏移问题）
+		CPoint pdfViewPoint = point;
+		pdfViewPoint.Offset(-pdfRect.left, -pdfRect.top);
+
+#ifdef _DEBUG
+		TRACE(_T("OnLButtonDown: point=(%d,%d), pdfRect=(%d,%d,%d,%d), pdfViewPoint=(%d,%d)\n"),
+			point.x, point.y, pdfRect.left, pdfRect.top, pdfRect.right, pdfRect.bottom,
+			pdfViewPoint.x, pdfViewPoint.y);
+#endif
+
+		// 检查是否点击在滚动条区域
 		CRect pdfClientRect;
 		m_pdfView.GetClientRect(&pdfClientRect);
 		int scrollBarWidth = GetSystemMetrics(SM_CXVSCROLL);
 
-		if (clientPoint.x >= pdfClientRect.right - scrollBarWidth)
+		if (pdfViewPoint.x >= pdfClientRect.right - scrollBarWidth)
 		{
 			// 在连续滚动模式下，手动处理滚动条拖拽
 			if (m_continuousScrollMode)
@@ -4684,9 +4692,78 @@ void CXiaoGongPDFDlg::OnLButtonDown(UINT nFlags, CPoint point)
 			}
 		}
 
-		// ★★★ 修改判断条件：只要页面被放大（渲染尺寸 > 视图尺寸），就允许拖动
-		// 不再限制只有 ZOOM_CUSTOM 模式才能拖动
-		if (m_doc != nullptr && m_currentPageObj != nullptr)
+		// ★★★ 在连续滚动模式下，支持自由拖拽（当页面放大后超出视图时）
+		if (m_continuousScrollMode && m_doc != nullptr && m_totalPages > 0)
+		{
+			// 获取视图尺寸
+			CRect viewRect;
+			m_pdfView.GetClientRect(&viewRect);
+			int viewWidth = viewRect.Width() - 40;  // 减去边距
+			int viewHeight = viewRect.Height();
+
+			// 在连续滚动模式下，判断是否需要拖拽
+			// 通过检查任意页面的渲染尺寸是否超出视图
+			bool needDrag = false;
+
+			{
+				CSingleLock lock(&m_renderLock, TRUE);
+				// 检查第一页作为参考
+				fz_page* page = nullptr;
+				fz_try(m_ctx)
+				{
+					page = fz_load_page(m_ctx, m_doc, 0);
+					if (page)
+					{
+						fz_rect bounds = fz_bound_page(m_ctx, page);
+						float pageWidth = bounds.x1 - bounds.x0;
+						float pageHeight = bounds.y1 - bounds.y0;
+						// 使用连续滚动模式的统一缩放比例
+						float renderWidth = pageWidth * m_uniformScale;
+						float renderHeight = pageHeight * m_uniformScale;
+
+						// ★★★ 修复：添加容差（10像素）避免小数误差，且只在明显超出时启用拖拽
+						// 同时检查当前是否已有平移偏移，如果没有偏移则更严格判断
+						const int DRAG_TOLERANCE = 10;
+						bool widthExceeds = (renderWidth > viewWidth + DRAG_TOLERANCE);
+						bool heightExceeds = (renderHeight > viewHeight + DRAG_TOLERANCE);
+
+						// 只有在页面明显超出视图，或者已经有平移偏移时才启用拖拽
+						if (widthExceeds || heightExceeds)
+						{
+							needDrag = true;
+						}
+						else if (m_panOffset.x != 0 || m_panOffset.y != 0)
+						{
+							// 如果已经有偏移（之前缩放过），允许拖拽以恢复位置
+							needDrag = true;
+						}
+
+						fz_drop_page(m_ctx, page);
+					}
+				}
+				fz_catch(m_ctx)
+				{
+					if (page)
+						fz_drop_page(m_ctx, page);
+				}
+			}
+
+			if (needDrag)
+			{
+				m_canDrag = true;
+				m_isDragging = true;
+				m_lastMousePos = pdfViewPoint;  // ★★★ 保存PDF视图客户区坐标
+				SetCapture();
+				SetCursor(m_hHandCursorGrab);
+
+#ifdef _DEBUG
+				TRACE(_T("连续滚动模式拖拽开始: m_lastMousePos=(%d,%d), m_panOffset=(%d,%d)\n"),
+					m_lastMousePos.x, m_lastMousePos.y, m_panOffset.x, m_panOffset.y);
+#endif
+			}
+		}
+		// ★★★ 分页模式下的拖拽判断
+		else if (!m_continuousScrollMode && m_doc != nullptr && m_currentPageObj != nullptr)
 		{
 			// 获取视图尺寸
 			CRect viewRect;
@@ -4841,9 +4918,14 @@ void CXiaoGongPDFDlg::OnLButtonDown(UINT nFlags, CPoint point)
 			}
 
 			m_isDragging = true;
-			m_lastMousePos = point;
+			m_lastMousePos = pdfViewPoint;  // ★★★ 保存PDF视图客户区坐标
 			SetCapture();  // 捕获鼠标
 			SetCursor(m_hHandCursorGrab);
+
+#ifdef _DEBUG
+			TRACE(_T("分页模式拖拽开始: m_lastMousePos=(%d,%d), m_panOffset=(%d,%d)\n"),
+				m_lastMousePos.x, m_lastMousePos.y, m_panOffset.x, m_panOffset.y);
+#endif
 			}
 		}
 	}
@@ -4902,16 +4984,127 @@ void CXiaoGongPDFDlg::OnMouseMove(UINT nFlags, CPoint point)
 
 	if (m_isDragging && (nFlags & MK_LBUTTON))
 	{
-		// 计算鼠标移动距离
-		CPoint delta = point - m_lastMousePos;
-		m_lastMousePos = point;
+		// ★★★ 将对话框客户区坐标转换为PDF视图客户区坐标（修复拖拽偏移问题）
+		CRect pdfRect;
+		m_pdfView.GetWindowRect(&pdfRect);
+		ScreenToClient(&pdfRect);
 
-		// 更新平移偏移量
-		m_panOffset.x += delta.x;
-		m_panOffset.y += delta.y;
+		CPoint pdfViewPoint = point;
+		pdfViewPoint.Offset(-pdfRect.left, -pdfRect.top);
 
-		// ★★★ 优化：拖拽时不重新渲染PDF，而是快速重绘已缓存的位图
-		if (m_hPanPageBitmap && m_pdfView.GetSafeHwnd())
+		// 计算鼠标移动距离（使用PDF视图客户区坐标）
+		CPoint delta = pdfViewPoint - m_lastMousePos;
+
+#ifdef _DEBUG
+		TRACE(_T("OnMouseMove: point=(%d,%d), pdfViewPoint=(%d,%d), lastPos=(%d,%d), delta=(%d,%d)\n"),
+			point.x, point.y, pdfViewPoint.x, pdfViewPoint.y,
+			m_lastMousePos.x, m_lastMousePos.y, delta.x, delta.y);
+#endif
+
+		m_lastMousePos = pdfViewPoint;
+
+		// ★★★ 连续滚动模式 vs 分页模式：不同的拖拽处理
+		if (m_continuousScrollMode)
+		{
+			// ★★★ 连续滚动模式：垂直拖拽修改滚动位置（浏览多页），水平拖拽修改偏移（平移）
+			// 水平方向：修改 m_panOffset.x 用于平移
+			m_panOffset.x += delta.x;
+
+			// 垂直方向：修改 m_scrollPosition 用于滚动文档
+			int oldScrollPos = m_scrollPosition;
+			m_scrollPosition -= delta.y;  // 向下拖拽（delta.y<0）时增加滚动位置
+
+			// 限制滚动范围
+			CRect viewRect;
+			m_pdfView.GetClientRect(&viewRect);
+			int viewHeight = viewRect.Height();
+			int scrollRange = m_totalScrollHeight - viewHeight;
+			if (scrollRange < 0) scrollRange = 0;
+			if (m_scrollPosition < 0) m_scrollPosition = 0;
+			if (m_scrollPosition > scrollRange) m_scrollPosition = scrollRange;
+
+#ifdef _DEBUG
+			TRACE(_T("  连续滚动: delta.y=%d, scrollPos: %d -> %d, panOffset.x: %d, scrollRange=%d\n"),
+				delta.y, oldScrollPos, m_scrollPosition, m_panOffset.x, scrollRange);
+#endif
+
+			// 更新滚动条
+			UpdateScrollBar();
+		}
+		else
+		{
+			// ★★★ 分页模式：水平和垂直都使用 m_panOffset
+			CPoint oldPanOffset = m_panOffset;
+			m_panOffset.x += delta.x;
+			m_panOffset.y += delta.y;
+
+#ifdef _DEBUG
+			TRACE(_T("  偏移量更新: old=(%d,%d) -> new=(%d,%d)\n"),
+				oldPanOffset.x, oldPanOffset.y, m_panOffset.x, m_panOffset.y);
+#endif
+		}
+
+		// ★★★ 限制拖拽范围
+		if (m_continuousScrollMode && m_doc && m_totalPages > 0)
+		{
+			CRect viewRect;
+			m_pdfView.GetClientRect(&viewRect);
+			int viewWidth = viewRect.Width();
+
+			// 获取页面渲染尺寸（用于水平限制）
+			float pageRenderWidth = 0;
+			fz_page* page = nullptr;
+			fz_try(m_ctx)
+			{
+				page = fz_load_page(m_ctx, m_doc, 0);
+				if (page)
+				{
+					fz_rect bounds = fz_bound_page(m_ctx, page);
+					pageRenderWidth = (bounds.x1 - bounds.x0) * m_uniformScale;
+					fz_drop_page(m_ctx, page);
+				}
+			}
+			fz_catch(m_ctx)
+			{
+				if (page)
+					fz_drop_page(m_ctx, page);
+			}
+
+			// ★★★ 连续滚动模式：只限制水平偏移，垂直方向使用滚动
+			if (pageRenderWidth > 0)
+			{
+				if (pageRenderWidth > viewWidth)
+				{
+					// 页面超出视图，允许水平拖拽并限制范围
+					int minVisibleX = min(100, (int)(pageRenderWidth * 0.2f));
+					int maxOffsetX = (int)((pageRenderWidth - viewWidth) / 2 + minVisibleX);
+					int minOffsetX = -maxOffsetX;
+					if (m_panOffset.x > maxOffsetX) m_panOffset.x = maxOffsetX;
+					if (m_panOffset.x < minOffsetX) m_panOffset.x = minOffsetX;
+				}
+				else
+				{
+					// 页面未超出视图，不允许水平拖拽，保持居中
+					m_panOffset.x = 0;
+				}
+
+				// 垂直方向始终为0（使用滚动位置）
+				m_panOffset.y = 0;
+
+#ifdef _DEBUG
+				TRACE(_T("  连续滚动限制: m_panOffset.x=%d, pageWidth=%.0f, viewWidth=%d\n"),
+					m_panOffset.x, pageRenderWidth, viewWidth);
+#endif
+			}
+		}
+
+		// ★★★ 连续滚动模式：拖拽时重新渲染可见页面（应用水平偏移）
+		if (m_continuousScrollMode)
+		{
+			RenderVisiblePages();
+		}
+		// ★★★ 分页模式：拖拽时快速重绘已缓存的位图
+		else if (m_hPanPageBitmap && m_pdfView.GetSafeHwnd())
 		{
 			// ★★★ 优化：只获取一次视图和位图信息
 			CRect viewRect;
@@ -4924,21 +5117,41 @@ void CXiaoGongPDFDlg::OnMouseMove(UINT nFlags, CPoint point)
 
 			// ★★★ 限制拖拽边界：确保页面至少有一部分保持可见
 			{
-				// 计算边界限制（保留至少100像素或页面50%的内容可见，取较小值）
-				int minVisibleWidth = min(100, bm.bmWidth / 2);
-				int minVisibleHeight = min(100, bm.bmHeight / 2);
+				// ★★★ 修复：页面小于视图时不允许拖拽
+				if (bm.bmWidth > viewWidth)
+				{
+					// 页面宽度超出视图，允许水平拖拽并限制范围
+					int minVisibleWidth = min(100, bm.bmWidth / 2);
+					int maxOffsetX = (viewWidth + bm.bmWidth) / 2 - minVisibleWidth;
+					int minOffsetX = -(viewWidth + bm.bmWidth) / 2 + minVisibleWidth;
+					if (m_panOffset.x > maxOffsetX) m_panOffset.x = maxOffsetX;
+					if (m_panOffset.x < minOffsetX) m_panOffset.x = minOffsetX;
+				}
+				else
+				{
+					// 页面宽度未超出视图，不允许水平拖拽
+					m_panOffset.x = 0;
+				}
 
-				// 计算最大偏移量
-				int maxOffsetX = (viewWidth + bm.bmWidth) / 2 - minVisibleWidth;
-				int minOffsetX = -(viewWidth + bm.bmWidth) / 2 + minVisibleWidth;
-				int maxOffsetY = (viewHeight + bm.bmHeight) / 2 - minVisibleHeight;
-				int minOffsetY = -(viewHeight + bm.bmHeight) / 2 + minVisibleHeight;
+				if (bm.bmHeight > viewHeight)
+				{
+					// 页面高度超出视图，允许垂直拖拽并限制范围
+					int minVisibleHeight = min(100, bm.bmHeight / 2);
+					int maxOffsetY = (viewHeight + bm.bmHeight) / 2 - minVisibleHeight;
+					int minOffsetY = -(viewHeight + bm.bmHeight) / 2 + minVisibleHeight;
+					if (m_panOffset.y > maxOffsetY) m_panOffset.y = maxOffsetY;
+					if (m_panOffset.y < minOffsetY) m_panOffset.y = minOffsetY;
+				}
+				else
+				{
+					// 页面高度未超出视图，不允许垂直拖拽
+					m_panOffset.y = 0;
+				}
 
-				// 应用限制
-				if (m_panOffset.x > maxOffsetX) m_panOffset.x = maxOffsetX;
-				if (m_panOffset.x < minOffsetX) m_panOffset.x = minOffsetX;
-				if (m_panOffset.y > maxOffsetY) m_panOffset.y = maxOffsetY;
-				if (m_panOffset.y < minOffsetY) m_panOffset.y = minOffsetY;
+#ifdef _DEBUG
+				TRACE(_T("  分页模式限制后偏移量: m_panOffset=(%d,%d), bitmapSize=(%d,%d), viewSize=(%d,%d)\n"),
+					m_panOffset.x, m_panOffset.y, bm.bmWidth, bm.bmHeight, viewWidth, viewHeight);
+#endif
 			}
 
 			// 创建新的显示位图
@@ -5639,8 +5852,8 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 				pageDC.CreateCompatibleDC(&memDC);
 				HBITMAP oldPageBmp = (HBITMAP)pageDC.SelectObject(hBitmap);
 
-				int destY = pageY - visibleTop;
-				int destX = (viewWidth - width) / 2;  // 居中显示
+				int destY = pageY - visibleTop + m_panOffset.y;  // 应用垂直拖拽偏移
+				int destX = (viewWidth - width) / 2 + m_panOffset.x;  // 居中显示并应用水平拖拽偏移
 
 #ifdef _DEBUG
 				TRACE(_T("  Page %d: pageY=%d, size=(%d,%d), dest=(%d,%d)\n"),
