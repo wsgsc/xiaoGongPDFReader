@@ -4935,18 +4935,31 @@ void CXiaoGongPDFDlg::OnLButtonDown(UINT nFlags, CPoint point)
 
 void CXiaoGongPDFDlg::OnLButtonUp(UINT nFlags, CPoint point)
 {
+#ifdef _DEBUG
+	TRACE(_T("OnLButtonUp: 被调用! point=(%d,%d), m_isDragging=%d, m_isDraggingScrollbar=%d\n"),
+		point.x, point.y, m_isDragging, m_isDraggingScrollbar);
+#endif
+
 	// 处理滚动条拖拽结束
 	if (m_isDraggingScrollbar)
 	{
+#ifdef _DEBUG
+		TRACE(_T("OnLButtonUp: 结束滚动条拖拽\n"));
+#endif
 		m_isDraggingScrollbar = false;
 		ReleaseCapture();
+		::SetCursor(::LoadCursor(nullptr, IDC_ARROW));
 		return;
 	}
 
 	if (m_isDragging)
 	{
+#ifdef _DEBUG
+		TRACE(_T("OnLButtonUp: 结束PDF拖拽，恢复光标\n"));
+#endif
 		m_isDragging = false;
 		ReleaseCapture();
+		::SetCursor(::LoadCursor(nullptr, IDC_ARROW));
 		SaveCurrentPageZoomState();
 	}
 
@@ -5240,10 +5253,16 @@ BOOL CXiaoGongPDFDlg::OnSetCursor(CWnd* pWnd, UINT nHitTest, UINT message)
 		if (m_canDrag)
 		{
 			if (m_isDragging)
+			{
 				SetCursor(m_hHandCursorGrab);
+				return TRUE;
+			}
 			else
-				SetCursor(m_hHandCursor);
-			return TRUE;
+			{
+				// 拖拽结束后使用箭头光标
+				SetCursor(::LoadCursor(nullptr, IDC_ARROW));
+				return TRUE;
+			}
 		}
 	}
 
