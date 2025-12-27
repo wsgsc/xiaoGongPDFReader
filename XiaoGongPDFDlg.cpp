@@ -2448,6 +2448,7 @@ void CXiaoGongPDFDlg::UpdatePageControls()
 	CString currentPage;
 	currentPage.Format(_T("%d"), m_currentPage + 1);
 	m_editCurrent.SetWindowText(currentPage);
+	m_editCurrent.UpdateWindow();  // 强制立即重绘，确保快速滚动时也能实时显示
 
 	// 更新状态栏
 	UpdateStatusBar();
@@ -2456,7 +2457,6 @@ void CXiaoGongPDFDlg::UpdatePageControls()
 	m_btnFirst.Invalidate();
 	m_btnLast.Invalidate();
 	m_btnFullscreen.Invalidate();
-	m_editCurrent.Invalidate();
 }
 
 void CXiaoGongPDFDlg::UpdateStatusBar()
