@@ -3246,10 +3246,34 @@ void CXiaoGongPDFDlg::EnterFullscreen()
 	if (m_checkThumbnail.GetSafeHwnd())
 		m_checkThumbnail.ShowWindow(SW_HIDE);
 
+	// 隐藏搜索相关控件
+	if (m_editSearch.GetSafeHwnd())
+		m_editSearch.ShowWindow(SW_HIDE);
+
+	if (m_btnFind.GetSafeHwnd())
+		m_btnFind.ShowWindow(SW_HIDE);
+
+	if (m_btnPrevMatch.GetSafeHwnd())
+		m_btnPrevMatch.ShowWindow(SW_HIDE);
+
+	if (m_btnNextMatch.GetSafeHwnd())
+		m_btnNextMatch.ShowWindow(SW_HIDE);
+
 	// 调整预览窗口为整个客户区
 	CRect clientRect;
 	GetClientRect(&clientRect);
 	m_pdfView.MoveWindow(0, 0, clientRect.Width(), clientRect.Height());
+
+	// ★★★ 重新渲染当前页面以适应新的窗口尺寸
+	if (m_doc && m_currentPage >= 0 && m_currentPage < m_totalPages)
+	{
+		// ★★★ 强制重置缩放模式，避免SetZoom的优化检查跳过渲染
+		m_zoomMode = ZOOM_CUSTOM;
+		m_customZoom = 0.5f;  // 设置一个不同的值
+
+		// ★★★ 进入全屏时强制使用适应页面模式，确保充分利用全屏空间
+		SetZoom(1.0f, ZOOM_FIT_PAGE);
+	}
 
 	// 重绘窗口
 	Invalidate();
@@ -3312,6 +3336,19 @@ void CXiaoGongPDFDlg::ExitFullscreen()
 
 	if (m_checkThumbnail.GetSafeHwnd())
 		m_checkThumbnail.ShowWindow(SW_SHOW);
+
+	// 显示搜索相关控件
+	if (m_editSearch.GetSafeHwnd())
+		m_editSearch.ShowWindow(SW_SHOW);
+
+	if (m_btnFind.GetSafeHwnd())
+		m_btnFind.ShowWindow(SW_SHOW);
+
+	if (m_btnPrevMatch.GetSafeHwnd())
+		m_btnPrevMatch.ShowWindow(SW_SHOW);
+
+	if (m_btnNextMatch.GetSafeHwnd())
+		m_btnNextMatch.ShowWindow(SW_SHOW);
 
 	// 重设全屏标志
 	m_isFullscreen = false;
