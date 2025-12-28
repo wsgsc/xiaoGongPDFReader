@@ -78,6 +78,8 @@ CXiaoGongPDFDlg::CXiaoGongPDFDlg(CWnd* pParent /*=nullptr*/)
 	, m_thumbnailPicHeight(0)
 	, m_renderLock()
 	, m_isFullscreen(false)
+	, m_savedZoomMode(ZOOM_FIT_PAGE)     // 初始化保存的缩放模式
+	, m_savedCustomZoom(1.0f)            // 初始化保存的自定义缩放值
 	, m_zoomMode(ZOOM_FIT_PAGE)
 	, m_customZoom(1.0f)
 	, m_documentMaxPageWidth(0.0f)  // ★★★ 初始化文档最大页面宽度
@@ -2050,13 +2052,9 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 
 	CDialogEx::OnSize(nType, cx, cy);
 
-	// 全屏模式下不进行常规控件调整
+	// 全屏模式下不进行调整，已提前調整
 	if (m_isFullscreen && m_pdfView.GetSafeHwnd())
 	{
-		// 在全屏模式下，只调整PDF预览控件大小为整个客户区
-		CRect clientRect;
-		GetClientRect(&clientRect);
-		m_pdfView.MoveWindow(0, 0, clientRect.Width(), clientRect.Height());
 		return;
 	}
 
@@ -3173,7 +3171,7 @@ BOOL CXiaoGongPDFDlg::PreTranslateMessage(MSG* pMsg)
 	}
 
 	return CDialogEx::PreTranslateMessage(pMsg);
-}
+} 
 
 void CXiaoGongPDFDlg::OnGetMinMaxInfo(MINMAXINFO* lpMMI)
 {
@@ -3190,21 +3188,22 @@ void CXiaoGongPDFDlg::EnterFullscreen()
 	if (m_isFullscreen)
 		return;
 
+	#ifdef _DEBUG
+		TRACE(_T("进入全屏\n"));
+	#endif
+
 	// 保存当前窗口位置和大小用于恢复
 	GetWindowRect(&m_windowRect);
+
+	// ★★★ 保存当前缩放状态，用于退出全屏时恢复
+	m_savedZoomMode = m_zoomMode;
+	m_savedCustomZoom = m_customZoom;
 
 	// ★★★ 先设置全屏标志，避免SetWindowPos触发OnSize时重新布局控件
 	m_isFullscreen = true;
 
 	// 移除窗口边框和标题栏
 	ModifyStyle(WS_CAPTION | WS_THICKFRAME, 0, SWP_FRAMECHANGED);
-
-	// 获取屏幕尺寸
-	int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-	int screenHeight = GetSystemMetrics(SM_CYSCREEN);
-
-	// 调整窗口大小为全屏
-	SetWindowPos(NULL, 0, 0, screenWidth, screenHeight, SWP_NOZORDER);
 
 	// 隐藏菜单
 	SetMenu(NULL);
@@ -3259,10 +3258,21 @@ void CXiaoGongPDFDlg::EnterFullscreen()
 	if (m_btnNextMatch.GetSafeHwnd())
 		m_btnNextMatch.ShowWindow(SW_HIDE);
 
-	// 调整预览窗口为整个客户区
-	CRect clientRect;
-	GetClientRect(&clientRect);
-	m_pdfView.MoveWindow(0, 0, clientRect.Width(), clientRect.Height());
+	// 先隐藏控件在改变
+	// 获取屏幕尺寸
+	int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+	int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+
+	// 调整窗口大小为全屏
+	SetWindowPos(NULL, 0, 0, screenWidth, screenHeight, SWP_NOZORDER);
+
+	// 等待緩存
+	if (m_pdfView.GetSafeHwnd())
+	{
+		// 在全屏模式下，只调整PDF预览控件大小为整个客户区
+		m_pdfView.MoveWindow(0, 0, screenWidth, screenHeight);
+		m_pdfView.ShowWindow(SW_HIDE);
+	}
 
 	// ★★★ 重新渲染当前页面以适应新的窗口尺寸
 	if (m_doc && m_currentPage >= 0 && m_currentPage < m_totalPages)
@@ -3274,10 +3284,6 @@ void CXiaoGongPDFDlg::EnterFullscreen()
 		// ★★★ 进入全屏时强制使用适应页面模式，确保充分利用全屏空间
 		SetZoom(1.0f, ZOOM_FIT_PAGE);
 	}
-
-	// 重绘窗口
-	Invalidate();
-	UpdateWindow();
 }
 
 // 退出全屏模式
@@ -3285,6 +3291,10 @@ void CXiaoGongPDFDlg::ExitFullscreen()
 {
 	if (!m_isFullscreen)
 		return;
+
+	#ifdef _DEBUG
+		TRACE(_T("退出全屏\n"));
+	#endif
 
 	// 恢复窗口样式
 	ModifyStyle(0, WS_CAPTION | WS_THICKFRAME, SWP_FRAMECHANGED);
@@ -3294,6 +3304,23 @@ void CXiaoGongPDFDlg::ExitFullscreen()
 
 	// ★★★ 重新填充最近文件列表（因为菜单是重新加载的）
 	UpdateRecentFilesMenu();
+
+	// ★★★ 在窗口大小改变前，保存视口中心点在文档中的位置比例（用于退出全屏后恢复）
+	float savedCenterRatio = 0.0f;
+	if (m_continuousScrollMode && m_totalScrollHeight > 0)
+	{
+		CRect viewRect;
+		m_pdfView.GetClientRect(&viewRect);
+		int centerPos = m_scrollPosition + viewRect.Height() / 2;
+		savedCenterRatio = (float)centerPos / m_totalScrollHeight;
+#ifdef _DEBUG
+		TRACE(_T("退出全屏：保存视口中心比例 = %.4f (centerPos=%d, height=%d)\n"),
+			savedCenterRatio, centerPos, m_totalScrollHeight);
+#endif
+	}
+
+	// ★★★ 先重设全屏标志，让 SetWindowPos 触发的 OnSize 能正确布局控件
+	m_isFullscreen = false;
 
 	// 恢复窗口位置和大小
 	SetWindowPos(NULL, m_windowRect.left, m_windowRect.top,
@@ -3350,30 +3377,37 @@ void CXiaoGongPDFDlg::ExitFullscreen()
 	if (m_btnNextMatch.GetSafeHwnd())
 		m_btnNextMatch.ShowWindow(SW_SHOW);
 
-	// 重设全屏标志
-	m_isFullscreen = false;
-
-	// 调用OnSize以重新布局所有控件
-	CRect clientRect;
-	GetClientRect(&clientRect);
-	OnSize(SIZE_RESTORED, clientRect.Width(), clientRect.Height());
-
-	// 如果有文档加载，根据当前模式重新渲染
+	// ★★★ SetWindowPos 会自动触发 OnSize 重新布局所有控件，无需手动调用
+	// 如果有文档加载，恢复进入全屏前的缩放状态
 	if (m_doc && m_currentPage >= 0)
 	{
-		if (m_continuousScrollMode)
+		// ★★★ 先按比例恢复滚动位置（在SetZoom之前，避免SetZoom内部的渲染使用错误的位置）
+		if (m_continuousScrollMode && m_totalScrollHeight > 0)
 		{
-			// 连续滚动模式：重新计算页面位置并渲染可见页面
-			CalculatePagePositions();
-			UpdateScrollBar();
-			RenderVisiblePages();
+			CRect viewRect;
+			m_pdfView.GetClientRect(&viewRect);
+
+			// 根据保存的视口中心比例计算新的中心位置，然后推算滚动位置
+			int newCenterPos = (int)(savedCenterRatio * m_totalScrollHeight);
+			m_scrollPosition = newCenterPos - viewRect.Height() / 2;
+
+			// 限制范围
+			int maxScroll = max(0, m_totalScrollHeight - viewRect.Height());
+			if (m_scrollPosition > maxScroll) m_scrollPosition = maxScroll;
+			if (m_scrollPosition < 0) m_scrollPosition = 0;
+
+#ifdef _DEBUG
+			TRACE(_T("退出全屏：恢复滚动位置 = %d (centerRatio=%.4f, newCenter=%d, height=%d)\n"),
+				m_scrollPosition, savedCenterRatio, newCenterPos, m_totalScrollHeight);
+#endif
 		}
-		else
-		{
-			// 分页模式：重新渲染当前页
-			CleanupBitmap();
-			RenderPage(m_currentPage);
-		}
+
+		// ★★★ 强制重置缩放模式，避免 SetZoom 的优化检查跳过渲染
+		m_zoomMode = ZOOM_CUSTOM; 
+
+		// ★★★ 恢复进入全屏前的缩放模式和缩放值
+		// SetZoom 内部会调用 UpdateScrollBar() 和 RenderVisiblePages()
+		SetZoom(m_savedCustomZoom, m_savedZoomMode);
 	}
 
 	// 确保窗口和所有控件更新
@@ -5765,6 +5799,12 @@ void CXiaoGongPDFDlg::CalculatePagePositions()
 // 渲染可见的页面
 void CXiaoGongPDFDlg::RenderVisiblePages()
 {
+	// 等待数据缓存好了在显示PDF，避免闪烁问题
+	if (m_pdfView.GetSafeHwnd() && !m_pdfView.IsWindowVisible())
+	{
+		m_pdfView.ShowWindow(SW_SHOW);
+	}
+
 	// 添加更严格的边界检查，防止切换PDF时vector越界
 	if (!m_doc || m_totalPages <= 0 || m_pageYPositions.empty())
 		return;

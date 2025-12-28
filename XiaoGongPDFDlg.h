@@ -179,6 +179,8 @@ private:
 
 	bool m_isFullscreen;        // 是否处于全屏状态
 	CRect m_windowRect;         // 存储窗口在进入全屏前的位置和大小
+	ZoomMode m_savedZoomMode;   // 进入全屏前的缩放模式
+	float m_savedCustomZoom;    // 进入全屏前的自定义缩放值
 
 	int m_minWidth;             // 窗口最小宽度
 	int m_minHeight;            // 窗口最小高度
