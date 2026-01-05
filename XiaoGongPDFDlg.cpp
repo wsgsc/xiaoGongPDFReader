@@ -6395,21 +6395,32 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 	}
 
 	// ★★★ 保存位图并设置到控件（这样控件可以自动处理重绘）
-	// 先清理旧的位图
-	if (m_hContinuousViewBitmap)
-	{
-		DeleteObject(m_hContinuousViewBitmap);
-		m_hContinuousViewBitmap = NULL;
-	}
-
 	// 将内存DC中的位图分离并保存
 	memDC.SelectObject(pOldBmp);
 
 	// 创建位图的副本
-	m_hContinuousViewBitmap = (HBITMAP)CopyImage(bmp.GetSafeHandle(), IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
+	HBITMAP hNewBitmap = (HBITMAP)CopyImage(bmp.GetSafeHandle(), IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
 
-	// 设置位图到控件（控件会自动处理重绘）
-	m_pdfView.SetBitmap(m_hContinuousViewBitmap);
+	// ★★★ 先设置新位图到控件，再删除旧位图，避免快速拖动时出现闪白
+	if (hNewBitmap)
+	{
+		// 设置位图到控件（控件会自动处理重绘）
+		m_pdfView.SetBitmap(hNewBitmap);
+
+		// 在设置新位图之后再删除旧位图，确保控件始终有有效的位图可以显示
+		if (m_hContinuousViewBitmap)
+		{
+			DeleteObject(m_hContinuousViewBitmap);
+		}
+
+		// 保存新位图句柄
+		m_hContinuousViewBitmap = hNewBitmap;
+	}
+	else
+	{
+		// 创建失败，保持原有位图
+		TRACE(_T("RenderVisiblePages: CopyImage failed\n"));
+	}
 
 #ifdef _DEBUG
 	CRect ctrlRect;
