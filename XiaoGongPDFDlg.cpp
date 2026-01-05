@@ -4,6 +4,7 @@
 #include "XiaoGongPDF.h"
 #include "XiaoGongPDFDlg.h"
 #include "PDFEditDialog.h"
+#include "ProgressDlg.h"
 #include "afxdialogex.h"
 #include <mupdf/fitz.h>
 #include <vector>
@@ -92,6 +93,9 @@ CXiaoGongPDFDlg::CXiaoGongPDFDlg(CWnd* pParent /*=nullptr*/)
 	, m_hPanPageBitmap(nullptr) // 初始化拖拽缓存位图
 	, m_canDrag(false)          // ★★★ 初始化拖拽判断缓存
 	, m_activeDocIndex(-1)      // 初始化活动文档索引（-1表示无文档）
+	, m_pLoadThread(nullptr)    // 初始化加载线程指针
+	, m_pLoadParams(nullptr)    // 初始化加载参数
+	, m_pProgressDlg(nullptr)   // 初始化进度对话框指针
 	, m_continuousScrollMode(true)  // ★★★ 默认启用连续滚动模式
 	, m_scrollPosition(0)        // 初始化滚动位置
 	, m_totalScrollHeight(0)     // 初始化总滚动高度
@@ -307,6 +311,10 @@ BEGIN_MESSAGE_MAP(CXiaoGongPDFDlg, CDialogEx)
 	ON_WM_SIZE()
 	ON_MESSAGE(WM_USER + 100, &CXiaoGongPDFDlg::OnRenderThumbnailsAsync)
 	ON_MESSAGE(WM_USER + 101, &CXiaoGongPDFDlg::OnOpenInitialFile)  // 延迟打开初始文件
+	ON_MESSAGE(WM_USER + 102, &CXiaoGongPDFDlg::OnThumbnailScroll)  // 缩略图滚动事件
+	ON_MESSAGE(WM_USER + 103, &CXiaoGongPDFDlg::OnUpdateThumbnailHighlight)  // 延迟更新缩略图高亮
+	ON_MESSAGE(WM_USER + 104, &CXiaoGongPDFDlg::OnPDFLoadComplete)  // PDF后台加载完成
+	ON_WM_TIMER()  // 定时器消息处理（用于去抖动缩略图高亮更新）
 	ON_WM_MOUSEWHEEL()
 	ON_BN_CLICKED(IDC_BTN_FIRST, &CXiaoGongPDFDlg::OnBtnFirst)
 	ON_BN_CLICKED(IDC_BTN_LAST, &CXiaoGongPDFDlg::OnBtnLast)
@@ -1254,6 +1262,12 @@ void CXiaoGongPDFDlg::GoToPage(int pageNumber)
 			RenderPage(pageNumber);
 		}
 	}
+
+	// ★★★ 延迟更新缩略图高亮，避免频繁调用阻塞
+	if (m_thumbnailVisible && m_thumbnailList.GetSafeHwnd())
+	{
+		PostMessage(WM_USER + 103, 0, 0);  // 延迟更新缩略图
+	}
 }
 
 void CXiaoGongPDFDlg::RenderPDF(const char* filename)
@@ -1441,6 +1455,13 @@ void CXiaoGongPDFDlg::InitializeThumbnailList()
 	{
 		m_thumbnailList.ShowWindow(SW_SHOW);
 	}
+
+	// ★★★ 子类化缩略图列表控件以捕获滚动事件
+	static bool isSubclassed = false;
+	if (!isSubclassed && m_thumbnailList.GetSafeHwnd()) {
+		::SetWindowLongPtr(m_thumbnailList.GetSafeHwnd(), GWLP_USERDATA, (LONG_PTR)this);
+		isSubclassed = true;
+	}
 }
 
 bool CXiaoGongPDFDlg::RenderThumbnail(int pageNumber)
@@ -1452,9 +1473,19 @@ bool CXiaoGongPDFDlg::RenderThumbnail(int pageNumber)
 	if (!m_ctx || !m_doc || pageNumber < 0 || pageNumber >= m_totalPages)
 		return false;
 
-	// 检查缓存
-	auto it = m_thumbnailCache.find(pageNumber);
-	bool useCache = (it != m_thumbnailCache.end());
+	// ★★★ 获取当前活动文档，统一使用文档对象的缓存
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (!pDoc) {
+#ifdef _DEBUG
+		TRACE(_T("RenderThumbnail: 无法获取活动文档\n"));
+#endif
+		return false;
+	}
+
+	// ★★★ 统一使用文档对象的缩略图缓存（避免缓存不同步）
+	auto& docThumbnailCache = pDoc->GetThumbnailCache();
+	auto it = docThumbnailCache.find(pageNumber);
+	bool useCache = (it != docThumbnailCache.end());
 
 	HBITMAP hBitmap = NULL;
 	int thumbWidth = THUMBNAIL_WIDTH;
@@ -1464,6 +1495,9 @@ bool CXiaoGongPDFDlg::RenderThumbnail(int pageNumber)
 	{
 		// 使用缓存的位图
 		hBitmap = it->second.hBitmap;
+
+		// ★★★ 更新LRU顺序：将当前页面移到最前面（表示最近使用）
+		pDoc->UpdateThumbnailLRU(pageNumber);
 
 		// 获取缓存位图的尺寸
 		BITMAP bmpInfo;
@@ -1622,9 +1656,12 @@ bool CXiaoGongPDFDlg::RenderThumbnail(int pageNumber)
 					}
 				}
 
-				// 添加到缓存
+				// ★★★ 添加到文档对象的缓存（统一缓存管理）
 				ThumbnailInfo info = { hBitmap, pageNumber, pageNumber == m_currentPage };
-				m_thumbnailCache[pageNumber] = info;
+				docThumbnailCache[pageNumber] = info;
+
+				// ★★★ 更新LRU顺序：新渲染的缩略图添加到最前面
+				pDoc->UpdateThumbnailLRU(pageNumber);
 
 #ifdef _DEBUG
 				TRACE(_T("新渲染缩略图: 页面 %d, 尺寸 %d x %d\n"), pageNumber, thumbWidth, thumbHeight);
@@ -1823,8 +1860,10 @@ void CXiaoGongPDFDlg::UpdateThumbnails()
 	InitializeThumbnailList();
 
 	// ★★★ 优化：先只渲染前面部分缩略图，让界面快速响应
-	// 对于页数多的PDF，避免阻塞UI线程
-	const int INITIAL_RENDER_COUNT = 3;  // 先渲染前3页，让预览框更快显示
+	// 对于页数多的PDF，避免阻塞UI线程和内存爆炸
+	const int INITIAL_RENDER_COUNT = 10;  // 先渲染前10页，让预览框快速显示
+	const int MAX_ASYNC_RENDER = 50;  // 异步最多再渲染50页，避免大文件内存爆炸
+
 	int renderCount = min(INITIAL_RENDER_COUNT, m_totalPages);
 
 #ifdef _DEBUG
@@ -1837,14 +1876,22 @@ void CXiaoGongPDFDlg::UpdateThumbnails()
 		RenderThumbnail(i);
 	}
 
-	// 如果还有剩余页面，稍后异步渲染
-	if (m_totalPages > renderCount)
+	// ★★★ 对于大文件（超过100页），只异步渲染有限数量的缩略图
+	// 其余的缩略图将在用户滚动到可见范围时按需加载
+	int maxAsyncPage = min(renderCount + MAX_ASYNC_RENDER, m_totalPages);
+
+	if (maxAsyncPage > renderCount)
 	{
 #ifdef _DEBUG
-		TRACE(_T("剩余 %d 页将异步渲染\n"), m_totalPages - renderCount);
+		if (m_totalPages > maxAsyncPage) {
+			TRACE(_T("异步渲染 %d 页（剩余 %d 页将按需加载）\n"),
+				maxAsyncPage - renderCount, m_totalPages - maxAsyncPage);
+		} else {
+			TRACE(_T("异步渲染剩余 %d 页\n"), m_totalPages - renderCount);
+		}
 #endif
-		// 使用PostMessage异步渲染剩余缩略图
-		PostMessage(WM_USER + 100, renderCount, m_totalPages);
+		// 使用PostMessage异步渲染部分缩略图
+		PostMessage(WM_USER + 100, renderCount, maxAsyncPage);
 	}
 
 #ifdef _DEBUG
@@ -1852,6 +1899,10 @@ void CXiaoGongPDFDlg::UpdateThumbnails()
 #endif
 
 	HighlightCurrentThumbnail();
+
+	// ★★★ 初始化后，渲染一次可见区域的缩略图
+	// 这样即使异步渲染还没完成，可见区域也能快速显示
+	PostMessage(WM_USER + 102, 0, 0);  // 触发RenderVisibleThumbnails
 }
 
 // 异步渲染剩余缩略图
@@ -1873,8 +1924,8 @@ LRESULT CXiaoGongPDFDlg::OnRenderThumbnailsAsync(WPARAM wParam, LPARAM lParam)
 		return 0;
 	}
 
-	// 分批渲染，每次渲染5页，避免一次性阻塞太久
-	const int BATCH_SIZE = 5;
+	// 分批渲染，每次渲染10页，避免一次性阻塞太久
+	const int BATCH_SIZE = 10;
 	int batchEnd = min(startPage + BATCH_SIZE, endPage);
 
 	for (int i = startPage; i < batchEnd; i++)
@@ -1884,6 +1935,12 @@ LRESULT CXiaoGongPDFDlg::OnRenderThumbnailsAsync(WPARAM wParam, LPARAM lParam)
 			break;
 
 		RenderThumbnail(i);
+	}
+
+	// ★★★ 每批次渲染后，限制缩略图缓存大小
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (pDoc) {
+		pDoc->LimitThumbnailCache(THUMBNAIL_CACHE_LIMIT);
 	}
 
 #ifdef _DEBUG
@@ -1908,6 +1965,71 @@ LRESULT CXiaoGongPDFDlg::OnRenderThumbnailsAsync(WPARAM wParam, LPARAM lParam)
 	return 0;
 }
 
+// ★★★ 渲染可见区域的缩略图（按需加载）
+void CXiaoGongPDFDlg::RenderVisibleThumbnails()
+{
+	if (!m_thumbnailList.GetSafeHwnd() || !m_doc || m_totalPages <= 0)
+		return;
+
+	// 获取可见区域
+	int topIndex = m_thumbnailList.GetTopIndex();
+	int bottomIndex = topIndex + m_thumbnailList.GetCountPerPage();
+
+	// 确保范围有效
+	bottomIndex = min(bottomIndex, m_thumbnailList.GetItemCount() - 1);
+
+#ifdef _DEBUG
+	TRACE(_T("RenderVisibleThumbnails: 可见范围 %d - %d\n"), topIndex, bottomIndex);
+#endif
+
+	// ★★★ 预加载：向前向后各扩展10页
+	const int PRELOAD_COUNT = 10;
+	int startPage = max(0, topIndex - PRELOAD_COUNT);
+	int endPage = min(m_totalPages - 1, bottomIndex + PRELOAD_COUNT);
+
+	// 渲染可见区域和预加载区域的缩略图
+	for (int i = startPage; i <= endPage; i++) {
+		// 检查是否已经渲染
+		CPDFDocument* pDoc = GetActiveDocument();
+		if (pDoc) {
+			auto& cache = pDoc->GetThumbnailCache();
+			if (cache.find(i) == cache.end()) {
+				// 未渲染，执行渲染
+				RenderThumbnail(i);
+			}
+		}
+	}
+
+	// ★★★ 限制缓存大小
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (pDoc) {
+		pDoc->LimitThumbnailCache(THUMBNAIL_CACHE_LIMIT);
+	}
+}
+
+// ★★★ 缩略图滚动事件处理
+LRESULT CXiaoGongPDFDlg::OnThumbnailScroll(WPARAM wParam, LPARAM lParam)
+{
+#ifdef _DEBUG
+	TRACE(_T("OnThumbnailScroll: 检测到缩略图列表滚动\n"));
+#endif
+
+	// 延迟渲染，避免频繁滚动时过度渲染
+	static DWORD lastScrollTime = 0;
+	DWORD currentTime = GetTickCount();
+
+	// 如果距离上次滚动不到200ms，则跳过
+	if (currentTime - lastScrollTime < 200) {
+		return 0;
+	}
+	lastScrollTime = currentTime;
+
+	// 渲染可见区域的缩略图
+	RenderVisibleThumbnails();
+
+	return 0;
+}
+
 // 延迟打开初始文件的消息处理函数
 LRESULT CXiaoGongPDFDlg::OnOpenInitialFile(WPARAM wParam, LPARAM lParam)
 {
@@ -1917,6 +2039,59 @@ LRESULT CXiaoGongPDFDlg::OnOpenInitialFile(WPARAM wParam, LPARAM lParam)
 	}
 
 	return 0;
+}
+
+// 延迟更新缩略图高亮的消息处理函数
+LRESULT CXiaoGongPDFDlg::OnUpdateThumbnailHighlight(WPARAM wParam, LPARAM lParam)
+{
+#ifdef _DEBUG
+	TRACE(_T("OnUpdateThumbnailHighlight: 延迟更新缩略图高亮\n"));
+#endif
+
+	// ★★★ 修复：使用节流+去抖动结合，既能在拖动中实时更新，又能确保最后一次更新不会被丢失
+	const UINT_PTR TIMER_ID_THUMBNAIL_HIGHLIGHT = 1001;
+	const UINT THROTTLE_INTERVAL_MS = 100;  // 节流间隔：拖动过程中最多每100ms更新一次
+	const UINT DEBOUNCE_DELAY_MS = 150;     // 去抖动延迟：确保拖动停止后150ms内会执行最后一次更新
+
+	static DWORD lastUpdateTime = 0;
+	DWORD currentTime = GetTickCount();
+
+	// 取消之前的去抖动定时器（如果有），设置新的定时器
+	// 这样确保拖动停止后，最后一次更新一定会在150ms内执行
+	KillTimer(TIMER_ID_THUMBNAIL_HIGHLIGHT);
+	SetTimer(TIMER_ID_THUMBNAIL_HIGHLIGHT, DEBOUNCE_DELAY_MS, NULL);
+
+	// 节流：如果距离上次更新不到100ms，跳过立即更新（但去抖动定时器会确保最终更新）
+	if (currentTime - lastUpdateTime < THROTTLE_INTERVAL_MS) {
+		return 0;
+	}
+
+	// 执行立即更新（拖动过程中实时反馈）
+	lastUpdateTime = currentTime;
+	HighlightCurrentThumbnail();
+
+	return 0;
+}
+
+// 定时器消息处理函数
+void CXiaoGongPDFDlg::OnTimer(UINT_PTR nIDEvent)
+{
+	const UINT_PTR TIMER_ID_THUMBNAIL_HIGHLIGHT = 1001;
+
+	if (nIDEvent == TIMER_ID_THUMBNAIL_HIGHLIGHT)
+	{
+#ifdef _DEBUG
+		TRACE(_T("OnTimer: 执行缩略图高亮更新（去抖动定时器触发）\n"));
+#endif
+		// 执行缩略图高亮更新
+		HighlightCurrentThumbnail();
+
+		// 销毁一次性定时器
+		KillTimer(TIMER_ID_THUMBNAIL_HIGHLIGHT);
+		return;
+	}
+
+	CDialogEx::OnTimer(nIDEvent);
 }
 
 void CXiaoGongPDFDlg::CleanupThumbnails()
@@ -1954,6 +2129,9 @@ void CXiaoGongPDFDlg::HighlightCurrentThumbnail()
 	TRACE(_T("HighlightCurrentThumbnail() - 当前页: %d\n"), m_currentPage);
 #endif
 
+	if (!m_thumbnailList.GetSafeHwnd() || m_currentPage < 0 || m_currentPage >= m_totalPages)
+		return;
+
 	// 清除所有项的选中状态
 	for (int i = 0; i < m_thumbnailList.GetItemCount(); i++)
 	{
@@ -1961,33 +2139,56 @@ void CXiaoGongPDFDlg::HighlightCurrentThumbnail()
 	}
 
 	// 查找对应当前页面的列表项索引
-	if (m_currentPage >= 0 && m_currentPage < m_totalPages)
+	int itemIndex = -1;
+	for (int i = 0; i < m_thumbnailList.GetItemCount(); i++)
 	{
-		int itemIndex = -1;
-		for (int i = 0; i < m_thumbnailList.GetItemCount(); i++)
+		if ((int)m_thumbnailList.GetItemData(i) == m_currentPage)
 		{
-			if ((int)m_thumbnailList.GetItemData(i) == m_currentPage)
+			itemIndex = i;
+			break;
+		}
+	}
+
+	// ★★★ 修复：如果缩略图未渲染，主动渲染当前页面的缩略图
+	// 这样可以确保快速拖动时缩略图能够跟上
+	if (itemIndex == -1)
+	{
+#ifdef _DEBUG
+		TRACE(_T("页面 %d 的缩略图还没渲染，立即渲染\n"), m_currentPage);
+#endif
+		// 渲染当前页面的缩略图
+		if (RenderThumbnail(m_currentPage))
+		{
+			// 渲染成功后，重新查找列表项索引
+			for (int i = 0; i < m_thumbnailList.GetItemCount(); i++)
 			{
-				itemIndex = i;
-				break;
+				if ((int)m_thumbnailList.GetItemData(i) == m_currentPage)
+				{
+					itemIndex = i;
+					break;
+				}
 			}
 		}
 
-		// 设置找到的项为选中状态
-		if (itemIndex != -1)
+		// 如果还是找不到，直接返回
+		if (itemIndex == -1)
 		{
 #ifdef _DEBUG
-			TRACE(_T("找到页面 %d 对应的列表项: %d\n"), m_currentPage, itemIndex);
+			TRACE(_T("渲染失败或未找到页面 %d 的缩略图\n"), m_currentPage);
 #endif
-			m_thumbnailList.SetItemState(itemIndex, LVIS_SELECTED, LVIS_SELECTED);
-			m_thumbnailList.EnsureVisible(itemIndex, FALSE);
+			return;
 		}
-		else
-		{
+	}
+
+	// 设置找到的项为选中状态并滚动到可见
+	if (itemIndex != -1)
+	{
 #ifdef _DEBUG
-			TRACE(_T("未找到页面 %d 对应的列表项\n"), m_currentPage);
+		TRACE(_T("高亮页面 %d 对应的列表项: %d\n"), m_currentPage, itemIndex);
 #endif
-		}
+		m_thumbnailList.SetItemState(itemIndex, LVIS_SELECTED, LVIS_SELECTED);
+		// ★★★ 确保缩略图滚动到可见区域（居中显示）
+		m_thumbnailList.EnsureVisible(itemIndex, FALSE);
 	}
 }
 
@@ -2114,7 +2315,7 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		
 		// 定义最小控件尺寸
 		const int MIN_BTN_WIDTH = 40;
-		const int MIN_EDIT_WIDTH = 30;
+		const int MIN_EDIT_WIDTH = 50;
 		const int MIN_SPACING = 4;
 
 		// 根据缩放因子计算实际宽度，并确保不小于最小尺寸
@@ -3170,6 +3371,21 @@ BOOL CXiaoGongPDFDlg::PreTranslateMessage(MSG* pMsg)
 		}
 	}
 
+	// ★★★ 监听缩略图列表的鼠标滚轮事件，按需加载可见缩略图
+	if (pMsg->message == WM_MOUSEWHEEL && m_thumbnailList.GetSafeHwnd())
+	{
+		CPoint pt(GET_X_LPARAM(pMsg->lParam), GET_Y_LPARAM(pMsg->lParam));
+		CRect listRect;
+		m_thumbnailList.GetWindowRect(&listRect);
+
+		// 检查鼠标是否在缩略图列表区域
+		if (listRect.PtInRect(pt))
+		{
+			// 触发按需加载（使用PostMessage避免阻塞滚动）
+			PostMessage(WM_USER + 102, 0, 0);
+		}
+	}
+
 	return CDialogEx::PreTranslateMessage(pMsg);
 } 
 
@@ -4076,35 +4292,142 @@ bool CXiaoGongPDFDlg::OpenPDFInNewTab(const CString& filePath)
 	TRACE(_T("\n"));
 #endif
 
-	// 创建新文档
+	// ★★★ 使用后台线程加载PDF，避免大文件加载时UI卡死
 #ifdef _DEBUG
-	TRACE(_T("创建新文档对象...\n"));
+	TRACE(_T("准备后台加载PDF文件...\n"));
 #endif
 
-	// 显示"正在加载..."提示
-	m_statusBar.SetWindowText(_T("正在加载..."));
-	m_statusBar.UpdateWindow();  // 立即刷新显示
+	// 创建进度对话框
+	CProgressDlg* pProgressDlg = new CProgressDlg(this);
+	pProgressDlg->Create(IDD_PROGRESS_DIALOG, this);
+	pProgressDlg->ShowWindow(SW_SHOW);
+	pProgressDlg->UpdateWindow();
+	m_pProgressDlg = pProgressDlg;  // 保存指针，供后续使用
 
+	// 创建新文档对象
 	CPDFDocument* newDoc = new CPDFDocument(m_ctx);
-	if (!newDoc->OpenDocument(utf8Path.data()))
-	{
-		delete newDoc;
-#ifdef _DEBUG
-		TRACE(_T("打开PDF文件失败\n"));
-#endif
-		MessageBox(_T("无法打开PDF文件"), _T("错误"), MB_OK | MB_ICONERROR);
 
-		// 恢复状态栏显示
-		UpdateStatusBar();
+	// 创建加载参数
+	m_pLoadParams = new PDFLoadParams();
+	m_pLoadParams->filePath = filePath;
+	m_pLoadParams->utf8Path = utf8Path;
+	m_pLoadParams->pDlg = this;
+	m_pLoadParams->pDoc = newDoc;
+	m_pLoadParams->success = false;
+
+	// 启动后台加载线程
+	m_pLoadThread = AfxBeginThread(PDFLoadThreadProc, m_pLoadParams, THREAD_PRIORITY_NORMAL, 0, CREATE_SUSPENDED);
+	if (m_pLoadThread)
+	{
+		m_pLoadThread->m_bAutoDelete = FALSE;  // 手动管理线程生命周期
+		m_pLoadThread->ResumeThread();
+
+		// 等待加载完成或用户取消
+		MSG msg;
+		bool loadCompleted = false;
+		while (m_pLoadThread && !pProgressDlg->IsCancelled())
+		{
+			// 检查线程是否完成
+			DWORD exitCode = 0;
+			if (GetExitCodeThread(m_pLoadThread->m_hThread, &exitCode) && exitCode != STILL_ACTIVE)
+			{
+				loadCompleted = true;
+				// 线程已完成，但继续处理消息，等待OnPDFLoadComplete被调用
+				// 给足够的时间让消息被处理
+				for (int i = 0; i < 100 && m_pProgressDlg != nullptr; i++)
+				{
+					if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
+					{
+						TranslateMessage(&msg);
+						DispatchMessage(&msg);
+					}
+					else
+					{
+						Sleep(10);
+					}
+				}
+				break;
+			}
+
+			// 处理消息，保持UI响应
+			if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
+			{
+				if (msg.message == WM_QUIT)
+				{
+					break;
+				}
+				TranslateMessage(&msg);
+				DispatchMessage(&msg);
+			}
+			else
+			{
+				Sleep(10);  // 短暂休眠，避免CPU占用过高
+			}
+		}
+
+		// 清理线程
+		if (m_pLoadThread)
+		{
+			if (pProgressDlg->IsCancelled())
+			{
+				// 用户取消，终止线程
+				TerminateThread(m_pLoadThread->m_hThread, 0);
+				delete newDoc;
+				delete m_pLoadParams;
+				m_pLoadParams = nullptr;
+
+				// 关闭并清理进度对话框
+				if (m_pProgressDlg)
+				{
+					m_pProgressDlg->DestroyWindow();
+					delete m_pProgressDlg;
+					m_pProgressDlg = nullptr;
+				}
+			}
+			delete m_pLoadThread;
+			m_pLoadThread = nullptr;
+		}
+	}
+	else
+	{
+		// 线程创建失败，使用同步加载
+		delete m_pLoadParams;
+		m_pLoadParams = nullptr;
+
+		if (!newDoc->OpenDocument(utf8Path.data()))
+		{
+			delete newDoc;
+			if (m_pProgressDlg)
+			{
+				m_pProgressDlg->DestroyWindow();
+				delete m_pProgressDlg;
+				m_pProgressDlg = nullptr;
+			}
+			MessageBox(_T("无法打开PDF文件"), _T("错误"), MB_OK | MB_ICONERROR);
+			return false;
+		}
+
+		m_documents.push_back(newDoc);
+		int newIndex = (int)m_documents.size() - 1;
+
+		// 添加标签页并切换（在OnPDFLoadComplete中完成的工作）
+		// 这里需要继续执行后面的代码
+		goto load_success;
+	}
+
+	// 检查是否取消
+	if (pProgressDlg->IsCancelled())
+	{
 		return false;
 	}
 
-#ifdef _DEBUG
-	TRACE(_T("PDF文件打开成功\n"));
-#endif
+	// 检查加载是否成功（OnPDFLoadComplete已经处理了成功情况）
+	// 如果失败，OnPDFLoadComplete会显示错误消息并关闭进度对话框
+	// 如果成功，OnPDFLoadComplete也会关闭进度对话框
+	return true;
 
-	// 添加到文档列表
-	m_documents.push_back(newDoc);
+load_success:
+	// 同步加载成功后继续执行
 	int newIndex = (int)m_documents.size() - 1;
 
 #ifdef _DEBUG
@@ -4116,6 +4439,12 @@ bool CXiaoGongPDFDlg::OpenPDFInNewTab(const CString& filePath)
 	// 添加标签页
 	if (m_tabCtrl.GetSafeHwnd())
 	{
+		// ★★★ 如果是第一个文档，确保标签页控件可见
+		if (newIndex == 0 && m_documents.size() == 1)
+		{
+			m_tabCtrl.ShowWindow(SW_SHOW);
+		}
+
 #ifdef _DEBUG
 		TRACE(_T("准备添加标签页...\n"));
 #endif
@@ -4177,9 +4506,8 @@ bool CXiaoGongPDFDlg::OpenPDFInNewTab(const CString& filePath)
 		TRACE(_T("当前选中标签页: %d\n"), m_tabCtrl.GetCurSel());
 #endif
 
-		// 强制重绘标签页控件
-		m_tabCtrl.Invalidate();
-		m_tabCtrl.UpdateWindow();
+		// ★★★ 强制刷新标签页显示，避免显示异常
+		m_tabCtrl.RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE | RDW_ALLCHILDREN);
 	}
 	else
 	{
@@ -4202,6 +4530,14 @@ bool CXiaoGongPDFDlg::OpenPDFInNewTab(const CString& filePath)
 	// ★★★ 在布局完成后，异步渲染缩略图
 	// 这样预览框可以快速显示，缩略图在后台加载
 	UpdateThumbnails();
+
+	// ★★★ 同步加载完成后，关闭进度对话框
+	if (m_pProgressDlg)
+	{
+		m_pProgressDlg->DestroyWindow();
+		delete m_pProgressDlg;
+		m_pProgressDlg = nullptr;
+	}
 
 	return true;
 }
@@ -4424,10 +4760,15 @@ void CXiaoGongPDFDlg::CloseDocument(int index)
 			m_currentPage = 0;
 			SetWindowText(_T("小龚PDF阅读器"));
 
-			// 隐藏标签页控件
+			// ★★★ 彻底清理并隐藏标签页控件
 			if (m_tabCtrl.GetSafeHwnd())
 			{
+				// 删除所有标签页项
+				m_tabCtrl.DeleteAllItems();
+				// 隐藏标签页控件
 				m_tabCtrl.ShowWindow(SW_HIDE);
+				// 强制刷新
+				m_tabCtrl.RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE | RDW_ALLCHILDREN);
 			}
 
 			// 清空显示
@@ -6104,7 +6445,13 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 	{
 		m_currentPage = newCurrentPage;
 		UpdatePageControls();
-		HighlightCurrentThumbnail();
+
+		// ★★★ 使用异步延迟更新缩略图高亮，避免阻塞滚动
+		// 使用PostMessage延迟执行，不阻塞当前渲染
+		if (m_thumbnailVisible && m_thumbnailList.GetSafeHwnd())
+		{
+			PostMessage(WM_USER + 103, 0, 0);  // 延迟更新缩略图
+		}
 	}
 }
 
@@ -6683,4 +7030,143 @@ void CXiaoGongPDFDlg::HighlightSearchMatches(CDC* pDC, int pageNumber)
 		pDC->Rectangle(highlightRect);
 		pDC->SelectObject(pOldPen);
 	}
+}
+
+// ============================================================================
+// PDF后台加载相关实现
+// ============================================================================
+
+// 后台加载线程函数
+UINT CXiaoGongPDFDlg::PDFLoadThreadProc(LPVOID pParam)
+{
+	PDFLoadParams* pParams = (PDFLoadParams*)pParam;
+	if (!pParams)
+		return 1;
+
+	// 执行PDF加载
+	pParams->success = pParams->pDoc->OpenDocument(pParams->utf8Path.data());
+	if (!pParams->success)
+	{
+		pParams->errorMsg = _T("无法打开PDF文件");
+	}
+
+	// 通知主线程加载完成
+	if (pParams->pDlg && pParams->pDlg->GetSafeHwnd())
+	{
+		pParams->pDlg->PostMessage(WM_USER + 104, 0, (LPARAM)pParams);
+	}
+
+	return 0;
+}
+
+// PDF加载完成消息处理
+LRESULT CXiaoGongPDFDlg::OnPDFLoadComplete(WPARAM wParam, LPARAM lParam)
+{
+	PDFLoadParams* pParams = (PDFLoadParams*)lParam;
+	if (!pParams)
+	{
+		// 关闭进度对话框
+		if (m_pProgressDlg)
+		{
+			m_pProgressDlg->DestroyWindow();
+			delete m_pProgressDlg;
+			m_pProgressDlg = nullptr;
+		}
+		return 0;
+	}
+
+	// 检查加载结果
+	if (!pParams->success)
+	{
+		delete pParams->pDoc;
+		delete pParams;
+		m_pLoadParams = nullptr;
+		m_pLoadThread = nullptr;
+
+		// 关闭进度对话框
+		if (m_pProgressDlg)
+		{
+			m_pProgressDlg->DestroyWindow();
+			delete m_pProgressDlg;
+			m_pProgressDlg = nullptr;
+		}
+
+		MessageBox(pParams->errorMsg, _T("错误"), MB_OK | MB_ICONERROR);
+		UpdateStatusBar();
+		return 0;
+	}
+
+	// 加载成功，添加到文档列表
+	m_documents.push_back(pParams->pDoc);
+	int newIndex = (int)m_documents.size() - 1;
+
+	// 添加标签页
+	if (m_tabCtrl.GetSafeHwnd())
+	{
+		// ★★★ 如果是第一个文档，确保标签页控件可见
+		if (newIndex == 0 && m_documents.size() == 1)
+		{
+			m_tabCtrl.ShowWindow(SW_SHOW);
+		}
+
+		TCITEM tci = {0};
+		tci.mask = TCIF_TEXT;
+		CString fullFileName = pParams->pDoc->GetFileName();
+		CString tabTitle = fullFileName;
+
+		// 去掉.pdf后缀
+		int dotPos = tabTitle.ReverseFind(_T('.'));
+		if (dotPos != -1)
+		{
+			CString ext = tabTitle.Mid(dotPos);
+			ext.MakeLower();
+			if (ext == _T(".pdf"))
+			{
+				tabTitle = tabTitle.Left(dotPos);
+			}
+		}
+
+		// 截断过长的文件名
+		const int MAX_TAB_LENGTH = 12;
+		if (tabTitle.GetLength() > MAX_TAB_LENGTH)
+		{
+			tabTitle = tabTitle.Left(MAX_TAB_LENGTH - 3) + _T("...");
+		}
+
+		tci.pszText = (LPTSTR)(LPCTSTR)tabTitle;
+		m_tabCtrl.InsertItem(newIndex, &tci);
+		m_tabCtrl.SetCurSel(newIndex);
+
+		// ★★★ 强制刷新标签页显示，避免显示异常
+		m_tabCtrl.RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE | RDW_ALLCHILDREN);
+	}
+
+	// 切换到新文档（这会触发文档渲染）
+	SwitchToDocument(newIndex);
+
+	// 更新状态栏
+	UpdateStatusBar();
+
+	// ★★★ 添加到最近文件列表
+	AddRecentFile(pParams->filePath);
+
+	// ★★★ 强制刷新显示，确保PDF页面立即显示
+	Invalidate();
+	UpdateWindow();
+
+	// 清理
+	delete pParams;
+	m_pLoadParams = nullptr;
+	m_pLoadThread = nullptr;
+
+	// ★★★ 关键：在所有UI更新完成后才关闭进度对话框
+	// 这样用户看到进度条消失时，PDF页面已经显示出来了
+	if (m_pProgressDlg)
+	{
+		m_pProgressDlg->DestroyWindow();
+		delete m_pProgressDlg;
+		m_pProgressDlg = nullptr;
+	}
+
+	return 0;
 }

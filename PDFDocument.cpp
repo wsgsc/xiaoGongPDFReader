@@ -310,6 +310,36 @@ void CPDFDocument::CleanupThumbnails()
 		}
 	}
 	m_thumbnailCache.clear();
+	m_thumbnailCacheOrder.clear();
+}
+
+void CPDFDocument::LimitThumbnailCache(int maxCount)
+{
+	// 使用LRU算法限制缩略图缓存数量，防止大文件内存爆炸
+	while ((int)m_thumbnailCache.size() > maxCount && !m_thumbnailCacheOrder.empty())
+	{
+		// 删除最久未使用的缩略图（列表尾部）
+		int oldestPage = m_thumbnailCacheOrder.back();
+		m_thumbnailCacheOrder.pop_back();
+
+		auto it = m_thumbnailCache.find(oldestPage);
+		if (it != m_thumbnailCache.end())
+		{
+			if (it->second.hBitmap) {
+				DeleteObject(it->second.hBitmap);
+			}
+			m_thumbnailCache.erase(it);
+		}
+	}
+}
+
+void CPDFDocument::UpdateThumbnailLRU(int pageNumber)
+{
+	// 更新LRU顺序：将指定页面移到列表前面（最近使用）
+	// 先从列表中移除该页面（如果存在）
+	m_thumbnailCacheOrder.remove(pageNumber);
+	// 再添加到列表前面
+	m_thumbnailCacheOrder.push_front(pageNumber);
 }
 
 void CPDFDocument::ClearPageCache()

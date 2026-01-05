@@ -46,7 +46,10 @@
 #define IDC_CHECK_CASE_SENSITIVE        1044
 #define IDC_BTN_EDIT                    1045
 #define IDD_PDF_EDIT_DIALOG             105
+#define IDD_PROGRESS_DIALOG             106
 #define IDC_EDIT_THUMBNAIL_LIST         1046
+#define IDC_PROGRESS_BAR                1054
+#define IDC_PROGRESS_STATUS             1055
 #define IDC_BTN_EDIT_SAVE               1047
 #define IDC_BTN_EDIT_CANCEL             1048
 #define IDC_BTN_EDIT_RESET              1049
@@ -79,7 +82,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        133
 #define _APS_NEXT_COMMAND_VALUE         32789
-#define _APS_NEXT_CONTROL_VALUE         1054
+#define _APS_NEXT_CONTROL_VALUE         1056
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

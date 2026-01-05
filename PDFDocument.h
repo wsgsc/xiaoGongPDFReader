@@ -111,7 +111,10 @@ public:
 
 	// 缩略图管理
 	std::map<int, ThumbnailInfo>& GetThumbnailCache() { return m_thumbnailCache; }
+	std::list<int>& GetThumbnailCacheOrder() { return m_thumbnailCacheOrder; }  // 获取LRU顺序列表
 	void CleanupThumbnails();
+	void LimitThumbnailCache(int maxCount = 100);  // 限制缩略图缓存大小（LRU）
+	void UpdateThumbnailLRU(int pageNumber);  // 更新缩略图LRU顺序
 
 
 	// 页面缓存管理
@@ -175,13 +178,14 @@ private:
 
 	// 缩略图数据
 	std::map<int, ThumbnailInfo> m_thumbnailCache;
+	std::list<int> m_thumbnailCacheOrder;  // LRU顺序（最近使用的在前面）
 	int m_thumbnailPicWidth;
 	int m_thumbnailPicHeight;
 
 	// 页面缓存
 	std::map<PageCacheKey, PageCacheItem> m_pageCache;
 	std::list<PageCacheKey> m_cacheOrder;
-	static const int CACHE_LIMIT = 20;
+	static const int CACHE_LIMIT = 50;  // 增加缓存大小以提升大文件性能
 
 	// 当前位图
 	HBITMAP m_hCurrentBitmap;

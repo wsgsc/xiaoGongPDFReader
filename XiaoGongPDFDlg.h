@@ -153,6 +153,20 @@ private:
 	std::vector<CPDFDocument*> m_documents;  // 所有打开的文档
 	int m_activeDocIndex;  // 当前活动文档索引
 
+	// 后台加载相关
+	struct PDFLoadParams {
+		CString filePath;
+		std::vector<char> utf8Path;
+		CXiaoGongPDFDlg* pDlg;
+		CPDFDocument* pDoc;
+		bool success;
+		CString errorMsg;
+	};
+	static UINT PDFLoadThreadProc(LPVOID pParam);  // 后台加载线程函数
+	CWinThread* m_pLoadThread;  // 加载线程指针
+	PDFLoadParams* m_pLoadParams;  // 加载参数
+	CDialog* m_pProgressDlg;  // 进度对话框指针
+
 	// 缩放相关（ZoomMode 定义在 PDFDocument.h 中）
 	ZoomMode m_zoomMode;
 	float m_customZoom;
@@ -250,9 +264,12 @@ private:
 	std::map<PageCacheKey, PageCacheItem> m_pageCache;
 
 	// 可选：控制最大缓存数量
-	static const int CACHE_LIMIT = 20;
+	static const int CACHE_LIMIT = 50;  // 增加缓存大小以提升大文件性能
 	std::list<PageCacheKey> m_cacheOrder;
 	// end
+
+	// 缩略图缓存限制（避免大文件内存爆炸）
+	static const int THUMBNAIL_CACHE_LIMIT = 100;  // 最多缓存100个缩略图
 
 	// 连续滚动模式相关
 	bool m_continuousScrollMode;            // 是否启用连续滚动模式
@@ -290,10 +307,15 @@ protected:
     void UpdateThumbnails();
     void CleanupThumbnails();
     void HighlightCurrentThumbnail();
+	void RenderVisibleThumbnails();  // 渲染可见区域的缩略图（按需加载）
     afx_msg void OnThumbnailItemChanged(NMHDR* pNMHDR, LRESULT* pResult);
+	afx_msg LRESULT OnThumbnailScroll(WPARAM wParam, LPARAM lParam);  // 缩略图滚动事件
     afx_msg void OnSize(UINT nType, int cx, int cy);
     afx_msg LRESULT OnRenderThumbnailsAsync(WPARAM wParam, LPARAM lParam);  // 异步渲染缩略图
     afx_msg LRESULT OnOpenInitialFile(WPARAM wParam, LPARAM lParam);  // 延迟打开初始文件
+    afx_msg LRESULT OnUpdateThumbnailHighlight(WPARAM wParam, LPARAM lParam);  // 延迟更新缩略图高亮
+    afx_msg LRESULT OnPDFLoadComplete(WPARAM wParam, LPARAM lParam);  // PDF后台加载完成
+    afx_msg void OnTimer(UINT_PTR nIDEvent);  // 定时器消息处理（用于去抖动缩略图高亮更新）
 
     // 工具栏相关函数
     void InitializeToolbar();  // 新增初始化工具栏函数
