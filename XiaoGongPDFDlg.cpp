@@ -36,6 +36,14 @@ LRESULT CALLBACK CPDFViewCtrl::StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam,
 	// 从窗口的用户数据中获取this指针
 	CPDFViewCtrl* pThis = (CPDFViewCtrl*)::GetWindowLongPtr(hwnd, GWLP_USERDATA);
 
+#ifdef _DEBUG
+	// 追踪关键消息
+	if (msg == WM_PAINT)
+	{
+		TRACE(_T("CPDFViewCtrl: WM_PAINT\n"));
+	}
+#endif
+
 	// 处理 WM_VSCROLL：转发滚动消息给父对话框（用于鼠标滚轮等操作）
 	if (msg == WM_VSCROLL)
 	{
@@ -44,6 +52,17 @@ LRESULT CALLBACK CPDFViewCtrl::StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam,
 			pThis->m_pParentDlg->SendMessage(WM_VSCROLL, wParam, (LPARAM)hwnd);
 			return 0;
 		}
+	}
+
+	// ★★★ 拦截 WM_ERASEBKGND 消息，避免背景擦除导致的闪烁
+	// 在高刷新率显示器上，背景擦除会导致明显的白色闪烁
+	// 由于我们总是绘制完整的位图内容，不需要擦除背景
+	if (msg == WM_ERASEBKGND)
+	{
+#ifdef _DEBUG
+		TRACE(_T("CPDFViewCtrl: 拦截WM_ERASEBKGND\n"));
+#endif
+		return TRUE;  // 返回TRUE表示已处理，不执行默认的背景擦除
 	}
 
 	// 调用原始窗口过程
@@ -101,6 +120,8 @@ CXiaoGongPDFDlg::CXiaoGongPDFDlg(CWnd* pParent /*=nullptr*/)
 	, m_totalScrollHeight(0)     // 初始化总滚动高度
 	, m_uniformScale(1.0f)       // ★★★ 初始化统一缩放比例（连续滚动模式用）
 	, m_hContinuousViewBitmap(nullptr)  // ★★★ 初始化连续视图位图
+	, m_scrollThumbTimer(0)      // ★★★ 初始化滚动条拖动定时器
+	, m_isThumbTracking(false)   // ★★★ 初始化拖动状态
 	, m_isDraggingScrollbar(false)  // 初始化滚动条拖拽状态
 	, m_scrollbarDragStartY(0)      // 初始化滚动条拖拽起始Y
 	, m_scrollbarDragStartPos(0)    // 初始化滚动条拖拽起始位置
@@ -298,6 +319,7 @@ BEGIN_MESSAGE_MAP(CXiaoGongPDFDlg, CDialogEx)
 	ON_WM_PAINT()
 	ON_WM_QUERYDRAGICON()
 	ON_WM_CTLCOLOR()
+	ON_WM_ERASEBKGND()  // ★★★ 拦截背景擦除消息，防止窗口调整大小时的闪烁
 	ON_COMMAND(ID_MENU_OPEN, &CXiaoGongPDFDlg::onMenuOpen)
 	ON_COMMAND(ID_MENU_EXIT,&CXiaoGongPDFDlg::onMenuExit)
 	ON_COMMAND(ID_MENU_ABOUT,&CXiaoGongPDFDlg::onMenuAbout)
@@ -561,7 +583,13 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 
 	// 更新控件
 	m_pdfView.ModifyStyle(0, SS_BITMAP | SS_CENTERIMAGE | WS_VSCROLL);
-	m_pdfView.Invalidate();
+
+	// ★★★ 启用WS_EX_COMPOSITED扩展样式，使用桌面合成来减少高刷新率显示器上的闪烁
+	// 这会让Windows使用双缓冲合成来渲染控件，避免直接绘制时的闪白问题
+	m_pdfView.ModifyStyleEx(0, WS_EX_COMPOSITED);
+
+	// ★★★ 使用FALSE参数避免擦除背景，减少闪烁
+	m_pdfView.Invalidate(FALSE);
 	m_pdfView.UpdateWindow();
 
 	// ★★★ 初始化自定义PDF预览控件，使其能够转发滚动条消息
@@ -687,6 +715,21 @@ void CXiaoGongPDFDlg::OnPaint()
 	{
 		CDialogEx::OnPaint();
 	}
+}
+
+// ★★★ 拦截背景擦除消息，防止窗口调整大小时的闪烁（高刷新率显示器优化）
+BOOL CXiaoGongPDFDlg::OnEraseBkgnd(CDC* pDC)
+{
+	// 不完全跳过背景擦除，而是用系统对话框背景色填充
+	// 这样可以避免黑色区域，同时仍然减少闪烁
+	CRect rect;
+	GetClientRect(&rect);
+
+	// 使用系统对话框背景色（通常是灰色）
+	CBrush brush(GetSysColor(COLOR_3DFACE));
+	pDC->FillRect(&rect, &brush);
+
+	return TRUE;  // 返回TRUE表示我们已经处理了背景擦除
 }
 
 HBRUSH CXiaoGongPDFDlg::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor)
@@ -2077,6 +2120,7 @@ LRESULT CXiaoGongPDFDlg::OnUpdateThumbnailHighlight(WPARAM wParam, LPARAM lParam
 void CXiaoGongPDFDlg::OnTimer(UINT_PTR nIDEvent)
 {
 	const UINT_PTR TIMER_ID_THUMBNAIL_HIGHLIGHT = 1001;
+	const UINT_PTR TIMER_ID_SCROLL_THUMB_RENDER = 1003;  // ★★★ 滚动条拖动渲染定时器
 
 	if (nIDEvent == TIMER_ID_THUMBNAIL_HIGHLIGHT)
 	{
@@ -2088,6 +2132,17 @@ void CXiaoGongPDFDlg::OnTimer(UINT_PTR nIDEvent)
 
 		// 销毁一次性定时器
 		KillTimer(TIMER_ID_THUMBNAIL_HIGHLIGHT);
+		return;
+	}
+
+	// ★★★ 处理滚动条拖动时的定时渲染（用于平衡性能和视觉反馈）
+	if (nIDEvent == TIMER_ID_SCROLL_THUMB_RENDER)
+	{
+#ifdef _DEBUG
+		TRACE(_T("OnTimer: 执行滚动条拖动定时渲染\n"));
+#endif
+		// 执行渲染
+		RenderVisiblePages();
 		return;
 	}
 
@@ -2262,6 +2317,8 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 	// 检查控件是否有效，以及窗口是否为最小化状态
 	if (m_thumbnailList.GetSafeHwnd() && m_pdfView.GetSafeHwnd() && m_toolbar.GetSafeHwnd() && nType != SIZE_MINIMIZED)
 	{
+		// ★★★ 禁止重绘，避免布局调整过程中的闪烁（高刷新率显示器优化）
+		SetRedraw(FALSE);
 		// 增加工具栏高度为40
 		const int TOOLBAR_HEIGHT = 40;
 		const int TAB_HEIGHT = 35;      // 标签页控件高度（增加到35以完整显示标签）
@@ -2465,16 +2522,17 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 			UpdateStatusBar();
 
 			// 立即重绘按钮和状态栏，确保状态变化可见
-			m_btnFirst.Invalidate();
-			m_btnLast.Invalidate();
-			m_btnFullscreen.Invalidate();
-			m_btnRotateLeft.Invalidate();
-			m_btnRotateRight.Invalidate();
-			m_editCurrent.Invalidate();
+			// ★★★ 使用FALSE参数避免擦除背景，减少高刷新率显示器上的闪烁
+			m_btnFirst.Invalidate(FALSE);
+			m_btnLast.Invalidate(FALSE);
+			m_btnFullscreen.Invalidate(FALSE);
+			m_btnRotateLeft.Invalidate(FALSE);
+			m_btnRotateRight.Invalidate(FALSE);
+			m_editCurrent.Invalidate(FALSE);
 		}
 
 		// 无论是否有文档，都需要重绘状态栏（修复未打开PDF时横向伸缩显示异常）
-		m_statusBar.Invalidate();
+		m_statusBar.Invalidate(FALSE);
 		m_statusBar.UpdateWindow();
 
 		// 如果有文档加载，重新渲染当前页
@@ -2516,6 +2574,11 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 				RenderPage(m_currentPage);
 			}
 		}
+
+		// ★★★ 重新启用重绘，一次性刷新整个窗口（高刷新率显示器优化）
+		SetRedraw(TRUE);
+		Invalidate(FALSE);
+		UpdateWindow();
 	}
 }
 
@@ -2653,9 +2716,10 @@ void CXiaoGongPDFDlg::UpdatePageControls()
 	UpdateStatusBar();
 
 	// 立即重绘按钮，确保状态变化可见
-	m_btnFirst.Invalidate();
-	m_btnLast.Invalidate();
-	m_btnFullscreen.Invalidate();
+	// ★★★ 使用FALSE参数避免擦除背景，减少高刷新率显示器上的闪烁
+	m_btnFirst.Invalidate(FALSE);
+	m_btnLast.Invalidate(FALSE);
+	m_btnFullscreen.Invalidate(FALSE);
 }
 
 void CXiaoGongPDFDlg::UpdateStatusBar()
@@ -2911,7 +2975,8 @@ void CXiaoGongPDFDlg::RotatePage(int degrees)
 	if (RenderThumbnail(m_currentPage))
 	{
 		// 刷新缩略图列表显示
-		m_thumbnailList.Invalidate();
+		// ★★★ 使用FALSE参数避免擦除背景，减少高刷新率显示器上的闪烁
+		m_thumbnailList.Invalidate(FALSE);
 		HighlightCurrentThumbnail();
 #ifdef _DEBUG
 		TRACE(_T("旋转后刷新缩略图显示: 页面 %d\n"), m_currentPage);
@@ -3627,7 +3692,8 @@ void CXiaoGongPDFDlg::ExitFullscreen()
 	}
 
 	// 确保窗口和所有控件更新
-	Invalidate();
+	// ★★★ 使用FALSE参数避免擦除背景，减少高刷新率显示器上的闪烁
+	Invalidate(FALSE);
 	UpdateWindow();
 }
 
@@ -6404,8 +6470,28 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 	// ★★★ 先设置新位图到控件，再删除旧位图，避免快速拖动时出现闪白
 	if (hNewBitmap)
 	{
+#ifdef _DEBUG
+		TRACE(_T("RenderVisiblePages: 开始更新位图...\n"));
+#endif
+		// 强制刷新GDI队列，确保位图数据完全写入内存，避免高刷新率显示器上的闪白问题
+		GdiFlush();
+
+#ifdef _DEBUG
+		TRACE(_T("RenderVisiblePages: GdiFlush完成，准备SetBitmap...\n"));
+#endif
+
+		// ★★★ 禁止PDF控件重绘，避免SetBitmap内部触发的WM_PAINT导致闪白
+		m_pdfView.SetRedraw(FALSE);
+
 		// 设置位图到控件（控件会自动处理重绘）
 		m_pdfView.SetBitmap(hNewBitmap);
+
+		// ★★★ 重新启用重绘
+		m_pdfView.SetRedraw(TRUE);
+
+#ifdef _DEBUG
+		TRACE(_T("RenderVisiblePages: SetBitmap完成，准备删除旧位图...\n"));
+#endif
 
 		// 在设置新位图之后再删除旧位图，确保控件始终有有效的位图可以显示
 		if (m_hContinuousViewBitmap)
@@ -6413,8 +6499,19 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 			DeleteObject(m_hContinuousViewBitmap);
 		}
 
+#ifdef _DEBUG
+		TRACE(_T("RenderVisiblePages: 位图更新完成，准备刷新显示...\n"));
+#endif
+
 		// 保存新位图句柄
 		m_hContinuousViewBitmap = hNewBitmap;
+
+		// ★★★ 手动触发一次重绘，使用 RedrawWindow 确保立即显示
+		m_pdfView.RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_NOERASE);
+
+#ifdef _DEBUG
+		TRACE(_T("RenderVisiblePages: 已触发重绘\n"));
+#endif
 	}
 	else
 	{
@@ -6511,7 +6608,44 @@ void CXiaoGongPDFDlg::OnVScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar)
 	{
 		m_scrollPosition = newPos;
 		UpdateScrollBar();
-		RenderVisiblePages();
+
+		// ★★★ 优化：拖动滚动条时使用定时渲染机制（每500ms渲染一次）
+		if (nSBCode == SB_THUMBTRACK)
+		{
+			// 正在拖动滚动条
+			if (!m_isThumbTracking)
+			{
+				// 首次进入拖动状态，设置定时器
+				m_isThumbTracking = true;
+				m_scrollThumbTimer = SetTimer(1003, THUMB_RENDER_INTERVAL, NULL);
+#ifdef _DEBUG
+				TRACE(_T("OnVScroll: 开始拖动，启动定时渲染（%dms间隔）\n"), THUMB_RENDER_INTERVAL);
+#endif
+			}
+			// 拖动过程中不立即渲染，等待定时器触发
+		}
+		else if (nSBCode == SB_THUMBPOSITION)
+		{
+			// 松开滚动条，停止定时器并立即渲染最终位置
+			if (m_isThumbTracking)
+			{
+				m_isThumbTracking = false;
+				if (m_scrollThumbTimer != 0)
+				{
+					KillTimer(m_scrollThumbTimer);
+					m_scrollThumbTimer = 0;
+				}
+#ifdef _DEBUG
+				TRACE(_T("OnVScroll: 松开滚动条，停止定时器并渲染最终位置\n"));
+#endif
+			}
+			RenderVisiblePages();
+		}
+		else
+		{
+			// 其他滚动操作（鼠标滚轮、点击箭头等）立即渲染
+			RenderVisiblePages();
+		}
 	}
 
 	CDialogEx::OnVScroll(nSBCode, nPos, pScrollBar);
@@ -6566,7 +6700,8 @@ void CXiaoGongPDFDlg::ClearSearchResults()
 	// 刷新当前页面以移除高亮
 	if (m_doc && m_currentPage >= 0)
 	{
-		m_pdfView.Invalidate();
+		// ★★★ 使用FALSE参数避免擦除背景，减少高刷新率显示器上的闪烁
+		m_pdfView.Invalidate(FALSE);
 	}
 }
 
@@ -7162,7 +7297,8 @@ LRESULT CXiaoGongPDFDlg::OnPDFLoadComplete(WPARAM wParam, LPARAM lParam)
 	AddRecentFile(pParams->filePath);
 
 	// ★★★ 强制刷新显示，确保PDF页面立即显示
-	Invalidate();
+	// 使用FALSE参数避免擦除背景，减少高刷新率显示器上的闪烁
+	Invalidate(FALSE);
 	UpdateWindow();
 
 	// 清理

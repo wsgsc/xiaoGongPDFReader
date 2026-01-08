@@ -282,6 +282,11 @@ private:
 	std::map<int, HBITMAP> m_continuousPageBitmaps;  // 连续滚动模式下的页面位图缓存
 	HBITMAP m_hContinuousViewBitmap;         // ★★★ 当前连续滚动视图的位图（用于处理重绘）
 
+	// ★★★ 滚动条拖动优化相关成员变量
+	UINT_PTR m_scrollThumbTimer;             // 滚动条拖动定时器ID（0表示无定时器）
+	bool m_isThumbTracking;                  // 是否正在拖动滚动条
+	static const int THUMB_RENDER_INTERVAL = 200;  // 拖动时的渲染间隔（毫秒）
+
 	// 搜索相关成员变量
 	std::vector<SearchMatch> m_searchMatches;  // 所有搜索匹配项
 	int m_currentMatchIndex;                    // 当前匹配项索引 (-1表示无匹配)
@@ -299,6 +304,7 @@ protected:
 	afx_msg HCURSOR OnQueryDragIcon();
 	afx_msg HBRUSH OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor);
 	afx_msg void OnGetMinMaxInfo(MINMAXINFO* lpMMI);
+	afx_msg BOOL OnEraseBkgnd(CDC* pDC);  // ★★★ 拦截背景擦除消息，防止闪烁
 	DECLARE_MESSAGE_MAP()
 
     // 缩略图相关函数
