@@ -7,6 +7,9 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <gdiplus.h>
+
+#pragma comment(lib, "gdiplus.lib")
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -22,6 +25,7 @@ BEGIN_MESSAGE_MAP(CPDFEditDialog, CDialogEx)
 	ON_NOTIFY(NM_RCLICK, IDC_EDIT_THUMBNAIL_LIST, &CPDFEditDialog::OnNMRClick)
 	ON_NOTIFY(NM_DBLCLK, IDC_EDIT_THUMBNAIL_LIST, &CPDFEditDialog::OnNMDblclk)
 	ON_NOTIFY(LVN_ITEMCHANGED, IDC_EDIT_THUMBNAIL_LIST, &CPDFEditDialog::OnItemChanged)
+	ON_NOTIFY(NM_CUSTOMDRAW, IDC_EDIT_THUMBNAIL_LIST, &CPDFEditDialog::OnCustomDraw)
 	ON_WM_MOUSEMOVE()
 	ON_WM_LBUTTONUP()
 	ON_WM_LBUTTONDOWN()
@@ -88,14 +92,20 @@ void CPDFEditDialog::InitializeThumbnailList()
 	// 设置列表控件样式为大图标，支持多选
 	m_thumbnailList.ModifyStyle(LVS_SINGLESEL, LVS_ICON | LVS_SHOWSELALWAYS);
 
-	// 创建ImageList（220宽，根据常见PDF比例设置合适高度）
-	// 使用较大的高度（180）以适应大多数PDF页面比例，避免黑色填充
-	m_imageList.Create(220, 180, ILC_COLOR24, m_totalPages, 10);
+	// 创建ImageList（更小的尺寸以适应网格布局）
+	// 尺寸：150×190，适合A4比例的页面
+	m_imageList.Create(150, 190, ILC_COLOR24 | ILC_MASK, m_totalPages, 10);
 	m_thumbnailList.SetImageList(&m_imageList, LVSIL_NORMAL);
 
-	// 设置列表背景色为白色，减少黑色区域的视觉冲击
-	m_thumbnailList.SetBkColor(RGB(255, 255, 255));
-	m_thumbnailList.SetTextBkColor(RGB(255, 255, 255));
+	// 设置列表背景色为浅灰色，现代化视觉效果
+	m_thumbnailList.SetBkColor(RGB(248, 248, 248));
+	m_thumbnailList.SetTextBkColor(RGB(248, 248, 248));
+	m_thumbnailList.SetTextColor(RGB(50, 50, 50));
+
+	// 设置图标间距（水平和垂直），创建网格布局
+	// cx: 水平间距，cy: 垂直间距
+	CSize iconSpacing(180, 210);  // 调整垂直间距，因为不显示底部文本标签
+	m_thumbnailList.SetIconSpacing(iconSpacing);
 }
 
 void CPDFEditDialog::LoadAllThumbnails()
@@ -114,8 +124,10 @@ void CPDFEditDialog::LoadAllThumbnails()
 		page.sourceFile = m_filePath;      // 设置源文件路径
 		page.sourcePageIndex = i;          // 源文件中的页码
 
-		// 渲染缩略图
-		page.hThumbnail = RenderThumbnail(i);
+		// 渲染缩略图（初始时currentPos和originalPos都是i+1）
+		int currentPos = i + 1;
+		int originalPos = i + 1;
+		page.hThumbnail = RenderThumbnail(i, currentPos, originalPos);
 
 		m_pages.push_back(page);
 
@@ -128,10 +140,8 @@ void CPDFEditDialog::LoadAllThumbnails()
 			bmp.Detach();  // 不要删除，由m_pages管理
 		}
 
-		// 添加到列表控件
-		CString pageText;
-		pageText.Format(_T("第 %d 页"), i + 1);
-		m_thumbnailList.InsertItem(i, pageText, i);
+		// 添加到列表控件（不显示文本标签）
+		m_thumbnailList.InsertItem(i, _T(""), i);
 	}
 
 	// 保存原始状态（用于重置）- 深拷贝HBITMAP以避免内存泄漏
@@ -149,7 +159,7 @@ void CPDFEditDialog::LoadAllThumbnails()
 	}
 }
 
-HBITMAP CPDFEditDialog::RenderThumbnail(int pageNumber)
+HBITMAP CPDFEditDialog::RenderThumbnail(int pageNumber, int currentPos, int originalPos, int rotationAngle)
 {
 	if (!m_ctx || !m_doc || pageNumber < 0 || pageNumber >= m_totalPages)
 		return nullptr;
@@ -166,12 +176,17 @@ HBITMAP CPDFEditDialog::RenderThumbnail(int pageNumber)
 		// 获取页面边界
 		fz_rect bounds = fz_bound_page(m_ctx, page);
 
-		// 计算缩放比例（目标宽度220像素）
-		float targetWidth = 220.0f;
+		// 计算缩放比例（目标宽度150像素，考虑旋转后的尺寸）
+		float targetWidth = 150.0f;
 		float scale = targetWidth / (bounds.x1 - bounds.x0);
 
-		// 创建变换矩阵
+		// 创建变换矩阵（缩放 + 旋转）
 		fz_matrix ctm = fz_scale(scale, scale);
+		if (rotationAngle != 0) {
+			// 应用旋转（MuPDF使用弧度）
+			fz_matrix rotate = fz_rotate(rotationAngle);
+			ctm = fz_concat(ctm, rotate);
+		}
 
 		// 渲染为pixmap（不使用alpha通道）
 		pixmap = fz_new_pixmap_from_page(m_ctx, page, ctm, fz_device_rgb(m_ctx), 0);
@@ -182,9 +197,9 @@ HBITMAP CPDFEditDialog::RenderThumbnail(int pageNumber)
 		int stride = fz_pixmap_stride(m_ctx, pixmap);
 		unsigned char* samples = fz_pixmap_samples(m_ctx, pixmap);
 
-		// ★★★ 创建固定尺寸220×180的DIB，用于垂直居中显示PDF内容
-		const int FIXED_WIDTH = 220;
-		const int FIXED_HEIGHT = 180;
+		// ★★★ 创建固定尺寸150×190的DIB，用于垂直居中显示PDF内容
+		const int FIXED_WIDTH = 150;
+		const int FIXED_HEIGHT = 190;
 		BITMAPINFO bmi = { 0 };
 		bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
 		bmi.bmiHeader.biWidth = FIXED_WIDTH;
@@ -202,10 +217,22 @@ HBITMAP CPDFEditDialog::RenderThumbnail(int pageNumber)
 			unsigned char* dest = (unsigned char*)pBits;
 			int destStride = ((FIXED_WIDTH * 3 + 3) & ~3);
 
-			// ★★★ 第1步：先用白色填充整个220×180区域
+			// ★★★ 第1步：先用浅灰色填充整个150×190区域（匹配背景）
 			for (int y = 0; y < FIXED_HEIGHT; y++)
 			{
 				for (int x = 0; x < FIXED_WIDTH; x++)
+				{
+					dest[y * destStride + x * 3 + 0] = 248;  // B
+					dest[y * destStride + x * 3 + 1] = 248;  // G
+					dest[y * destStride + x * 3 + 2] = 248;  // R
+				}
+			}
+
+			// ★★★ 第2步：绘制白色卡片背景（留出边距）
+			int cardMargin = 4;
+			for (int y = cardMargin; y < FIXED_HEIGHT - cardMargin; y++)
+			{
+				for (int x = cardMargin; x < FIXED_WIDTH - cardMargin; x++)
 				{
 					dest[y * destStride + x * 3 + 0] = 255;  // B
 					dest[y * destStride + x * 3 + 1] = 255;  // G
@@ -213,24 +240,117 @@ HBITMAP CPDFEditDialog::RenderThumbnail(int pageNumber)
 				}
 			}
 
-			// ★★★ 第2步：计算垂直居中偏移量
-			int yOffset = (FIXED_HEIGHT - height) / 2;
-			if (yOffset < 0) yOffset = 0;  // 如果PDF内容太高，从顶部开始
+			// ★★★ 第3步：计算居中偏移量（水平和垂直都要考虑cardMargin）
+			int contentAreaWidth = FIXED_WIDTH - cardMargin * 2;  // 可用内容区域宽度
+			int contentAreaHeight = FIXED_HEIGHT - cardMargin * 2;  // 可用内容区域高度
 
-			// ★★★ 第3步：复制PDF像素数据到居中位置（RGB -> BGR转换）
-			for (int y = 0; y < height && (y + yOffset) < FIXED_HEIGHT; y++)
+			// 计算垂直居中偏移量（相对于整个图像）
+			int yOffset = cardMargin + (contentAreaHeight - height) / 2;
+			if (yOffset < cardMargin) yOffset = cardMargin;  // 不能超过上边距
+
+			// 计算水平居中偏移量（相对于整个图像）
+			int xOffset = cardMargin + (contentAreaWidth - width) / 2;
+			if (xOffset < cardMargin) xOffset = cardMargin;  // 不能超过左边距
+
+			// ★★★ 第4步：复制PDF像素数据到居中位置（RGB -> BGR转换）
+			for (int y = 0; y < height && (y + yOffset) < (FIXED_HEIGHT - cardMargin); y++)
 			{
 				unsigned char* src = samples + y * stride;
 				unsigned char* destRow = dest + (y + yOffset) * destStride;
 
-				int copyWidth = (width < FIXED_WIDTH) ? width : FIXED_WIDTH;
+				int copyWidth = width;
+				// 确保不超过右边界
+				if (xOffset + copyWidth > FIXED_WIDTH - cardMargin)
+					copyWidth = FIXED_WIDTH - cardMargin - xOffset;
+
 				for (int x = 0; x < copyWidth; x++)
 				{
-					destRow[x * 3 + 0] = src[x * 3 + 2];  // B
-					destRow[x * 3 + 1] = src[x * 3 + 1];  // G
-					destRow[x * 3 + 2] = src[x * 3 + 0];  // R
+					int destX = xOffset + x;
+					if (destX >= cardMargin && destX < FIXED_WIDTH - cardMargin)
+					{
+						destRow[destX * 3 + 0] = src[x * 3 + 2];  // B
+						destRow[destX * 3 + 1] = src[x * 3 + 1];  // G
+						destRow[destX * 3 + 2] = src[x * 3 + 0];  // R
+					}
 				}
 			}
+
+			// ★★★ 第5步：使用GDI+绘制装饰元素
+			CDC memDC;
+			memDC.CreateCompatibleDC(GetDC());
+			HBITMAP hOldBitmap = (HBITMAP)memDC.SelectObject(hBitmap);
+
+			Gdiplus::Graphics graphics(memDC.GetSafeHdc());
+			graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+			graphics.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
+
+			// 绘制卡片边框
+			Gdiplus::RectF cardRect(
+				(Gdiplus::REAL)cardMargin,
+				(Gdiplus::REAL)cardMargin,
+				(Gdiplus::REAL)(FIXED_WIDTH - cardMargin * 2),
+				(Gdiplus::REAL)(FIXED_HEIGHT - cardMargin * 2)
+			);
+			Gdiplus::Pen borderPen(Gdiplus::Color(255, 220, 220, 220), 2.0f);
+			graphics.DrawRectangle(&borderPen, cardRect);
+
+			// 绘制蓝色圆形页码标记（左上角） - 显示当前位置
+			int badgeSize = 28;  // 增大以容纳两位数
+			Gdiplus::RectF badgeRect(10.0f, 10.0f, (Gdiplus::REAL)badgeSize, (Gdiplus::REAL)badgeSize);
+			Gdiplus::SolidBrush blueBrush(Gdiplus::Color(255, 33, 150, 243));
+			graphics.FillEllipse(&blueBrush, badgeRect);
+
+			// 在蓝色圆形标记上绘制当前位置 - 使用GDI而不是GDI+
+			// （GDI+ Font对象存在字形缓存问题，导致数字显示错误）
+			CString currentPosText;
+			currentPosText.Format(_T("%d"), currentPos);
+
+			// 暂时退出GDI+，使用原生GDI绘制文字
+			graphics.Flush(Gdiplus::FlushIntentionSync);
+			graphics.ReleaseHDC(memDC.GetSafeHdc());
+
+			// 使用GDI绘制蓝色徽章上的数字
+			memDC.SetBkMode(TRANSPARENT);
+			CFont badgeFont;
+			badgeFont.CreateFont(-14, 0, 0, 0, FW_BOLD, FALSE, FALSE, 0,
+				ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+				ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, _T("Arial"));
+			CFont* pOldFont = memDC.SelectObject(&badgeFont);
+			memDC.SetTextColor(RGB(255, 255, 255));
+			CRect badgeTextRect(10, 10, 38, 38);
+			memDC.DrawText(currentPosText, &badgeTextRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+			memDC.SelectObject(pOldFont);
+			badgeFont.DeleteObject();
+
+			// 重新获取GDI+ Graphics对象继续绘制
+			Gdiplus::Graphics graphics2(memDC.GetSafeHdc());
+			graphics2.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+			// 绘制底部深色标签栏
+			Gdiplus::RectF bottomRect(
+				(Gdiplus::REAL)cardMargin,
+				(Gdiplus::REAL)(FIXED_HEIGHT - 30),
+				(Gdiplus::REAL)(FIXED_WIDTH - cardMargin * 2),
+				26.0f
+			);
+			Gdiplus::SolidBrush darkBrush(Gdiplus::Color(230, 50, 50, 50));
+			graphics2.FillRectangle(&darkBrush, bottomRect);
+
+			// 在底部标签上绘制原始位置 - 使用GDI而不是GDI+
+			CString originalPosText;
+			originalPosText.Format(_T("%d"), originalPos);
+
+			// 再次退出GDI+，使用GDI绘制底部文字
+			graphics2.Flush(Gdiplus::FlushIntentionSync);
+			graphics2.ReleaseHDC(memDC.GetSafeHdc());
+
+			// 使用GDI绘制底部黑色条上的数字
+			CRect bottomTextRect(cardMargin, FIXED_HEIGHT - 30, FIXED_WIDTH - cardMargin, FIXED_HEIGHT - 4);
+			memDC.DrawText(originalPosText, &bottomTextRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+			// 不再需要Graphics对象，直接退出
+
+			memDC.SelectObject(hOldBitmap);
 		}
 
 		// 清理
@@ -252,7 +372,7 @@ void CPDFEditDialog::RefreshThumbnailList()
 	// 清空列表
 	m_thumbnailList.DeleteAllItems();
 	m_imageList.DeleteImageList();
-	m_imageList.Create(220, 180, ILC_COLOR24, m_totalPages, 10);
+	m_imageList.Create(150, 190, ILC_COLOR24 | ILC_MASK, m_totalPages, 10);
 	m_thumbnailList.SetImageList(&m_imageList, LVSIL_NORMAL);
 
 	// 重新添加未删除的页面
@@ -264,19 +384,47 @@ void CPDFEditDialog::RefreshThumbnailList()
 
 		m_pages[i].displayIndex = displayIndex;
 
+		HBITMAP hThumbnailToUse = nullptr;
+		int originalPos = m_pages[i].originalIndex + 1;
+		int currentPos = displayIndex + 1;
+
+		// ★★★ 如果是被拖拽的页面，使用占位虚影
+		if (m_pages[i].isDragging) {
+			// 先删除原有的缩略图（如果存在）
+			if (m_pages[i].hThumbnail) {
+				::DeleteObject(m_pages[i].hThumbnail);
+				m_pages[i].hThumbnail = nullptr;
+			}
+
+			// 创建占位虚影
+			hThumbnailToUse = CreatePlaceholderBitmap();
+			// 临时保存占位图到m_pages[i].hThumbnail，方便后续清理
+			m_pages[i].hThumbnail = hThumbnailToUse;
+		}
+		else {
+			// 删除旧的缩略图（如果存在）
+			if (m_pages[i].hThumbnail)
+			{
+				::DeleteObject(m_pages[i].hThumbnail);
+				m_pages[i].hThumbnail = nullptr;
+			}
+
+			// 重新渲染缩略图，currentPos=displayIndex+1, originalPos=originalIndex+1
+			hThumbnailToUse = RenderThumbnail(m_pages[i].originalIndex, currentPos, originalPos, m_pages[i].rotationAngle);
+			m_pages[i].hThumbnail = hThumbnailToUse;
+		}
+
 		// 添加到ImageList
-		if (m_pages[i].hThumbnail)
+		if (hThumbnailToUse)
 		{
 			CBitmap bmp;
-			bmp.Attach(m_pages[i].hThumbnail);
+			bmp.Attach(hThumbnailToUse);
 			m_imageList.Add(&bmp, (CBitmap*)nullptr);
 			bmp.Detach();
 		}
 
-		// 添加到列表控件
-		CString pageText;
-		pageText.Format(_T("第 %d 页"), displayIndex + 1);
-		m_thumbnailList.InsertItem(displayIndex, pageText, displayIndex);
+		// 添加到列表控件（不显示文本标签）
+		m_thumbnailList.InsertItem(displayIndex, _T(""), displayIndex);
 
 		displayIndex++;
 	}
@@ -404,16 +552,13 @@ int CPDFEditDialog::CalculateInsertIndex(CPoint point)
 	int hitIndex = m_thumbnailList.HitTest(&hitTest);
 
 	if (hitIndex >= 0) {
-		// 获取项的位置
-		CRect itemRect;
-		m_thumbnailList.GetItemRect(hitIndex, &itemRect, LVIR_BOUNDS);
-
-		// 判断鼠标在项的哪一侧
-		if (point.x > itemRect.CenterPoint().x) {
-			return hitIndex + 1;  // 插入到右侧
-		}
-		else {
-			return hitIndex;  // 插入到左侧
+		// 根据被拖拽页面的位置决定插入位置
+		// 如果拖拽页面在目标页面之前，插入位置是 hitIndex（因为删除后索引前移）
+		// 如果拖拽页面在目标页面之后，插入位置是 hitIndex + 1（删除不影响目标索引）
+		if (hitIndex < m_dragIndex) {
+			return hitIndex +1;  // 拖拽页面在目标之前
+		} else {
+			return hitIndex ;  // 拖拽页面在目标之后或相同位置
 		}
 	}
 
@@ -437,51 +582,8 @@ void CPDFEditDialog::UpdateInsertIndex(CPoint point)
 	if (newIndex != m_lastDropIndex) {
 		m_dropIndex = newIndex;
 		m_lastDropIndex = newIndex;
-
-		// 临时插入到新位置并刷新显示
-		// 先移除之前临时插入的页面（如果存在）
-		// 然后在新位置插入
-
-		// 计算实际插入位置（考虑isDeleted的页面）
-		int insertActualPos = 0;
-		int displayIdx = 0;
-
-		if (m_dropIndex == 0) {
-			// 插入到最前面，找到第一个未删除的位置
-			for (size_t i = 0; i < m_pages.size(); i++) {
-				if (!m_pages[i].isDeleted) {
-					insertActualPos = static_cast<int>(i);
-					break;
-				}
-			}
-			if (insertActualPos == 0 && m_pages.empty()) {
-				insertActualPos = 0;
-			}
-		} else {
-			// 插入到第m_dropIndex个位置
-			for (size_t i = 0; i < m_pages.size(); i++) {
-				if (m_pages[i].isDeleted) continue;
-
-				displayIdx++;
-				if (displayIdx == m_dropIndex) {
-					insertActualPos = static_cast<int>(i) + 1;
-					break;
-				}
-			}
-			// 如果到达末尾
-			if (displayIdx < m_dropIndex) {
-				insertActualPos = static_cast<int>(m_pages.size());
-			}
-		}
-
-		// 插入被拖拽的页面到新位置
-		m_pages.insert(m_pages.begin() + insertActualPos, m_draggedPage);
-
-		// 刷新列表显示临时效果
-		RefreshThumbnailList();
-
-		// 移除刚才临时插入的页面（保持m_pages不变，为下次移动做准备）
-		m_pages.erase(m_pages.begin() + insertActualPos);
+		// ★★★ 新逻辑：拖拽过程中不刷新列表，只记录drop位置
+		// 实际移动在EndDragOperation中进行
 	}
 }
 
@@ -513,17 +615,77 @@ void CPDFEditDialog::HandleAutoScroll(CPoint point)
 	}
 }
 
+// 创建占位虚影位图
+HBITMAP CPDFEditDialog::CreatePlaceholderBitmap()
+{
+	const int FIXED_WIDTH = 150;
+	const int FIXED_HEIGHT = 190;
+	const int cardMargin = 4;
+
+	BITMAPINFO bmi = { 0 };
+	bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+	bmi.bmiHeader.biWidth = FIXED_WIDTH;
+	bmi.bmiHeader.biHeight = -FIXED_HEIGHT;
+	bmi.bmiHeader.biPlanes = 1;
+	bmi.bmiHeader.biBitCount = 24;
+	bmi.bmiHeader.biCompression = BI_RGB;
+
+	HDC hdc = GetDC()->GetSafeHdc();
+	void* pBits = nullptr;
+	HBITMAP hBitmap = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &pBits, nullptr, 0);
+
+	if (hBitmap && pBits) {
+		unsigned char* dest = (unsigned char*)pBits;
+		int destStride = ((FIXED_WIDTH * 3 + 3) & ~3);
+
+		// 填充浅灰色背景
+		for (int y = 0; y < FIXED_HEIGHT; y++) {
+			for (int x = 0; x < FIXED_WIDTH; x++) {
+				dest[y * destStride + x * 3 + 0] = 248;  // B
+				dest[y * destStride + x * 3 + 1] = 248;  // G
+				dest[y * destStride + x * 3 + 2] = 248;  // R
+			}
+		}
+
+		// 绘制半透明灰色卡片
+		for (int y = cardMargin; y < FIXED_HEIGHT - cardMargin; y++) {
+			for (int x = cardMargin; x < FIXED_WIDTH - cardMargin; x++) {
+				dest[y * destStride + x * 3 + 0] = 220;  // B
+				dest[y * destStride + x * 3 + 1] = 220;  // G
+				dest[y * destStride + x * 3 + 2] = 220;  // R
+			}
+		}
+
+		// 使用GDI+绘制虚线边框
+		CDC memDC;
+		memDC.CreateCompatibleDC(GetDC());
+		HBITMAP hOldBitmap = (HBITMAP)memDC.SelectObject(hBitmap);
+
+		Gdiplus::Graphics graphics(memDC.GetSafeHdc());
+		graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+		// 绘制虚线边框
+		Gdiplus::RectF borderRect(
+			(Gdiplus::REAL)cardMargin,
+			(Gdiplus::REAL)cardMargin,
+			(Gdiplus::REAL)(FIXED_WIDTH - cardMargin * 2),
+			(Gdiplus::REAL)(FIXED_HEIGHT - cardMargin * 2)
+		);
+		Gdiplus::Pen dashedPen(Gdiplus::Color(255, 150, 150, 150), 2.0f);
+		dashedPen.SetDashStyle(Gdiplus::DashStyleDash);
+		graphics.DrawRectangle(&dashedPen, borderRect);
+
+		memDC.SelectObject(hOldBitmap);
+	}
+
+	return hBitmap;
+}
+
 // 开始拖拽操作
 void CPDFEditDialog::BeginDragOperation()
 {
 	m_isDragging = true;
 	m_potentialDrag = false;
-
-	// 创建拖拽图像
-	CPoint pt(0, 0);
-	m_pDragImage = m_thumbnailList.CreateDragImage(m_dragIndex, &pt);
-	if (!m_pDragImage)
-		return;
 
 	// 找到被拖拽页面在m_pages中的实际索引（只计算未删除的页面）
 	m_draggedPageOriginalPos = -1;
@@ -542,6 +704,8 @@ void CPDFEditDialog::BeginDragOperation()
 	if (m_draggedPageOriginalPos < 0)
 		return;
 
+	TRACE(_T("BeginDragOperation: m_dragIndex=%d, m_draggedPageOriginalPos=%d\n"), m_dragIndex, m_draggedPageOriginalPos);
+
 	// 保存被拖拽的页面信息（深拷贝HBITMAP）
 	m_draggedPage = m_pages[m_draggedPageOriginalPos];
 	HBITMAP oldBitmap = m_draggedPage.hThumbnail;
@@ -549,14 +713,37 @@ void CPDFEditDialog::BeginDragOperation()
 		m_draggedPage.hThumbnail = (HBITMAP)::CopyImage(oldBitmap, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
 	}
 
-	// 从m_pages中移除被拖拽的页面（erase会自动清理，但HBITMAP需要手动删除）
-	if (oldBitmap) {
-		::DeleteObject(oldBitmap);
-	}
-	m_pages.erase(m_pages.begin() + m_draggedPageOriginalPos);
+	// ★★★ 先标记为isDragging并刷新列表显示占位虚影
+	m_pages[m_draggedPageOriginalPos].isDragging = true;
+	TRACE(_T("BeginDragOperation: Set isDragging=true for page %d\n"), m_draggedPageOriginalPos);
 
-	// 刷新列表，显示移除后的效果（其他页面补位）
+	// 刷新列表显示占位虚影（RefreshThumbnailList会检测isDragging）
 	RefreshThumbnailList();
+
+	// 创建拖拽图像（基于原始缩略图，从m_draggedPage中）
+	if (m_draggedPage.hThumbnail) {
+		m_pDragImage = new CImageList();
+		if (m_pDragImage->Create(150, 190, ILC_COLOR24, 1, 0)) {
+			CBitmap bmp;
+			BITMAP bmInfo;
+			::GetObject(m_draggedPage.hThumbnail, sizeof(BITMAP), &bmInfo);
+			bmp.Attach(m_draggedPage.hThumbnail);
+			m_pDragImage->Add(&bmp, (CBitmap*)nullptr);
+			bmp.Detach();
+			TRACE(_T("BeginDragOperation: Created drag image from saved thumbnail\n"));
+		}
+	}
+
+	if (!m_pDragImage || m_pDragImage->GetImageCount() == 0) {
+		TRACE(_T("BeginDragOperation: Failed to create drag image, aborting\n"));
+		if (m_pDragImage) {
+			delete m_pDragImage;
+			m_pDragImage = nullptr;
+		}
+		m_pages[m_draggedPageOriginalPos].isDragging = false;
+		m_isDragging = false;
+		return;
+	}
 
 	// 初始化drop索引为当前拖拽位置
 	m_dropIndex = m_dragIndex;
@@ -590,26 +777,28 @@ void CPDFEditDialog::EndDragOperation()
 	KillTimer(TIMER_AUTO_SCROLL);
 	KillTimer(TIMER_ANIMATION);
 
-	// 正式插入被拖拽的页面到最终位置
-	// 计算实际插入位置（考虑isDeleted的页面）
+	if (m_draggedPageOriginalPos < 0 || m_draggedPageOriginalPos >= (int)m_pages.size()) {
+		return;
+	}
+
+	// ★★★ 关键修复：先计算插入位置（此时isDragging仍为true，会被正确跳过）
+	// 然后再取消isDragging标记
 	int insertActualPos = 0;
 	int displayIdx = 0;
 
 	if (m_dropIndex == 0) {
 		// 插入到最前面
 		for (size_t i = 0; i < m_pages.size(); i++) {
-			if (!m_pages[i].isDeleted) {
+			if (!m_pages[i].isDeleted && !m_pages[i].isDragging) {
 				insertActualPos = static_cast<int>(i);
 				break;
 			}
 		}
-		if (m_pages.empty()) {
-			insertActualPos = 0;
-		}
 	} else {
 		// 插入到第m_dropIndex个位置
 		for (size_t i = 0; i < m_pages.size(); i++) {
-			if (m_pages[i].isDeleted) continue;
+			if (m_pages[i].isDeleted || m_pages[i].isDragging)
+				continue;
 
 			displayIdx++;
 			if (displayIdx == m_dropIndex) {
@@ -623,8 +812,26 @@ void CPDFEditDialog::EndDragOperation()
 		}
 	}
 
-	// 正式插入到最终位置
-	m_pages.insert(m_pages.begin() + insertActualPos, m_draggedPage);
+	// 调整插入位置：如果插入位置在原位置之后，需要减1（因为要先删除原位置）
+	int finalInsertPos = insertActualPos;
+	if (insertActualPos > m_draggedPageOriginalPos) {
+		finalInsertPos = insertActualPos - 1;
+	}
+
+	// 现在取消isDragging标记
+	m_pages[m_draggedPageOriginalPos].isDragging = false;
+
+	// 删除原位置的HBITMAP（不是m_draggedPage的，是m_pages中的）
+	if (m_pages[m_draggedPageOriginalPos].hThumbnail) {
+		::DeleteObject(m_pages[m_draggedPageOriginalPos].hThumbnail);
+		m_pages[m_draggedPageOriginalPos].hThumbnail = nullptr;
+	}
+
+	// 从原位置删除
+	m_pages.erase(m_pages.begin() + m_draggedPageOriginalPos);
+
+	// 插入到新位置（m_draggedPage有独立拷贝的HBITMAP）
+	m_pages.insert(m_pages.begin() + finalInsertPos, m_draggedPage);
 
 	// 刷新列表显示最终结果
 	RefreshThumbnailList();
@@ -706,11 +913,7 @@ void CPDFEditDialog::OnBeginDrag(NMHDR* pNMHDR, LRESULT* pResult)
 	if (m_dragIndex < 0)
 		return;
 
-	// 创建拖拽图像
-	CPoint pt(0, 0);
-	m_pDragImage = m_thumbnailList.CreateDragImage(m_dragIndex, &pt);
-	if (!m_pDragImage)
-		return;
+	TRACE(_T("OnBeginDrag: m_dragIndex=%d\n"), m_dragIndex);
 
 	// 找到被拖拽页面在m_pages中的实际索引（只计算未删除的页面）
 	m_draggedPageOriginalPos = -1;
@@ -726,43 +929,67 @@ void CPDFEditDialog::OnBeginDrag(NMHDR* pNMHDR, LRESULT* pResult)
 		currentDisplayIndex++;
 	}
 
-	if (m_draggedPageOriginalPos < 0)
+	if (m_draggedPageOriginalPos < 0) {
+		TRACE(_T("OnBeginDrag: m_draggedPageOriginalPos not found\n"));
 		return;
+	}
+
+	TRACE(_T("OnBeginDrag: m_draggedPageOriginalPos=%d\n"), m_draggedPageOriginalPos);
 
 	// 保存被拖拽的页面信息（深拷贝HBITMAP）
 	m_draggedPage = m_pages[m_draggedPageOriginalPos];
 	HBITMAP oldBitmap = m_draggedPage.hThumbnail;
 	if (oldBitmap) {
 		m_draggedPage.hThumbnail = (HBITMAP)::CopyImage(oldBitmap, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
+		TRACE(_T("OnBeginDrag: Copied HBITMAP\n"));
 	}
 
-	// 从m_pages中移除被拖拽的页面（erase会自动清理，但HBITMAP需要手动删除）
-	if (oldBitmap) {
-		::DeleteObject(oldBitmap);
-	}
-	m_pages.erase(m_pages.begin() + m_draggedPageOriginalPos);
+	// ★★★ 新逻辑：标记为isDragging并刷新列表显示占位虚影
+	m_pages[m_draggedPageOriginalPos].isDragging = true;
+	TRACE(_T("OnBeginDrag: Set isDragging=true for page %d\n"), m_draggedPageOriginalPos);
 
-	// 刷新列表，显示移除后的效果（其他页面补位）
+	// 刷新列表显示占位虚影（RefreshThumbnailList会检测isDragging）
 	RefreshThumbnailList();
+
+	// 创建拖拽图像（基于保存的原始缩略图）
+	if (m_draggedPage.hThumbnail) {
+		m_pDragImage = new CImageList();
+		if (m_pDragImage->Create(150, 190, ILC_COLOR24, 1, 0)) {
+			CBitmap bmp;
+			bmp.Attach(m_draggedPage.hThumbnail);
+			m_pDragImage->Add(&bmp, (CBitmap*)nullptr);
+			bmp.Detach();
+			TRACE(_T("OnBeginDrag: Created drag image from saved thumbnail\n"));
+		}
+	}
+
+	if (!m_pDragImage || m_pDragImage->GetImageCount() == 0) {
+		TRACE(_T("OnBeginDrag: Failed to create drag image, aborting\n"));
+		if (m_pDragImage) {
+			delete m_pDragImage;
+			m_pDragImage = nullptr;
+		}
+		m_pages[m_draggedPageOriginalPos].isDragging = false;
+		return;
+	}
 
 	// 初始化drop索引为当前拖拽位置
 	m_dropIndex = m_dragIndex;
 	m_lastDropIndex = m_dragIndex;
 
-	m_isDragging = true;
-
-	// 开始拖拽，设置半透明效果
+	// 开始拖拽图像
 	m_pDragImage->BeginDrag(0, CPoint(0, 0));
-	m_pDragImage->DragEnter(GetDesktopWindow(), pNMListView->ptAction);
 
-	// 设置拖拽图像为半透明（使用DragShowNolock）
+	CPoint pt = pNMListView->ptAction;
+	ClientToScreen(&pt);
+	m_pDragImage->DragEnter(GetDesktopWindow(), pt);
 	m_pDragImage->DragShowNolock(TRUE);
 
-	// 捕获鼠标
+	m_isDragging = true;
 	SetCapture();
-
-	// 设置拖拽光标（显示移动效果）
 	SetCursor(LoadCursor(nullptr, IDC_SIZEALL));
+
+	TRACE(_T("OnBeginDrag: Drag started\n"));
 }
 
 void CPDFEditDialog::OnMouseMove(UINT nFlags, CPoint point)
@@ -899,6 +1126,60 @@ void CPDFEditDialog::DeleteSelectedPages()
 
 	// 更新信息栏
 	UpdateInfoBar();
+}
+
+// ========== 交换功能 ==========
+
+void CPDFEditDialog::SwapSelectedPages()
+{
+	// 获取所有选中项的索引
+	std::vector<int> selectedIndices;
+	POSITION pos = m_thumbnailList.GetFirstSelectedItemPosition();
+	while (pos) {
+		int nItem = m_thumbnailList.GetNextSelectedItem(pos);
+		selectedIndices.push_back(nItem);
+	}
+
+	// 必须选中正好2页
+	if (selectedIndices.size() != 2) {
+		MessageBox(_T("请选中正好2页进行交换！"), _T("提示"), MB_OK | MB_ICONWARNING);
+		return;
+	}
+
+	// 将displayIndex转换为实际的页面索引
+	int actualIndex1 = -1, actualIndex2 = -1;
+	int currentDisplayIndex = 0;
+
+	for (size_t i = 0; i < m_pages.size(); i++) {
+		if (m_pages[i].isDeleted)
+			continue;
+
+		if (currentDisplayIndex == selectedIndices[0]) {
+			actualIndex1 = static_cast<int>(i);
+		}
+		if (currentDisplayIndex == selectedIndices[1]) {
+			actualIndex2 = static_cast<int>(i);
+		}
+
+		currentDisplayIndex++;
+	}
+
+	// 验证索引有效性
+	if (actualIndex1 < 0 || actualIndex1 >= (int)m_pages.size() ||
+		actualIndex2 < 0 || actualIndex2 >= (int)m_pages.size()) {
+		MessageBox(_T("页面索引无效！"), _T("错误"), MB_OK | MB_ICONERROR);
+		return;
+	}
+
+	// 交换两个页面
+	std::swap(m_pages[actualIndex1], m_pages[actualIndex2]);
+
+	// 刷新列表
+	RefreshThumbnailList();
+
+	// 重新选中这两页（交换后的位置）
+	m_thumbnailList.SetItemState(selectedIndices[0], LVIS_SELECTED, LVIS_SELECTED);
+	m_thumbnailList.SetItemState(selectedIndices[1], LVIS_SELECTED, LVIS_SELECTED);
 }
 
 // ========== 旋转功能 ==========
@@ -1071,14 +1352,16 @@ void CPDFEditDialog::RotateSelectedPages(int angle)
 			if (m_pages[actualIndex].rotationAngle < 0)
 				m_pages[actualIndex].rotationAngle += 360;
 
-			// 旋转缩略图
+			// 删除旧缩略图
 			if (m_pages[actualIndex].hThumbnail) {
-				HBITMAP hRotated = RotateBitmap(m_pages[actualIndex].hThumbnail, angle);
-				if (hRotated) {
-					::DeleteObject(m_pages[actualIndex].hThumbnail);
-					m_pages[actualIndex].hThumbnail = hRotated;
-				}
+				::DeleteObject(m_pages[actualIndex].hThumbnail);
+				m_pages[actualIndex].hThumbnail = nullptr;
 			}
+
+			// 重新渲染缩略图（会自动应用旋转角度）
+			int currentPos = currentDisplayIndex + 1;
+			int originalPos = m_pages[actualIndex].originalIndex + 1;
+			m_pages[actualIndex].hThumbnail = RenderThumbnail(m_pages[actualIndex].originalIndex, currentPos, originalPos, m_pages[actualIndex].rotationAngle);
 		}
 	}
 
@@ -1126,6 +1409,11 @@ void CPDFEditDialog::OnNMRClick(NMHDR* pNMHDR, LRESULT* pResult)
 		// 添加主菜单项
 		menu.AppendMenu(MF_POPUP, (UINT_PTR)rotateMenu.m_hMenu, _T("旋转"));
 
+		// 如果选中2页，添加交换位置菜单项
+		if (selectedCount == 2) {
+			menu.AppendMenu(MF_STRING, 5, _T("交换这两页的位置"));
+		}
+
 		CString menuText;
 		if (selectedCount > 1) {
 			menuText.Format(_T("删除选中的 %d 页"), selectedCount);
@@ -1152,6 +1440,9 @@ void CPDFEditDialog::OnNMRClick(NMHDR* pNMHDR, LRESULT* pResult)
 		}
 		else if (cmd == 4) {
 			RotateSelectedPages(270);
+		}
+		else if (cmd == 5) {
+			SwapSelectedPages();
 		}
 
 		// 确保子菜单不被销毁前保持有效
@@ -1895,6 +2186,12 @@ void CPDFEditDialog::OnItemChanged(NMHDR* pNMHDR, LRESULT* pResult)
 {
 	UpdateInfoBar();
 	*pResult = 0;
+}
+
+// 自定义绘制 - 占位虚影通过替换缩略图实现，无需自定义绘制
+void CPDFEditDialog::OnCustomDraw(NMHDR* pNMHDR, LRESULT* pResult)
+{
+	*pResult = CDRF_DODEFAULT;
 }
 
 void CPDFEditDialog::OnOK()

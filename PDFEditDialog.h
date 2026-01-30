@@ -11,6 +11,7 @@
 struct PageInfo {
 	int originalIndex;      // 原始页码（从0开始）
 	bool isDeleted;         // 是否被删除
+	bool isDragging;        // 是否正在被拖拽（用于显示占位虚影）
 	HBITMAP hThumbnail;     // 缩略图句柄
 	int displayIndex;       // 当前显示索引
 	CRect bounds;           // 当前位置（用于动画）
@@ -18,8 +19,8 @@ struct PageInfo {
 	int sourcePageIndex;    // 在源文件中的页码
 	int rotationAngle;      // 旋转角度（0, 90, 180, 270）
 
-	PageInfo() : originalIndex(0), isDeleted(false), hThumbnail(nullptr), displayIndex(0), sourcePageIndex(0), rotationAngle(0) {}
-	PageInfo(int index) : originalIndex(index), isDeleted(false), hThumbnail(nullptr), displayIndex(index), sourcePageIndex(index), rotationAngle(0) {}
+	PageInfo() : originalIndex(0), isDeleted(false), isDragging(false), hThumbnail(nullptr), displayIndex(0), sourcePageIndex(0), rotationAngle(0) {}
+	PageInfo(int index) : originalIndex(index), isDeleted(false), isDragging(false), hThumbnail(nullptr), displayIndex(index), sourcePageIndex(index), rotationAngle(0) {}
 };
 
 // 动画状态结构
@@ -112,7 +113,7 @@ private:
 	// 初始化和渲染
 	void InitializeThumbnailList();
 	void LoadAllThumbnails();
-	HBITMAP RenderThumbnail(int pageNumber);
+	HBITMAP RenderThumbnail(int pageNumber, int currentPos, int originalPos, int rotationAngle = 0);
 	void RefreshThumbnailList();
 	void UpdateInfoBar();
 
@@ -130,9 +131,13 @@ private:
 	int CalculateInsertIndex(CPoint point);
 	void UpdateInsertIndex(CPoint point);
 	void HandleAutoScroll(CPoint point);
+	HBITMAP CreatePlaceholderBitmap();  // 创建占位虚影位图
 
 	// 删除功能
 	void DeleteSelectedPages();
+
+	// 交换功能
+	void SwapSelectedPages();
 
 	// 旋转功能
 	void RotateSelectedPages(int angle);
@@ -163,6 +168,9 @@ private:
 
 	// 列表选择变化
 	afx_msg void OnItemChanged(NMHDR* pNMHDR, LRESULT* pResult);
+
+	// 自定义绘制（用于绘制拖拽占位虚影）
+	afx_msg void OnCustomDraw(NMHDR* pNMHDR, LRESULT* pResult);
 
 	// 资源清理
 	void CleanupThumbnails();

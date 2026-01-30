@@ -41,6 +41,8 @@ protected:
 	static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 	afx_msg void OnVScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar);
+	afx_msg void OnHScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar);
+	afx_msg void OnPaint();  // ★★★ 自定义绘制，支持滚动偏移
 	DECLARE_MESSAGE_MAP()
 };
 
@@ -92,6 +94,9 @@ private:
 // CXiaoGongPDFDlg 对话框
 class CXiaoGongPDFDlg : public CDialogEx
 {
+	// ★★★ 友元类声明，允许CPDFViewCtrl访问私有成员
+	friend class CPDFViewCtrl;
+
 // 构造
 public:
 	CXiaoGongPDFDlg(CWnd* pParent = nullptr);	// 标准构造函数
@@ -273,8 +278,10 @@ private:
 
 	// 连续滚动模式相关
 	bool m_continuousScrollMode;            // 是否启用连续滚动模式
-	int m_scrollPosition;                    // 当前滚动位置
+	int m_scrollPosition;                    // 当前垂直滚动位置
+	int m_scrollPositionH;                   // 当前横向滚动位置
 	int m_totalScrollHeight;                 // 总滚动高度（所有页面高度之和）
+	int m_totalScrollWidth;                  // 总滚动宽度（PDF渲染宽度）
 	float m_uniformScale;                    // ★★★ 统一的缩放比例（确保所有页面宽度一致）
 	static const int PAGE_SPACING = 10;      // 页面间距（像素）
 	std::vector<int> m_pageYPositions;       // 每页在滚动区域中的Y坐标
@@ -416,6 +423,7 @@ protected:
     void CalculatePagePositions();  // 计算所有页面的位置和高度
     void RenderVisiblePages();  // 渲染可见的页面
     afx_msg void OnVScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar);  // 垂直滚动条消息处理
+    afx_msg void OnHScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar);  // 横向滚动条消息处理
     void UpdateScrollBar();  // 更新滚动条
     int GetPageAtPosition(int yPos);  // 获取指定位置的页面索引
 

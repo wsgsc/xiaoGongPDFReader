@@ -20,6 +20,8 @@
 
 BEGIN_MESSAGE_MAP(CPDFViewCtrl, CStatic)
 	ON_WM_VSCROLL()
+	ON_WM_HSCROLL()
+	ON_WM_PAINT()
 END_MESSAGE_MAP()
 
 void CPDFViewCtrl::SubclassWindow()
@@ -40,7 +42,7 @@ LRESULT CALLBACK CPDFViewCtrl::StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam,
 	// 追踪关键消息
 	if (msg == WM_PAINT)
 	{
-		TRACE(_T("CPDFViewCtrl: WM_PAINT\n"));
+		TRACE(_T("CPDFViewCtrl: WM_PAINT in StaticWndProc\n"));
 	}
 #endif
 
@@ -65,6 +67,18 @@ LRESULT CALLBACK CPDFViewCtrl::StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam,
 		return TRUE;  // 返回TRUE表示已处理，不执行默认的背景擦除
 	}
 
+	// ★★★ 对于WM_PAINT消息，让MFC的消息映射系统处理（调用我们的OnPaint）
+	// 不要调用原始窗口过程（CStatic的默认绘制），否则会覆盖我们的自定义绘制
+	if (msg == WM_PAINT)
+	{
+		// 通过MFC的WindowProc让消息映射系统处理
+		if (pThis)
+		{
+			return pThis->CStatic::WindowProc(msg, wParam, lParam);
+		}
+		return ::DefWindowProc(hwnd, msg, wParam, lParam);
+	}
+
 	// 调用原始窗口过程
 	if (pThis && pThis->m_oldWndProc)
 	{
@@ -81,6 +95,155 @@ void CPDFViewCtrl::OnVScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar)
 	{
 		m_pParentDlg->SendMessage(WM_VSCROLL, MAKEWPARAM(nSBCode, nPos), (LPARAM)GetSafeHwnd());
 	}
+}
+
+void CPDFViewCtrl::OnHScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar)
+{
+	// 将横向滚动条消息转发给父对话框处理
+	if (m_pParentDlg)
+	{
+		m_pParentDlg->SendMessage(WM_HSCROLL, MAKEWPARAM(nSBCode, nPos), (LPARAM)GetSafeHwnd());
+	}
+}
+
+// ★★★ 自定义绘制，支持滚动偏移
+void CPDFViewCtrl::OnPaint()
+{
+#ifdef _DEBUG
+	TRACE(_T("CPDFViewCtrl::OnPaint() 被调用\n"));
+#endif
+
+	CPaintDC dc(this);  // 用于绘制的设备上下文
+
+	// 获取客户区矩形
+	CRect clientRect;
+	GetClientRect(&clientRect);
+
+	// 获取当前设置的位图（通过CStatic::SetBitmap设置的）
+	HBITMAP hBitmap = GetBitmap();
+
+#ifdef _DEBUG
+	TRACE(_T("CPDFViewCtrl::OnPaint - hBitmap=%p, clientRect=(%d,%d)\n"),
+		hBitmap, clientRect.Width(), clientRect.Height());
+#endif
+
+	if (!hBitmap)
+	{
+		// 没有位图，填充背景色
+		dc.FillSolidRect(&clientRect, RGB(240, 240, 240));
+#ifdef _DEBUG
+		TRACE(_T("CPDFViewCtrl::OnPaint - 没有位图，返回\n"));
+#endif
+		return;
+	}
+
+	// 创建内存DC
+	CDC memDC;
+	memDC.CreateCompatibleDC(&dc);
+	HBITMAP hOldBitmap = (HBITMAP)memDC.SelectObject(hBitmap);
+
+	// 获取位图信息
+	BITMAP bm;
+	::GetObject(hBitmap, sizeof(BITMAP), &bm);
+
+	// ★★★ 判断是否为连续滚动模式
+	bool isContinuousMode = false;
+	if (m_pParentDlg)
+	{
+		isContinuousMode = m_pParentDlg->m_continuousScrollMode;
+	}
+
+#ifdef _DEBUG
+	TRACE(_T("CPDFViewCtrl::OnPaint - 位图尺寸=(%d,%d), 模式=%s\n"),
+		bm.bmWidth, bm.bmHeight, isContinuousMode ? _T("连续") : _T("分页"));
+#endif
+
+	if (isContinuousMode)
+	{
+		// ★★★ 连续滚动模式：位图已经是可见区域
+		// 填充背景
+		dc.FillSolidRect(&clientRect, RGB(128, 128, 128));
+
+		// ★★★ 计算绘制位置（应用居中）
+		int destX = 0;
+		int destY = 0;
+
+		// 如果位图宽度小于客户区宽度，居中显示
+		if (bm.bmWidth < clientRect.Width())
+		{
+			destX = (clientRect.Width() - bm.bmWidth) / 2;
+#ifdef _DEBUG
+			TRACE(_T("CPDFViewCtrl::OnPaint - 连续模式居中: clientW=%d, bmpW=%d, destX=%d\n"),
+				clientRect.Width(), bm.bmWidth, destX);
+#endif
+		}
+
+		// 如果位图高度小于客户区高度，居中显示
+		if (bm.bmHeight < clientRect.Height())
+		{
+			destY = (clientRect.Height() - bm.bmHeight) / 2;
+#ifdef _DEBUG
+			TRACE(_T("CPDFViewCtrl::OnPaint - 连续模式居中: clientH=%d, bmpH=%d, destY=%d\n"),
+				clientRect.Height(), bm.bmHeight, destY);
+#endif
+		}
+
+		// 绘制位图（应用居中或直接绘制）
+		dc.BitBlt(destX, destY, bm.bmWidth, bm.bmHeight, &memDC, 0, 0, SRCCOPY);
+	}
+	else
+	{
+		// ★★★ 分页模式：位图是完整的PDF页面，需要根据滚动位置偏移绘制
+		int scrollX = 0;
+		int scrollY = 0;
+		if (m_pParentDlg)
+		{
+			scrollX = m_pParentDlg->m_scrollPositionH;
+			scrollY = m_pParentDlg->m_scrollPosition;
+		}
+
+		// 填充背景色
+		dc.FillSolidRect(&clientRect, RGB(240, 240, 240));
+
+		// ★★★ 计算绘制位置（应用滚动偏移和居中）
+		int destX = 0;
+		int destY = 0;
+
+		// 如果位图宽度小于客户区宽度，居中显示
+		if (bm.bmWidth < clientRect.Width())
+		{
+			destX = (clientRect.Width() - bm.bmWidth) / 2;
+#ifdef _DEBUG
+			TRACE(_T("CPDFViewCtrl::OnPaint - 居中显示: clientW=%d, bmpW=%d, destX=%d\n"),
+				clientRect.Width(), bm.bmWidth, destX);
+#endif
+		}
+		else
+		{
+			// 位图宽度大于客户区，应用横向滚动偏移
+			destX = -scrollX;
+#ifdef _DEBUG
+			TRACE(_T("CPDFViewCtrl::OnPaint - 滚动显示: clientW=%d, bmpW=%d, scrollX=%d, destX=%d\n"),
+				clientRect.Width(), bm.bmWidth, scrollX, destX);
+#endif
+		}
+
+		// 如果位图高度小于客户区高度，居中显示
+		if (bm.bmHeight < clientRect.Height())
+		{
+			destY = (clientRect.Height() - bm.bmHeight) / 2;
+		}
+		else
+		{
+			// 位图高度大于客户区，应用垂直滚动偏移
+			destY = -scrollY;
+		}
+
+		// 绘制位图（应用滚动偏移或居中）
+		dc.BitBlt(destX, destY, bm.bmWidth, bm.bmHeight, &memDC, 0, 0, SRCCOPY);
+	}
+
+	memDC.SelectObject(hOldBitmap);
 }
 
 // ============================================================================
@@ -116,8 +279,10 @@ CXiaoGongPDFDlg::CXiaoGongPDFDlg(CWnd* pParent /*=nullptr*/)
 	, m_pLoadParams(nullptr)    // 初始化加载参数
 	, m_pProgressDlg(nullptr)   // 初始化进度对话框指针
 	, m_continuousScrollMode(true)  // ★★★ 默认启用连续滚动模式
-	, m_scrollPosition(0)        // 初始化滚动位置
+	, m_scrollPosition(0)        // 初始化垂直滚动位置
+	, m_scrollPositionH(0)       // 初始化横向滚动位置
 	, m_totalScrollHeight(0)     // 初始化总滚动高度
+	, m_totalScrollWidth(0)      // 初始化总滚动宽度
 	, m_uniformScale(1.0f)       // ★★★ 初始化统一缩放比例（连续滚动模式用）
 	, m_hContinuousViewBitmap(nullptr)  // ★★★ 初始化连续视图位图
 	, m_scrollThumbTimer(0)      // ★★★ 初始化滚动条拖动定时器
@@ -361,6 +526,7 @@ BEGIN_MESSAGE_MAP(CXiaoGongPDFDlg, CDialogEx)
 	ON_WM_COPYDATA()
 	ON_WM_DESTROY()
 	ON_WM_VSCROLL()  // ★★★ 添加垂直滚动条消息处理（连续滚动模式）
+	ON_WM_HSCROLL()  // ★★★ 添加横向滚动条消息处理
 END_MESSAGE_MAP()
 
 void CXiaoGongPDFDlg::onMenuOpen() {
@@ -578,11 +744,11 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	// 设置 Picture Control 样式
 	DWORD style = m_pdfView.GetStyle();
 	style &= ~(SS_SIMPLE | SS_NOTIFY);  // 移除其他样式
-	style |= SS_BITMAP | SS_CENTERIMAGE | WS_VSCROLL;  // ★★★ 添加垂直滚动条样式（连续滚动模式需要）
+	style |= SS_BITMAP | SS_CENTERIMAGE | WS_VSCROLL | WS_HSCROLL;  // ★★★ 添加垂直和横向滚动条样式
 	::SetWindowLong(m_pdfView.GetSafeHwnd(), GWL_STYLE, style);
 
 	// 更新控件
-	m_pdfView.ModifyStyle(0, SS_BITMAP | SS_CENTERIMAGE | WS_VSCROLL);
+	m_pdfView.ModifyStyle(0, SS_BITMAP | SS_CENTERIMAGE | WS_VSCROLL | WS_HSCROLL);
 
 	// ★★★ 启用WS_EX_COMPOSITED扩展样式，使用桌面合成来减少高刷新率显示器上的闪烁
 	// 这会让Windows使用双缓冲合成来渲染控件，避免直接绘制时的闪白问题
@@ -596,9 +762,11 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	m_pdfView.SetParentDlg(this);
 	m_pdfView.SubclassWindow();
 
-	// ★★★ 显示垂直滚动条（连续滚动模式需要）
+	// ★★★ 显示垂直和横向滚动条
 	m_pdfView.ShowScrollBar(SB_VERT, TRUE);
 	m_pdfView.EnableScrollBarCtrl(SB_VERT, TRUE);
+	m_pdfView.ShowScrollBar(SB_HORZ, TRUE);
+	m_pdfView.EnableScrollBarCtrl(SB_HORZ, TRUE);
 
 	// 获取系统垂直滚动条的宽度
 	m_scrollBarWidth = GetSystemMetrics(SM_CXVSCROLL);
@@ -1258,6 +1426,11 @@ bool CXiaoGongPDFDlg::RenderPage(int pageNumber)
 			// 没有偏移，正常判断
 			m_canDrag = (bm.bmWidth > viewRect.Width()) || (bm.bmHeight > viewRect.Height());
 		}
+
+		// ★★★ 更新滚动条范围（用于横向滚动条）
+		m_totalScrollWidth = bm.bmWidth;
+		m_totalScrollHeight = bm.bmHeight;
+		UpdateScrollBar();
 	}
 	else
 	{
@@ -1357,9 +1530,9 @@ void CXiaoGongPDFDlg::RenderPDF(const char* filename)
 	m_pageRotations.clear();      // 清除旋转信息
 	m_pageZoomStates.clear();     // 清除缩放状态
 
-	// ★★★ 重置全局缩放状态为默认值
-	m_zoomMode = ZOOM_FIT_PAGE;   // 默认适应页面
-	m_customZoom = 1.0f;          // 默认100%
+	// ★★★ 重置全局缩放状态为默认值（使用PDF原始大小）
+	m_zoomMode = ZOOM_CUSTOM;     // 使用自定义缩放模式
+	m_customZoom = 1.0f;          // 默认100%缩放（PDF原始大小）
 
 	// ★★★ 清除平移偏移量
 	ResetPanOffset();
@@ -2535,50 +2708,51 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		m_statusBar.Invalidate(FALSE);
 		m_statusBar.UpdateWindow();
 
-		// 如果有文档加载，重新渲染当前页
+		// ★★★ 修改：窗口大小改变时的处理
 		if (m_doc && m_currentPage >= 0)
 		{
 			if (m_continuousScrollMode)
 			{
-				// ★★★ 连续滚动模式：重新计算页面位置并渲染
-				CalculatePagePositions();
-
-				// ★★★ 确保滚动条可见
+				// ★★★ 连续滚动模式：需要重新渲染可见页面以适应新的视口大小
+				// 确保滚动条可见
 				m_pdfView.ShowScrollBar(SB_VERT, TRUE);
 				m_pdfView.EnableScrollBarCtrl(SB_VERT, TRUE);
+				m_pdfView.ShowScrollBar(SB_HORZ, TRUE);
+				m_pdfView.EnableScrollBarCtrl(SB_HORZ, TRUE);
 
 				UpdateScrollBar();
+
+				// ★★★ 重新渲染可见页面（生成新尺寸的位图）
 				RenderVisiblePages();
 			}
 			else
 			{
-				// ★★★ 分页模式：重新计算统一缩放比例并渲染当前页
+				// ★★★ 分页模式：确保滚动条可见
+				m_pdfView.ShowScrollBar(SB_VERT, TRUE);
+				m_pdfView.EnableScrollBarCtrl(SB_VERT, TRUE);
+				m_pdfView.ShowScrollBar(SB_HORZ, TRUE);
+				m_pdfView.EnableScrollBarCtrl(SB_HORZ, TRUE);
 
-				// ★★★ 分页模式下隐藏滚动条
-				m_pdfView.ShowScrollBar(SB_VERT, FALSE);
+				// 更新滚动条（不重新渲染）
+				UpdateScrollBar();
 
-				if (m_documentMaxPageWidth > 0)
-				{
-					CRect viewRect;
-					m_pdfView.GetClientRect(&viewRect);
-					m_documentUniformScale = (float)viewRect.Width() / m_documentMaxPageWidth * 0.95f;
-#ifdef _DEBUG
-					TRACE(_T("OnSize: 重新计算统一缩放比例: %.4f\n"), m_documentUniformScale);
-#endif
-				}
-
-				// ★★★ 窗口大小改变时，重置平移偏移量
-				ResetPanOffset();
-
-				CleanupBitmap();
-				RenderPage(m_currentPage);
+				// ★★★ 触发重绘，应用新的滚动位置
+				m_pdfView.Invalidate(FALSE);
 			}
 		}
 
 		// ★★★ 重新启用重绘，一次性刷新整个窗口（高刷新率显示器优化）
 		SetRedraw(TRUE);
-		Invalidate(FALSE);
-		UpdateWindow();
+
+		// ★★★ 使用RedrawWindow强制立即重绘整个窗口及所有子控件
+		RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+
+		// ★★★ 确保PDF视图也立即重绘（应用居中等布局变化）
+		if (m_doc && m_currentPage >= 0)
+		{
+			// 使用RDW_UPDATENOW强制立即处理WM_PAINT消息
+			m_pdfView.RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE);
+		}
 	}
 }
 
@@ -6198,8 +6372,11 @@ void CXiaoGongPDFDlg::CalculatePagePositions()
 	// ★★★ 修复：保留最后一页的底部间距，确保底部有灰色间隔
 	m_totalScrollHeight = currentY;
 
+	// ★★★ 设置横向滚动宽度（使用最大页面宽度 × 统一缩放比例）
+	m_totalScrollWidth = (int)(maxPageWidth * m_uniformScale);
+
 #ifdef _DEBUG
-	TRACE(_T("连续滚动: 总高度=%d\n"), m_totalScrollHeight);
+	TRACE(_T("连续滚动: 总高度=%d, 总宽度=%d\n"), m_totalScrollHeight, m_totalScrollWidth);
 #endif
 }
 
@@ -6651,24 +6828,111 @@ void CXiaoGongPDFDlg::OnVScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar)
 	CDialogEx::OnVScroll(nSBCode, nPos, pScrollBar);
 }
 
+// ★★★ 横向滚动条消息处理
+void CXiaoGongPDFDlg::OnHScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar)
+{
+	CRect viewRect;
+	m_pdfView.GetClientRect(&viewRect);
+	int pageSize = viewRect.Width();
+
+	int newPos = m_scrollPositionH;
+
+	switch (nSBCode)
+	{
+	case SB_LINELEFT:
+		newPos -= 20;
+		break;
+	case SB_LINERIGHT:
+		newPos += 20;
+		break;
+	case SB_PAGELEFT:
+		newPos -= pageSize;
+		break;
+	case SB_PAGERIGHT:
+		newPos += pageSize;
+		break;
+	case SB_THUMBPOSITION:
+	case SB_THUMBTRACK:
+		newPos = nPos;
+		break;
+	}
+
+	// 限制范围
+	int maxScroll = m_totalScrollWidth - viewRect.Width();
+	if (maxScroll < 0) maxScroll = 0;
+	if (newPos < 0) newPos = 0;
+	if (newPos > maxScroll) newPos = maxScroll;
+
+	if (newPos != m_scrollPositionH)
+	{
+		m_scrollPositionH = newPos;
+		UpdateScrollBar();
+
+		// ★★★ 触发重绘（不重新渲染PDF，只是用新的滚动位置重新绘制）
+		m_pdfView.Invalidate(FALSE);
+		m_pdfView.UpdateWindow();
+
+		// ★★★ 连续滚动模式需要重新渲染可见页面
+		if (m_continuousScrollMode)
+		{
+			RenderVisiblePages();
+		}
+	}
+
+	CDialogEx::OnHScroll(nSBCode, nPos, pScrollBar);
+}
+
 // 更新滚动条
 void CXiaoGongPDFDlg::UpdateScrollBar()
 {
-	if (!m_continuousScrollMode)
-		return;
-
 	CRect viewRect;
 	m_pdfView.GetClientRect(&viewRect);
 
-	SCROLLINFO si = { 0 };
-	si.cbSize = sizeof(SCROLLINFO);
-	si.fMask = SIF_ALL | SIF_DISABLENOSCROLL;  // ★★★ 添加 SIF_DISABLENOSCROLL 确保滚动条始终可见
-	si.nMin = 0;
-	si.nMax = m_totalScrollHeight;
-	si.nPage = viewRect.Height();
-	si.nPos = m_scrollPosition;
+	// ★★★ 确保滚动位置在有效范围内
+	int maxScrollY = m_totalScrollHeight - viewRect.Height();
+	if (maxScrollY < 0) maxScrollY = 0;
+	if (m_scrollPosition > maxScrollY) m_scrollPosition = maxScrollY;
+	if (m_scrollPosition < 0) m_scrollPosition = 0;
 
-	::SetScrollInfo(m_pdfView.GetSafeHwnd(), SB_VERT, &si, TRUE);
+	int maxScrollX = m_totalScrollWidth - viewRect.Width();
+	if (maxScrollX < 0) maxScrollX = 0;
+	if (m_scrollPositionH > maxScrollX) m_scrollPositionH = maxScrollX;
+	if (m_scrollPositionH < 0) m_scrollPositionH = 0;
+
+	// ★★★ 更新垂直滚动条
+	if (m_continuousScrollMode)
+	{
+		SCROLLINFO si = { 0 };
+		si.cbSize = sizeof(SCROLLINFO);
+		si.fMask = SIF_ALL | SIF_DISABLENOSCROLL;
+		si.nMin = 0;
+		si.nMax = m_totalScrollHeight;
+		si.nPage = viewRect.Height();
+		si.nPos = m_scrollPosition;
+		::SetScrollInfo(m_pdfView.GetSafeHwnd(), SB_VERT, &si, TRUE);
+	}
+	else
+	{
+		// 分页模式：只在内容超过视图时显示垂直滚动条
+		SCROLLINFO si = { 0 };
+		si.cbSize = sizeof(SCROLLINFO);
+		si.fMask = SIF_ALL | SIF_DISABLENOSCROLL;
+		si.nMin = 0;
+		si.nMax = m_totalScrollHeight;
+		si.nPage = viewRect.Height();
+		si.nPos = m_scrollPosition;
+		::SetScrollInfo(m_pdfView.GetSafeHwnd(), SB_VERT, &si, TRUE);
+	}
+
+	// ★★★ 更新横向滚动条
+	SCROLLINFO siH = { 0 };
+	siH.cbSize = sizeof(SCROLLINFO);
+	siH.fMask = SIF_ALL | SIF_DISABLENOSCROLL;
+	siH.nMin = 0;
+	siH.nMax = m_totalScrollWidth;
+	siH.nPage = viewRect.Width();
+	siH.nPos = m_scrollPositionH;
+	::SetScrollInfo(m_pdfView.GetSafeHwnd(), SB_HORZ, &siH, TRUE);
 }
 
 // 获取指定位置的页面索引
