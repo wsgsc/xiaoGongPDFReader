@@ -285,8 +285,6 @@ CXiaoGongPDFDlg::CXiaoGongPDFDlg(CWnd* pParent /*=nullptr*/)
 	, m_totalScrollWidth(0)      // 初始化总滚动宽度
 	, m_uniformScale(1.0f)       // ★★★ 初始化统一缩放比例（连续滚动模式用）
 	, m_hContinuousViewBitmap(nullptr)  // ★★★ 初始化连续视图位图
-	, m_scrollThumbTimer(0)      // ★★★ 初始化滚动条拖动定时器
-	, m_isThumbTracking(false)   // ★★★ 初始化拖动状态
 	, m_isDraggingScrollbar(false)  // 初始化滚动条拖拽状态
 	, m_scrollbarDragStartY(0)      // 初始化滚动条拖拽起始Y
 	, m_scrollbarDragStartPos(0)    // 初始化滚动条拖拽起始位置
@@ -2293,7 +2291,6 @@ LRESULT CXiaoGongPDFDlg::OnUpdateThumbnailHighlight(WPARAM wParam, LPARAM lParam
 void CXiaoGongPDFDlg::OnTimer(UINT_PTR nIDEvent)
 {
 	const UINT_PTR TIMER_ID_THUMBNAIL_HIGHLIGHT = 1001;
-	const UINT_PTR TIMER_ID_SCROLL_THUMB_RENDER = 1003;  // ★★★ 滚动条拖动渲染定时器
 
 	if (nIDEvent == TIMER_ID_THUMBNAIL_HIGHLIGHT)
 	{
@@ -2305,17 +2302,6 @@ void CXiaoGongPDFDlg::OnTimer(UINT_PTR nIDEvent)
 
 		// 销毁一次性定时器
 		KillTimer(TIMER_ID_THUMBNAIL_HIGHLIGHT);
-		return;
-	}
-
-	// ★★★ 处理滚动条拖动时的定时渲染（用于平衡性能和视觉反馈）
-	if (nIDEvent == TIMER_ID_SCROLL_THUMB_RENDER)
-	{
-#ifdef _DEBUG
-		TRACE(_T("OnTimer: 执行滚动条拖动定时渲染\n"));
-#endif
-		// 执行渲染
-		RenderVisiblePages();
 		return;
 	}
 
@@ -6439,29 +6425,27 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 		if (pageY + pageHeight < visibleTop || pageY > visibleBottom)
 			continue;
 
-		// 渲染这个页面
+		// ★★★ 优化：先尝试从缓存获取页面位图
+		int rotation = GetPageRotation(i);
+
+		// 计算页面尺寸
 		fz_page* page = nullptr;
-		fz_pixmap* pixmap = nullptr;
-		fz_device* dev = nullptr;
+		fz_rect bounds = { 0 };  // 声明在外部，供后续使用
+		int width = 0, height = 0;
 
 		fz_try(m_ctx)
 		{
 			page = fz_load_page(m_ctx, m_doc, i);
 			if (!page)
-				continue;
+			{
+				fz_throw(m_ctx, FZ_ERROR_GENERIC, "Failed to load page");
+			}
 
-			fz_rect bounds = fz_bound_page(m_ctx, page);
+			bounds = fz_bound_page(m_ctx, page);
 			float pageWidth = bounds.x1 - bounds.x0;
 			float pageHeightF = bounds.y1 - bounds.y0;
 
-#ifdef _DEBUG
-			if (i == 0)  // 只打印第0页
-				TRACE(_T("  Page bounds: x0=%.1f, y0=%.1f, x1=%.1f, y1=%.1f\n"),
-					bounds.x0, bounds.y0, bounds.x1, bounds.y1);
-#endif
-
 			// 根据旋转角度调整
-			int rotation = GetPageRotation(i);
 			if (rotation == 90 || rotation == 270)
 			{
 				float temp = pageWidth;
@@ -6469,65 +6453,129 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 				pageHeightF = temp;
 			}
 
-			// ★★★ 使用统一的缩放比例
-			int width = (int)(pageWidth * m_uniformScale);
-			int height = (int)(pageHeightF * m_uniformScale);
+			// 使用统一的缩放比例
+			width = (int)(pageWidth * m_uniformScale);
+			height = (int)(pageHeightF * m_uniformScale);
 
-			// 创建pixmap
-			pixmap = fz_new_pixmap(m_ctx, fz_device_rgb(m_ctx), width, height, nullptr, 1);
-			fz_clear_pixmap_with_value(m_ctx, pixmap, 0xff);
+			// 构建缓存键
+			::PageCacheKey cacheKey;
+			cacheKey.pageNumber = i;
+			cacheKey.width = width;
+			cacheKey.height = height;
+			cacheKey.rotation = rotation;
 
-			// 渲染页面
-			fz_matrix ctm = fz_scale(m_uniformScale, m_uniformScale);
+			// 尝试从缓存获取
+			HBITMAP hBitmap = nullptr;
+			auto& pageCache = GetActiveDocument()->GetPageCache();
+			auto& cacheOrder = GetActiveDocument()->GetCacheOrder();
+			auto it = pageCache.find(cacheKey);
 
-			// 应用旋转
-			if (rotation != 0)
+			if (it != pageCache.end())
 			{
-				fz_matrix rotate = fz_rotate((float)rotation);
-				if (rotation == 90)
-					rotate = fz_pre_translate(rotate, 0, -(bounds.y1 - bounds.y0));
-				else if (rotation == 180)
-					rotate = fz_pre_translate(rotate, -(bounds.x1 - bounds.x0), -(bounds.y1 - bounds.y0));
-				else if (rotation == 270)
-					rotate = fz_pre_translate(rotate, -(bounds.x1 - bounds.x0), 0);
-				ctm = fz_concat(rotate, ctm);
+				// 缓存命中
+				hBitmap = it->second.hBitmap;
+
+				// 更新LRU顺序
+				cacheOrder.remove(cacheKey);
+				cacheOrder.push_back(cacheKey);
+
+#ifdef _DEBUG
+				TRACE(_T("RenderVisiblePages: 缓存命中 Page %d\n"), i);
+#endif
 			}
-
-			dev = fz_new_draw_device(m_ctx, ctm, pixmap);
-			fz_run_page(m_ctx, page, dev, fz_identity, nullptr);
-			fz_close_device(m_ctx, dev);
-			fz_drop_device(m_ctx, dev);
-			dev = nullptr;
-
-			// 创建DIB位图
-			BITMAPINFO bmi = { 0 };
-			bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-			bmi.bmiHeader.biWidth = width;
-			bmi.bmiHeader.biHeight = -height;
-			bmi.bmiHeader.biPlanes = 1;
-			bmi.bmiHeader.biBitCount = 24;
-			bmi.bmiHeader.biCompression = BI_RGB;
-
-			BYTE* pbBits = nullptr;
-			HBITMAP hBitmap = CreateDIBSection(memDC.GetSafeHdc(), &bmi,
-				DIB_RGB_COLORS, (void**)&pbBits, NULL, 0);
-
-			if (hBitmap && pbBits)
+			else
 			{
-				// 复制像素数据
-				unsigned char* samples = fz_pixmap_samples(m_ctx, pixmap);
-				int stride = (width * 3 + 3) & ~3;
-				int n = fz_pixmap_components(m_ctx, pixmap);
+				// 缓存未命中，需要渲染
+#ifdef _DEBUG
+				TRACE(_T("RenderVisiblePages: 缓存未命中，渲染 Page %d\n"), i);
+#endif
 
-				for (int y = 0; y < height; y++) {
-					for (int x = 0; x < width; x++) {
-						pbBits[y * stride + x * 3 + 0] = samples[(y * width + x) * n + 2];
-						pbBits[y * stride + x * 3 + 1] = samples[(y * width + x) * n + 1];
-						pbBits[y * stride + x * 3 + 2] = samples[(y * width + x) * n + 0];
+				fz_pixmap* pixmap = nullptr;
+				fz_device* dev = nullptr;
+
+				// 创建pixmap
+				pixmap = fz_new_pixmap(m_ctx, fz_device_rgb(m_ctx), width, height, nullptr, 1);
+				fz_clear_pixmap_with_value(m_ctx, pixmap, 0xff);
+
+				// 渲染页面
+				fz_matrix ctm = fz_scale(m_uniformScale, m_uniformScale);
+
+				// 应用旋转
+				if (rotation != 0)
+				{
+					fz_matrix rotate = fz_rotate((float)rotation);
+					if (rotation == 90)
+						rotate = fz_pre_translate(rotate, 0, -(bounds.y1 - bounds.y0));
+					else if (rotation == 180)
+						rotate = fz_pre_translate(rotate, -(bounds.x1 - bounds.x0), -(bounds.y1 - bounds.y0));
+					else if (rotation == 270)
+						rotate = fz_pre_translate(rotate, -(bounds.x1 - bounds.x0), 0);
+					ctm = fz_concat(rotate, ctm);
+				}
+
+				dev = fz_new_draw_device(m_ctx, ctm, pixmap);
+				fz_run_page(m_ctx, page, dev, fz_identity, nullptr);
+				fz_close_device(m_ctx, dev);
+				fz_drop_device(m_ctx, dev);
+				dev = nullptr;
+
+				// 创建DIB位图
+				BITMAPINFO bmi = { 0 };
+				bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+				bmi.bmiHeader.biWidth = width;
+				bmi.bmiHeader.biHeight = -height;
+				bmi.bmiHeader.biPlanes = 1;
+				bmi.bmiHeader.biBitCount = 24;
+				bmi.bmiHeader.biCompression = BI_RGB;
+
+				BYTE* pbBits = nullptr;
+				hBitmap = CreateDIBSection(memDC.GetSafeHdc(), &bmi,
+					DIB_RGB_COLORS, (void**)&pbBits, NULL, 0);
+
+				if (hBitmap && pbBits)
+				{
+					// 复制像素数据
+					unsigned char* samples = fz_pixmap_samples(m_ctx, pixmap);
+					int stride = (width * 3 + 3) & ~3;
+					int n = fz_pixmap_components(m_ctx, pixmap);
+
+					for (int y = 0; y < height; y++) {
+						for (int x = 0; x < width; x++) {
+							pbBits[y * stride + x * 3 + 0] = samples[(y * width + x) * n + 2];
+							pbBits[y * stride + x * 3 + 1] = samples[(y * width + x) * n + 1];
+							pbBits[y * stride + x * 3 + 2] = samples[(y * width + x) * n + 0];
+						}
+					}
+
+					// 添加到缓存
+					::PageCacheItem cacheItem;
+					cacheItem.hBitmap = hBitmap;
+					pageCache[cacheKey] = cacheItem;
+					cacheOrder.push_back(cacheKey);
+
+					// LRU淘汰
+					const int CACHE_LIMIT = 50;
+					while (cacheOrder.size() > CACHE_LIMIT)
+					{
+						::PageCacheKey oldKey = cacheOrder.front();
+						cacheOrder.pop_front();
+						auto oldIt = pageCache.find(oldKey);
+						if (oldIt != pageCache.end())
+						{
+							if (oldIt->second.hBitmap)
+								DeleteObject(oldIt->second.hBitmap);
+							pageCache.erase(oldIt);
+						}
 					}
 				}
 
-				// 在内存DC中绘制这个页面
+				if (pixmap)
+					fz_drop_pixmap(m_ctx, pixmap);
+			}
+
+			// 绘制位图到内存DC
+			if (hBitmap)
+			{
 				CDC pageDC;
 				pageDC.CreateCompatibleDC(&memDC);
 				HBITMAP oldPageBmp = (HBITMAP)pageDC.SelectObject(hBitmap);
@@ -6546,6 +6594,7 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 				if (!m_searchMatches.empty())
 				{
 					// 获取原始页面尺寸（未旋转）
+					fz_rect bounds = fz_bound_page(m_ctx, page);
 					float origPageWidth = bounds.x1 - bounds.x0;
 					float origPageHeight = bounds.y1 - bounds.y0;
 
@@ -6595,23 +6644,23 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 							fillColor = RGB(255, 200, 0);  // 其他匹配项用深黄色（更明显）
 
 						// 创建临时DC用于AlphaBlend
-					CDC tempDC;
-					tempDC.CreateCompatibleDC(&memDC);
-					CBitmap tempBmp;
-					tempBmp.CreateCompatibleBitmap(&memDC, highlightRect.Width(), highlightRect.Height());
-					CBitmap* pOldTempBmp = tempDC.SelectObject(&tempBmp);
-					tempDC.FillSolidRect(0, 0, highlightRect.Width(), highlightRect.Height(), fillColor);
+						CDC tempDC;
+						tempDC.CreateCompatibleDC(&memDC);
+						CBitmap tempBmp;
+						tempBmp.CreateCompatibleBitmap(&memDC, highlightRect.Width(), highlightRect.Height());
+						CBitmap* pOldTempBmp = tempDC.SelectObject(&tempBmp);
+						tempDC.FillSolidRect(0, 0, highlightRect.Width(), highlightRect.Height(), fillColor);
 
-					// 使用AlphaBlend提高不透明度
-					BLENDFUNCTION bf;
-					bf.BlendOp = AC_SRC_OVER;
-					bf.BlendFlags = 0;
-					bf.SourceConstantAlpha = ((int)matchIdx == m_currentMatchIndex) ? 200 : 180;
-					bf.AlphaFormat = 0;
-					memDC.AlphaBlend(highlightRect.left, highlightRect.top,
-						highlightRect.Width(), highlightRect.Height(),
-						&tempDC, 0, 0, highlightRect.Width(), highlightRect.Height(), bf);
-					tempDC.SelectObject(pOldTempBmp);
+						// 使用AlphaBlend提高不透明度
+						BLENDFUNCTION bf;
+						bf.BlendOp = AC_SRC_OVER;
+						bf.BlendFlags = 0;
+						bf.SourceConstantAlpha = ((int)matchIdx == m_currentMatchIndex) ? 200 : 180;
+						bf.AlphaFormat = 0;
+						memDC.AlphaBlend(highlightRect.left, highlightRect.top,
+							highlightRect.Width(), highlightRect.Height(),
+							&tempDC, 0, 0, highlightRect.Width(), highlightRect.Height(), bf);
+						tempDC.SelectObject(pOldTempBmp);
 
 						// 绘制边框使其更明显
 						CPen borderPen(PS_SOLID, 1, RGB(255, 140, 0));
@@ -6623,16 +6672,13 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 				}
 
 				pageDC.SelectObject(oldPageBmp);
-				DeleteObject(hBitmap);
+				// ★★★ 注意：不要删除缓存的位图！
 			}
 
-			fz_drop_pixmap(m_ctx, pixmap);
 			fz_drop_page(m_ctx, page);
 		}
 		fz_catch(m_ctx)
 		{
-			if (dev) fz_drop_device(m_ctx, dev);
-			if (pixmap) fz_drop_pixmap(m_ctx, pixmap);
 			if (page) fz_drop_page(m_ctx, page);
 		}
 	}
@@ -6786,43 +6832,8 @@ void CXiaoGongPDFDlg::OnVScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar)
 		m_scrollPosition = newPos;
 		UpdateScrollBar();
 
-		// ★★★ 优化：拖动滚动条时使用定时渲染机制（每500ms渲染一次）
-		if (nSBCode == SB_THUMBTRACK)
-		{
-			// 正在拖动滚动条
-			if (!m_isThumbTracking)
-			{
-				// 首次进入拖动状态，设置定时器
-				m_isThumbTracking = true;
-				m_scrollThumbTimer = SetTimer(1003, THUMB_RENDER_INTERVAL, NULL);
-#ifdef _DEBUG
-				TRACE(_T("OnVScroll: 开始拖动，启动定时渲染（%dms间隔）\n"), THUMB_RENDER_INTERVAL);
-#endif
-			}
-			// 拖动过程中不立即渲染，等待定时器触发
-		}
-		else if (nSBCode == SB_THUMBPOSITION)
-		{
-			// 松开滚动条，停止定时器并立即渲染最终位置
-			if (m_isThumbTracking)
-			{
-				m_isThumbTracking = false;
-				if (m_scrollThumbTimer != 0)
-				{
-					KillTimer(m_scrollThumbTimer);
-					m_scrollThumbTimer = 0;
-				}
-#ifdef _DEBUG
-				TRACE(_T("OnVScroll: 松开滚动条，停止定时器并渲染最终位置\n"));
-#endif
-			}
-			RenderVisiblePages();
-		}
-		else
-		{
-			// 其他滚动操作（鼠标滚轮、点击箭头等）立即渲染
-			RenderVisiblePages();
-		}
+		// ★★★ 优化：使用页面缓存后，可以立即渲染，无需定时器节流
+		RenderVisiblePages();
 	}
 
 	CDialogEx::OnVScroll(nSBCode, nPos, pScrollBar);
