@@ -439,7 +439,7 @@ public:
 	void CleanupCurrentPage();  // 新增：清理当前页面资源
 	void CleanupBitmap();  // 新增：清理位图资源
 	void GoToPage(int pageNumber);  // 统一的页面跳转函数，支持分页和连续滚动模式
-
+	 
     // 在类声明中添加消息处理函数
     afx_msg BOOL OnMouseWheel(UINT nFlags, short zDelta, CPoint pt);
 };

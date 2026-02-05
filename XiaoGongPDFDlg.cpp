@@ -261,9 +261,9 @@ CXiaoGongPDFDlg::CXiaoGongPDFDlg(CWnd* pParent /*=nullptr*/)
 	, m_thumbnailPicHeight(0)
 	, m_renderLock()
 	, m_isFullscreen(false)
-	, m_savedZoomMode(ZOOM_FIT_PAGE)     // 初始化保存的缩放模式
+	, m_savedZoomMode(ZOOM_CUSTOM)     // 初始化保存的缩放模式
 	, m_savedCustomZoom(1.0f)            // 初始化保存的自定义缩放值
-	, m_zoomMode(ZOOM_FIT_PAGE)
+	, m_zoomMode(ZOOM_CUSTOM)
 	, m_customZoom(1.0f)
 	, m_documentMaxPageWidth(0.0f)  // ★★★ 初始化文档最大页面宽度
 	, m_documentUniformScale(1.0f)  // ★★★ 初始化文档统一缩放比例
@@ -3844,11 +3844,18 @@ void CXiaoGongPDFDlg::ExitFullscreen()
 		}
 
 		// ★★★ 强制重置缩放模式，避免 SetZoom 的优化检查跳过渲染
-		m_zoomMode = ZOOM_CUSTOM; 
+		m_zoomMode = ZOOM_CUSTOM;
 
 		// ★★★ 恢复进入全屏前的缩放模式和缩放值
 		// SetZoom 内部会调用 UpdateScrollBar() 和 RenderVisiblePages()
 		SetZoom(m_savedCustomZoom, m_savedZoomMode);
+
+		// ★★★ 分页模式下强制重新渲染当前页面，确保滚动条范围正确
+		if (!m_continuousScrollMode)
+		{
+			CleanupBitmap();
+			RenderPage(m_currentPage);
+		}
 	}
 
 	// 确保窗口和所有控件更新
@@ -3893,7 +3900,7 @@ void CXiaoGongPDFDlg::RestorePageZoomState(int pageNumber)
 	else
 	{
 		// 没有保存过该页面的状态，使用默认值
-		m_zoomMode = ZOOM_FIT_PAGE;
+		m_zoomMode = ZOOM_CUSTOM;
 		m_customZoom = 1.0f;
 		m_panOffset = CPoint(0, 0);  // ★★★ 重置平移位置
 #ifdef _DEBUG
@@ -4845,7 +4852,7 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 	m_pageZoomStates.clear();
 
 	// ★★★ 重置缩放和平移状态为默认值（稍后会从新文档恢复）
-	m_zoomMode = ZOOM_FIT_PAGE;
+	m_zoomMode = ZOOM_CUSTOM;
 	m_customZoom = 1.0f;
 	m_panOffset = CPoint(0, 0);
 	m_canDrag = false;
@@ -6917,7 +6924,7 @@ void CXiaoGongPDFDlg::UpdateScrollBar()
 		si.cbSize = sizeof(SCROLLINFO);
 		si.fMask = SIF_ALL | SIF_DISABLENOSCROLL;
 		si.nMin = 0;
-		si.nMax = m_totalScrollHeight;
+		si.nMax = m_totalScrollHeight - 1;  // ★★★ 修正：减1以正确计算滚动范围
 		si.nPage = viewRect.Height();
 		si.nPos = m_scrollPosition;
 		::SetScrollInfo(m_pdfView.GetSafeHwnd(), SB_VERT, &si, TRUE);
@@ -6929,7 +6936,7 @@ void CXiaoGongPDFDlg::UpdateScrollBar()
 		si.cbSize = sizeof(SCROLLINFO);
 		si.fMask = SIF_ALL | SIF_DISABLENOSCROLL;
 		si.nMin = 0;
-		si.nMax = m_totalScrollHeight;
+		si.nMax = m_totalScrollHeight - 1;  // ★★★ 修正：减1以正确计算滚动范围
 		si.nPage = viewRect.Height();
 		si.nPos = m_scrollPosition;
 		::SetScrollInfo(m_pdfView.GetSafeHwnd(), SB_VERT, &si, TRUE);
@@ -6940,7 +6947,7 @@ void CXiaoGongPDFDlg::UpdateScrollBar()
 	siH.cbSize = sizeof(SCROLLINFO);
 	siH.fMask = SIF_ALL | SIF_DISABLENOSCROLL;
 	siH.nMin = 0;
-	siH.nMax = m_totalScrollWidth;
+	siH.nMax = m_totalScrollWidth - 1;  // ★★★ 修正：减1以正确计算滚动范围
 	siH.nPage = viewRect.Width();
 	siH.nPos = m_scrollPositionH;
 	::SetScrollInfo(m_pdfView.GetSafeHwnd(), SB_HORZ, &siH, TRUE);

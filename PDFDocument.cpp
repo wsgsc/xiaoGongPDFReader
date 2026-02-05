@@ -97,7 +97,7 @@ bool CPDFDocument::OpenDocument(const char* filename)
 			delete[] wideStr;
 		}
 		m_currentPage = 0;
-		m_zoomMode = ZOOM_FIT_PAGE;
+		m_zoomMode = ZOOM_CUSTOM;
 		m_customZoom = 1.0f;
 		m_zoom = 1.0f;
 		m_panOffset = CPoint(0, 0);
@@ -173,7 +173,7 @@ void CPDFDocument::CloseDocument()
 	m_totalPages = 0;
 	m_currentPage = 0;
 	m_zoom = 1.0f;
-	m_zoomMode = ZOOM_FIT_PAGE;
+	m_zoomMode = ZOOM_CUSTOM;
 	m_customZoom = 1.0f;
 	m_panOffset = CPoint(0, 0);
 	m_canDrag = false;
@@ -286,7 +286,7 @@ void CPDFDocument::RestorePageZoomState(int pageNumber)
 	}
 	else {
 		// 使用默认状态
-		m_zoomMode = ZOOM_FIT_PAGE;
+		m_zoomMode = ZOOM_CUSTOM;
 		m_customZoom = 1.0f;
 		m_panOffset = CPoint(0, 0);
 	}

@@ -25,7 +25,7 @@ struct PageZoomState {
 	float customZoom;    // 自定义缩放比例
 	CPoint panOffset;    // 平移偏移量（拖拽位置）
 
-	PageZoomState() : zoomMode(ZOOM_FIT_PAGE), customZoom(1.0f), panOffset(0, 0) {}
+	PageZoomState() : zoomMode(ZOOM_CUSTOM), customZoom(1.0f), panOffset(0, 0) {}
 	PageZoomState(ZoomMode mode, float zoom, CPoint offset)
 		: zoomMode(mode), customZoom(zoom), panOffset(offset) {}
 };

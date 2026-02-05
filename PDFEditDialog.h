@@ -72,6 +72,7 @@ private:
 	// 页面数据
 	std::vector<PageInfo> m_pages;
 	std::vector<PageInfo> m_originalPages;  // 用于重置
+	int m_originalTotalPages;  // 原始总页数（用于重置）
 
 	// 拖拽相关（优化版）
 	bool m_isDragging;              // 是否正在拖拽
@@ -114,6 +115,8 @@ private:
 	void InitializeThumbnailList();
 	void LoadAllThumbnails();
 	HBITMAP RenderThumbnail(int pageNumber, int currentPos, int originalPos, int rotationAngle = 0);
+	HBITMAP RenderThumbnailFromSource(const CString& sourceFile, int pageIndex, int currentPos, int originalPos, int rotationAngle = 0);
+	HBITMAP RenderPreviewBitmap(const CString& sourceFile, int pageIndex, int rotationAngle = 0);
 	void RefreshThumbnailList();
 	void UpdateInfoBar();
 
@@ -135,6 +138,9 @@ private:
 
 	// 删除功能
 	void DeleteSelectedPages();
+
+	// 提取功能
+	void ExtractSelectedPages();
 
 	// 交换功能
 	void SwapSelectedPages();
