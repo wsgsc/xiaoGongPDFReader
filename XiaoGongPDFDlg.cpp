@@ -9,6 +9,8 @@
 #include <mupdf/fitz.h>
 #include <vector>
 #include <WinUser.h>  // 添加这个头文件来获取 HTSCROLLBAR 定义
+#include <dwmapi.h>
+#pragma comment(lib, "dwmapi.lib")
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -79,27 +81,8 @@ LRESULT CALLBACK CPDFViewCtrl::StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam,
 		return TRUE;  // 返回TRUE表示已处理，不执行默认的背景擦除
 	}
 
-	// ★★★ 拦截 WM_PAINT：当有位图时直接 BitBlt，彻底跳过 CStatic 内部"先填白色背景再画位图"的逻辑
-	if (msg == WM_PAINT && pThis && pThis->m_hDisplayBitmap)
-	{
-		PAINTSTRUCT ps;
-		HDC hdc = ::BeginPaint(hwnd, &ps);
-
-		HDC memDC = ::CreateCompatibleDC(hdc);
-		HBITMAP hOldBmp = (HBITMAP)::SelectObject(memDC, pThis->m_hDisplayBitmap);
-
-		BITMAP bm;
-		::GetObject(pThis->m_hDisplayBitmap, sizeof(BITMAP), &bm);
-		::BitBlt(hdc, 0, 0, bm.bmWidth, bm.bmHeight, memDC, 0, 0, SRCCOPY);
-
-		::SelectObject(memDC, hOldBmp);
-		::DeleteDC(memDC);
-
-		::EndPaint(hwnd, &ps);
-		return 0;
-	}
-
-	// 无位图时走 MFC OnPaint（显示灰色背景）
+	// WM_PAINT 统一走 MFC OnPaint()（CPaintDC 自动裁剪客户区，有背景填充，无白闪）
+	// 注：SetDisplayBitmap 使用 InvalidateRect(FALSE) 不触发 WM_ERASEBKGND，已彻底断绝白闪来源
 	if (msg == WM_PAINT)
 	{
 		if (pThis)
@@ -218,8 +201,17 @@ void CPDFViewCtrl::OnPaint()
 #endif
 		}
 
-		// 绘制位图（应用居中或直接绘制）
-		dc.BitBlt(destX, destY, bm.bmWidth, bm.bmHeight, &memDC, 0, 0, SRCCOPY);
+		// 绘制位图（应用居中或直接绘制，限制在客户区范围内防止溢出）
+		{
+			int srcX = max(0, -destX);
+			int srcY = max(0, -destY);
+			int dstX = max(0, destX);
+			int dstY = max(0, destY);
+			int drawW = min(bm.bmWidth  - srcX, clientRect.Width()  - dstX);
+			int drawH = min(bm.bmHeight - srcY, clientRect.Height() - dstY);
+			if (drawW > 0 && drawH > 0)
+				dc.BitBlt(dstX, dstY, drawW, drawH, &memDC, srcX, srcY, SRCCOPY);
+		}
 	}
 	else
 	{
@@ -269,8 +261,17 @@ void CPDFViewCtrl::OnPaint()
 			destY = -scrollY;
 		}
 
-		// 绘制位图（应用滚动偏移或居中）
-		dc.BitBlt(destX, destY, bm.bmWidth, bm.bmHeight, &memDC, 0, 0, SRCCOPY);
+		// 绘制位图（应用滚动偏移或居中，限制在客户区范围内防止溢出）
+		{
+			int srcX = max(0, -destX);
+			int srcY = max(0, -destY);
+			int dstX = max(0, destX);
+			int dstY = max(0, destY);
+			int drawW = min(bm.bmWidth  - srcX, clientRect.Width()  - dstX);
+			int drawH = min(bm.bmHeight - srcY, clientRect.Height() - dstY);
+			if (drawW > 0 && drawH > 0)
+				dc.BitBlt(dstX, dstY, drawW, drawH, &memDC, srcX, srcY, SRCCOPY);
+		}
 	}
 
 	memDC.SelectObject(hOldBitmap);
@@ -760,7 +761,12 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	CDialogEx::OnInitDialog();
 
 	// 添加最大化、最小化按钮
-	ModifyStyle(0, WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
+	ModifyStyle(0, WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN);
+
+	// ★★★ 禁用DWM窗口过渡动画，防止最大化→还原时DWM短暂显示旧大尺寸内容导致的边界溢出
+	BOOL fDisableTransitions = TRUE;
+	DwmSetWindowAttribute(GetSafeHwnd(), DWMWA_TRANSITIONS_FORCEDISABLED,
+		&fDisableTransitions, sizeof(fDisableTransitions));
 
 	SetIcon(m_hIcon, TRUE);
 	SetIcon(m_hIcon, FALSE);
@@ -2682,6 +2688,9 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		// PDF视图，为状态栏留出空间
 		m_pdfView.MoveWindow(pdfX, contentY, pdfWidth, contentHeight);
 
+		// ★★★ 立即清除旧位图，防止新尺寸下用旧的大位图绘制导致溢出窗口边界
+		m_pdfView.SetDisplayBitmap(NULL);
+
 		// ★★★ MoveWindow 会重置控件状态，需要立即根据模式设置滚动条
 		if (m_continuousScrollMode)
 		{
@@ -2749,11 +2758,15 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 				m_pdfView.ShowScrollBar(SB_HORZ, TRUE);
 				m_pdfView.EnableScrollBarCtrl(SB_HORZ, TRUE);
 
+				// ★★★ 重置滚动位置，防止使用最大化时的旧值导致溢出
+				m_scrollPosition = 0;
+				m_scrollPositionH = 0;
+
 				// 更新滚动条（不重新渲染）
 				UpdateScrollBar();
 
-				// ★★★ 触发重绘，应用新的滚动位置
-				m_pdfView.Invalidate(FALSE);
+				// ★★★ 重新渲染页面以适应新的视口大小（修复最大化→还原后内容溢出问题）
+				RenderPage(m_currentPage);
 			}
 		}
 
@@ -2761,7 +2774,8 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		SetRedraw(TRUE);
 
 		// ★★★ 使用RedrawWindow强制立即重绘整个窗口及所有子控件
-		RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+		// RDW_ERASE: 触发WM_ERASEBKGND，确保最大化→还原后旧区域被背景色覆盖
+		RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 
 		// ★★★ 确保PDF视图也立即重绘（应用居中等布局变化）
 		if (m_doc && m_currentPage >= 0)
