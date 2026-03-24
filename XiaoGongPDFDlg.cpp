@@ -33,6 +33,18 @@ void CPDFViewCtrl::SubclassWindow()
 	::SetWindowLongPtr(GetSafeHwnd(), GWLP_USERDATA, (LONG_PTR)this);
 }
 
+// ★★★ SetDisplayBitmap：只存句柄 + 触发无擦除重绘，完全绕开 CStatic::STM_SETIMAGE 内部的白色背景
+void CPDFViewCtrl::SetDisplayBitmap(HBITMAP hBitmap)
+{
+	m_hDisplayBitmap = hBitmap;
+	HWND hwnd = GetSafeHwnd();
+	if (hwnd && ::IsWindow(hwnd))
+	{
+		// FALSE = 不标记背景需要擦除，不会触发 WM_ERASEBKGND
+		::InvalidateRect(hwnd, NULL, FALSE);
+	}
+}
+
 LRESULT CALLBACK CPDFViewCtrl::StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
 	// 从窗口的用户数据中获取this指针
@@ -67,11 +79,29 @@ LRESULT CALLBACK CPDFViewCtrl::StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam,
 		return TRUE;  // 返回TRUE表示已处理，不执行默认的背景擦除
 	}
 
-	// ★★★ 对于WM_PAINT消息，让MFC的消息映射系统处理（调用我们的OnPaint）
-	// 不要调用原始窗口过程（CStatic的默认绘制），否则会覆盖我们的自定义绘制
+	// ★★★ 拦截 WM_PAINT：当有位图时直接 BitBlt，彻底跳过 CStatic 内部"先填白色背景再画位图"的逻辑
+	if (msg == WM_PAINT && pThis && pThis->m_hDisplayBitmap)
+	{
+		PAINTSTRUCT ps;
+		HDC hdc = ::BeginPaint(hwnd, &ps);
+
+		HDC memDC = ::CreateCompatibleDC(hdc);
+		HBITMAP hOldBmp = (HBITMAP)::SelectObject(memDC, pThis->m_hDisplayBitmap);
+
+		BITMAP bm;
+		::GetObject(pThis->m_hDisplayBitmap, sizeof(BITMAP), &bm);
+		::BitBlt(hdc, 0, 0, bm.bmWidth, bm.bmHeight, memDC, 0, 0, SRCCOPY);
+
+		::SelectObject(memDC, hOldBmp);
+		::DeleteDC(memDC);
+
+		::EndPaint(hwnd, &ps);
+		return 0;
+	}
+
+	// 无位图时走 MFC OnPaint（显示灰色背景）
 	if (msg == WM_PAINT)
 	{
-		// 通过MFC的WindowProc让消息映射系统处理
 		if (pThis)
 		{
 			return pThis->CStatic::WindowProc(msg, wParam, lParam);
@@ -119,8 +149,8 @@ void CPDFViewCtrl::OnPaint()
 	CRect clientRect;
 	GetClientRect(&clientRect);
 
-	// 获取当前设置的位图（通过CStatic::SetBitmap设置的）
-	HBITMAP hBitmap = GetBitmap();
+	// 获取当前位图句柄（通过 SetDisplayBitmap 设置的）
+	HBITMAP hBitmap = m_hDisplayBitmap;
 
 #ifdef _DEBUG
 	TRACE(_T("CPDFViewCtrl::OnPaint - hBitmap=%p, clientRect=(%d,%d)\n"),
@@ -449,8 +479,8 @@ void CXiaoGongPDFDlg::CleanupBitmap()
 		m_hContinuousViewBitmap = NULL;
 	}
 
-	// 清理 CStatic 控件中的位图
-	m_pdfView.SetBitmap(NULL);
+	// 清理控件中的位图引用
+	m_pdfView.SetDisplayBitmap(NULL);
 }
 
 void CXiaoGongPDFDlg::DoDataExchange(CDataExchange* pDX)
@@ -1027,7 +1057,7 @@ bool CXiaoGongPDFDlg::RenderPage(int pageNumber)
 		if (!m_hCurrentBitmap)
 		{
 			// 如果复制失败，直接使用缓存中的位图（虽然不理想，但至少能显示）
-			m_pdfView.SetBitmap(it->second.hBitmap);
+			m_pdfView.SetDisplayBitmap(it->second.hBitmap);
 		}
 		else
 		{
@@ -1047,7 +1077,7 @@ bool CXiaoGongPDFDlg::RenderPage(int pageNumber)
 			}
 
 			// 设置复制后的位图到控件
-			m_pdfView.SetBitmap(m_hCurrentBitmap);
+			m_pdfView.SetDisplayBitmap(m_hCurrentBitmap);
 		}
 
 		// 强制刷新控件显示
@@ -1326,7 +1356,7 @@ bool CXiaoGongPDFDlg::RenderPage(int pageNumber)
 			}
 
 			// 设置新位图到控件
-			m_pdfView.SetBitmap(m_hCurrentBitmap);
+			m_pdfView.SetDisplayBitmap(m_hCurrentBitmap);
 
 			// 强制刷新控件显示
 			m_pdfView.Invalidate(FALSE);
@@ -5199,7 +5229,7 @@ void CXiaoGongPDFDlg::UIRelease()
 	HWND h = m_pdfView.GetSafeHwnd();
 	if (h && ::IsWindow(h))
 	{
-		m_pdfView.SetBitmap(NULL);
+		m_pdfView.SetDisplayBitmap(NULL);
 	}
 
 	// 清理缩略图列表控件
@@ -5866,7 +5896,7 @@ void CXiaoGongPDFDlg::OnMouseMove(UINT nFlags, CPoint point)
 				if (m_hCurrentBitmap)
 					DeleteObject(m_hCurrentBitmap);
 				m_hCurrentBitmap = hNewBitmap;
-				m_pdfView.SetBitmap(m_hCurrentBitmap);
+				m_pdfView.SetDisplayBitmap(m_hCurrentBitmap);
 			}
 			else
 			{
@@ -6703,25 +6733,9 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 #ifdef _DEBUG
 		TRACE(_T("RenderVisiblePages: 开始更新位图...\n"));
 #endif
-		// 强制刷新GDI队列，确保位图数据完全写入内存，避免高刷新率显示器上的闪白问题
-		GdiFlush();
-
-#ifdef _DEBUG
-		TRACE(_T("RenderVisiblePages: GdiFlush完成，准备SetBitmap...\n"));
-#endif
-
-		// ★★★ 禁止PDF控件重绘，避免SetBitmap内部触发的WM_PAINT导致闪白
-		m_pdfView.SetRedraw(FALSE);
-
-		// 设置位图到控件（控件会自动处理重绘）
-		m_pdfView.SetBitmap(hNewBitmap);
-
-		// ★★★ 重新启用重绘
-		m_pdfView.SetRedraw(TRUE);
-
-#ifdef _DEBUG
-		TRACE(_T("RenderVisiblePages: SetBitmap完成，准备删除旧位图...\n"));
-#endif
+		// ★★★ 先调用 SetDisplayBitmap 再删除旧位图：
+		// SetDisplayBitmap 只存句柄 + InvalidateRect(FALSE)，完全不走 CStatic 内部逻辑，无白闪风险
+		m_pdfView.SetDisplayBitmap(hNewBitmap);
 
 		// 在设置新位图之后再删除旧位图，确保控件始终有有效的位图可以显示
 		if (m_hContinuousViewBitmap)

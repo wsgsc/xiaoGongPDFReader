@@ -30,13 +30,15 @@ class CXiaoGongPDFDlg;
 class CPDFViewCtrl : public CStatic
 {
 public:
-	CPDFViewCtrl() : m_pParentDlg(nullptr), m_oldWndProc(nullptr) {}
+	CPDFViewCtrl() : m_pParentDlg(nullptr), m_oldWndProc(nullptr), m_hDisplayBitmap(nullptr) {}
 	void SetParentDlg(CXiaoGongPDFDlg* pDlg) { m_pParentDlg = pDlg; }
 	void SubclassWindow();
+	void SetDisplayBitmap(HBITMAP hBitmap);  // ★★★ 替代 SetBitmap，避免内部白色背景闪烁
 
 protected:
 	CXiaoGongPDFDlg* m_pParentDlg;
 	WNDPROC m_oldWndProc;
+	HBITMAP m_hDisplayBitmap;  // ★★★ 直接持有位图句柄，不经过 CStatic::SetBitmap
 
 	static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
