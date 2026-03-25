@@ -4990,6 +4990,11 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 	// ★★★ 连续滚动模式：重新计算页面位置并渲染可见页面
 	CalculatePagePositions();
 	UpdateScrollBar();
+	if (m_continuousScrollMode)
+	{
+		m_pdfView.ShowScrollBar(SB_VERT, TRUE);
+		m_pdfView.EnableScrollBarCtrl(SB_VERT, TRUE);
+	}
 	RenderVisiblePages();
 
 	// 更新UI控件
@@ -5058,6 +5063,10 @@ void CXiaoGongPDFDlg::CloseDocument(int index)
 			CRect rect;
 			GetClientRect(&rect);
 			OnSize(SIZE_RESTORED, rect.Width(), rect.Height());
+
+			// 无文档时隐藏滚动条（必须在 OnSize 之后，防止 OnSize 重新显示）
+			m_pdfView.ShowScrollBar(SB_VERT, FALSE);
+			m_pdfView.ShowScrollBar(SB_HORZ, FALSE);
 		}
 		else
 		{
