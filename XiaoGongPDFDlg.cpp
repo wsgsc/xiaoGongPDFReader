@@ -529,7 +529,7 @@ BEGIN_MESSAGE_MAP(CXiaoGongPDFDlg, CDialogEx)
 	ON_MESSAGE(WM_USER + 101, &CXiaoGongPDFDlg::OnOpenInitialFile)  // 延迟打开初始文件
 	ON_MESSAGE(WM_USER + 102, &CXiaoGongPDFDlg::OnThumbnailScroll)  // 缩略图滚动事件
 	ON_MESSAGE(WM_USER + 103, &CXiaoGongPDFDlg::OnUpdateThumbnailHighlight)  // 延迟更新缩略图高亮
-	ON_MESSAGE(WM_USER + 104, &CXiaoGongPDFDlg::OnPDFLoadComplete)  // PDF后台加载完成
+	ON_MESSAGE(WM_PDF_LOAD_COMPLETE, &CXiaoGongPDFDlg::OnPDFLoadComplete)  // PDF后台加载完成
 	ON_WM_TIMER()  // 定时器消息处理（用于去抖动缩略图高亮更新）
 	ON_WM_MOUSEWHEEL()
 	ON_BN_CLICKED(IDC_BTN_FIRST, &CXiaoGongPDFDlg::OnBtnFirst)
@@ -4055,7 +4055,6 @@ void CXiaoGongPDFDlg::onMenuRecentFile(UINT nID)
 		 
 		// 使用新的多文档模式打开
 		OpenPDFInNewTab(filePath);
- 		OpenPDFInNewTab(filePath);
 	}
 }
 
@@ -4449,221 +4448,20 @@ bool CXiaoGongPDFDlg::OpenPDFInNewTab(const CString& filePath)
 		m_pLoadThread->m_bAutoDelete = FALSE;  // 手动管理线程生命周期
 		m_pLoadThread->ResumeThread();
 
-		// 等待加载完成或用户取消
-		MSG msg;
-		bool loadCompleted = false;
-		while (m_pLoadThread && !pProgressDlg->IsCancelled())
-		{
-			// 检查线程是否完成
-			DWORD exitCode = 0;
-			if (GetExitCodeThread(m_pLoadThread->m_hThread, &exitCode) && exitCode != STILL_ACTIVE)
-			{
-				loadCompleted = true;
-				// 线程已完成，但继续处理消息，等待OnPDFLoadComplete被调用
-				// 给足够的时间让消息被处理
-				for (int i = 0; i < 100 && m_pProgressDlg != nullptr; i++)
-				{
-					if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
-					{
-						TranslateMessage(&msg);
-						DispatchMessage(&msg);
-					}
-					else
-					{
-						Sleep(10);
-					}
-				}
-				break;
-			}
-
-			// 处理消息，保持UI响应
-			if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
-			{
-				if (msg.message == WM_QUIT)
-				{
-					break;
-				}
-				TranslateMessage(&msg);
-				DispatchMessage(&msg);
-			}
-			else
-			{
-				Sleep(10);  // 短暂休眠，避免CPU占用过高
-			}
-		}
-
-		// 清理线程
-		if (m_pLoadThread)
-		{
-			if (pProgressDlg->IsCancelled())
-			{
-				// 用户取消，终止线程
-				TerminateThread(m_pLoadThread->m_hThread, 0);
-				delete newDoc;
-				delete m_pLoadParams;
-				m_pLoadParams = nullptr;
-
-				// 关闭并清理进度对话框
-				if (m_pProgressDlg)
-				{
-					m_pProgressDlg->DestroyWindow();
-					delete m_pProgressDlg;
-					m_pProgressDlg = nullptr;
-				}
-			}
-			delete m_pLoadThread;
-			m_pLoadThread = nullptr;
-		}
 	}
 	else
 	{
-		// 线程创建失败，使用同步加载
+		// 线程创建失败 ,电脑资源极度紧张，概率很小
+		DWORD dwError = GetLastError();
 		delete m_pLoadParams;
 		m_pLoadParams = nullptr;
-
-		if (!newDoc->OpenDocument(utf8Path.data()))
-		{
-			delete newDoc;
-			if (m_pProgressDlg)
-			{
-				m_pProgressDlg->DestroyWindow();
-				delete m_pProgressDlg;
-				m_pProgressDlg = nullptr;
-			}
-			MessageBox(_T("无法打开PDF文件"), _T("错误"), MB_OK | MB_ICONERROR);
-			return false;
-		}
-
-		m_documents.push_back(newDoc);
-		int newIndex = (int)m_documents.size() - 1;
-
-		// 添加标签页并切换（在OnPDFLoadComplete中完成的工作）
-		// 这里需要继续执行后面的代码
-		goto load_success;
-	}
-
-	// 检查是否取消
-	if (pProgressDlg->IsCancelled())
-	{
+		CString strMsg;
+		strMsg.Format(_T("启动后台线程失败 (错误码: %d)\n\n")
+			_T("可能原因：系统资源不足\n")
+			_T("建议：保存当前工作，重启程序后重试"),
+			dwError);
+		AfxMessageBox(strMsg, MB_OK | MB_ICONERROR);
 		return false;
-	}
-
-	// 检查加载是否成功（OnPDFLoadComplete已经处理了成功情况）
-	// 如果失败，OnPDFLoadComplete会显示错误消息并关闭进度对话框
-	// 如果成功，OnPDFLoadComplete也会关闭进度对话框
-	return true;
-
-load_success:
-	// 同步加载成功后继续执行
-	int newIndex = (int)m_documents.size() - 1;
-
-#ifdef _DEBUG
-	TRACE(_T("新文档索引: %d\n"), newIndex);
-	TRACE(_T("当前标签页控件句柄: %p\n"), m_tabCtrl.GetSafeHwnd());
-	TRACE(_T("当前标签页数量: %d\n"), m_tabCtrl.GetItemCount());
-#endif
-
-	// 添加标签页
-	if (m_tabCtrl.GetSafeHwnd())
-	{
-		// ★★★ 如果是第一个文档，确保标签页控件可见
-		if (newIndex == 0 && m_documents.size() == 1)
-		{
-			m_tabCtrl.ShowWindow(SW_SHOW);
-		}
-
-#ifdef _DEBUG
-		TRACE(_T("准备添加标签页...\n"));
-#endif
-		TCITEM tci = {0};
-		tci.mask = TCIF_TEXT;
-		CString fullFileName = newDoc->GetFileName();
-		CString tabTitle = fullFileName;
-
-		// 去掉.pdf后缀
-		int dotPos = tabTitle.ReverseFind(_T('.'));
-		if (dotPos != -1)
-		{
-			CString ext = tabTitle.Mid(dotPos);
-			ext.MakeLower();
-			if (ext == _T(".pdf"))
-			{
-				tabTitle = tabTitle.Left(dotPos);
-			}
-		}
-
-		// 截断过长的文件名，避免标签太宽
-		const int MAX_TAB_LENGTH = 12;  // 固定宽度100像素，大约可显示12个字符
-		if (tabTitle.GetLength() > MAX_TAB_LENGTH)
-		{
-			// 截断并添加省略号
-			tabTitle = tabTitle.Left(MAX_TAB_LENGTH - 3) + _T("...");
-#ifdef _DEBUG 
-			TRACE(_T("文件名过长，已截断: [%s] -> [%s]\n"), fullFileName, tabTitle);
-#endif
-		}
-
-		tci.pszText = (LPTSTR)(LPCTSTR)tabTitle;
-
-#ifdef _DEBUG
-		TRACE(_T("标签页标题: [%s]\n"), tabTitle);
-		TRACE(_T("准备插入位置: %d\n"), newIndex);
-#endif
-
-		int insertResult = m_tabCtrl.InsertItem(newIndex, &tci);
-
-#ifdef _DEBUG
-		TRACE(_T("InsertItem返回值: %d\n"), insertResult);
-		TRACE(_T("插入后标签页总数: %d\n"), m_tabCtrl.GetItemCount());
-#endif
-
-		if (insertResult == -1)
-		{
-#ifdef _DEBUG
-			TRACE(_T("错误: InsertItem失败!\n"));
-#endif
-			MessageBox(_T("添加标签页失败"), _T("调试"), MB_OK);
-		}
-
-		// 切换到新文档
-		m_tabCtrl.SetCurSel(newIndex);
-
-#ifdef _DEBUG
-		TRACE(_T("SetCurSel: %d\n"), newIndex);
-		TRACE(_T("当前选中标签页: %d\n"), m_tabCtrl.GetCurSel());
-#endif
-
-		// ★★★ 强制刷新标签页显示，避免显示异常
-		m_tabCtrl.RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE | RDW_ALLCHILDREN);
-	}
-	else
-	{
-#ifdef _DEBUG
-		TRACE(_T("错误: 标签页控件句柄无效!\n"));
-#endif
-		MessageBox(_T("标签页控件未初始化"), _T("错误"), MB_OK | MB_ICONERROR);
-	}
-
-	SwitchToDocument(newIndex);
-
-	// 添加到最近文件列表
-	AddRecentFile(filePath);
-
-	// 刷新布局
-	CRect rect;
-	GetClientRect(&rect);
-	OnSize(SIZE_RESTORED, rect.Width(), rect.Height());
-
-	// ★★★ 在布局完成后，异步渲染缩略图
-	// 这样预览框可以快速显示，缩略图在后台加载
-	UpdateThumbnails();
-
-	// ★★★ 同步加载完成后，关闭进度对话框
-	if (m_pProgressDlg)
-	{
-		m_pProgressDlg->DestroyWindow();
-		delete m_pProgressDlg;
-		m_pProgressDlg = nullptr;
 	}
 
 	return true;
@@ -7382,7 +7180,7 @@ UINT CXiaoGongPDFDlg::PDFLoadThreadProc(LPVOID pParam)
 	// 通知主线程加载完成
 	if (pParams->pDlg && pParams->pDlg->GetSafeHwnd())
 	{
-		pParams->pDlg->PostMessage(WM_USER + 104, 0, (LPARAM)pParams);
+		pParams->pDlg->PostMessage(WM_PDF_LOAD_COMPLETE, 0, (LPARAM)pParams);
 	}
 
 	return 0;
