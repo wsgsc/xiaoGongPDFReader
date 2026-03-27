@@ -796,19 +796,18 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	m_pdfView.SetParentDlg(this);
 	m_pdfView.SubclassWindow();
 
-	// ★★★ 显示垂直和横向滚动条
-	m_pdfView.ShowScrollBar(SB_VERT, TRUE);
-	m_pdfView.EnableScrollBarCtrl(SB_VERT, TRUE);
-	m_pdfView.ShowScrollBar(SB_HORZ, TRUE);
-	m_pdfView.EnableScrollBarCtrl(SB_HORZ, TRUE);
+	// 初始状态隐藏滚动条（未加载PDF时不显示）
+	m_pdfView.ShowScrollBar(SB_VERT, FALSE);
+	m_pdfView.ShowScrollBar(SB_HORZ, FALSE);
 
 	// 获取系统垂直滚动条的宽度
 	m_scrollBarWidth = GetSystemMetrics(SM_CXVSCROLL);
 
 	m_thumbnailList.ModifyStyle(WS_VISIBLE, 0);
 
-	// 初始化状态栏
-	m_statusBar.SetWindowText(_T("页码: 0 / 0"));
+	// 初始化状态栏（未加载PDF时隐藏）
+	m_statusBar.SetWindowText(_T(""));
+	m_statusBar.ShowWindow(SW_HIDE);
 
 	// 初始化MuPDF上下文（多文档共享）
 	if (!m_ctx) {
@@ -1517,161 +1516,6 @@ void CXiaoGongPDFDlg::GoToPage(int pageNumber)
 	if (m_thumbnailVisible && m_thumbnailList.GetSafeHwnd())
 	{
 		PostMessage(WM_USER + 103, 0, 0);  // 延迟更新缩略图
-	}
-}
-
-void CXiaoGongPDFDlg::RenderPDF(const char* filename)
-{
-#ifdef _DEBUG
-	TRACE(_T("RenderPDF() :  %s\n"), filename);
-#endif
-	// ★★★ 清空缓存（只调用一次统一的清理函数）
-	ClearPageCache();
-
-	// 根据 m_thumbnailVisible 设置缩略图列表的显示状态
-	if (m_thumbnailVisible)
-		m_thumbnailList.ModifyStyle(0, WS_VISIBLE);
-	else
-		m_thumbnailList.ModifyStyle(WS_VISIBLE, 0);
-
-	// 清理之前的资源
-	CleanupThumbnails();  // 清理缩略图
-	CleanupBitmap();      // 清理当前页面位图
-	CleanupCurrentPage(); // 清理当前页面对象
-
-	m_statusBar.SetWindowText(_T("正在加载，请稍候..."));
-	UpdateWindow();
-
-	// ★★★ 添加线程锁保护 MuPDF 调用
-	CSingleLock lock(&m_renderLock, TRUE);
-
-	if (m_doc) {
-		fz_drop_document(m_ctx, m_doc);
-		m_doc = nullptr;
-	}
-	if (m_ctx) {
-		fz_drop_context(m_ctx);
-		m_ctx = nullptr;
-	}
-
-	// 重置页码相关变量
-	m_currentPage = 0;
-	m_totalPages = 0;
-	m_thumbnailPicWidth = 0;
-	m_thumbnailPicHeight = 0;
-
-	// ★★★ 清除所有页面状态
-	m_pageRotations.clear();      // 清除旋转信息
-	m_pageZoomStates.clear();     // 清除缩放状态
-
-	// ★★★ 重置全局缩放状态为默认值（使用PDF原始大小）
-	m_zoomMode = ZOOM_CUSTOM;     // 使用自定义缩放模式
-	m_customZoom = 1.0f;          // 默认100%缩放（PDF原始大小）
-
-	// ★★★ 清除平移偏移量
-	ResetPanOffset();
-
-	// 创建新的context
-	m_ctx = fz_new_context(nullptr, nullptr, FZ_STORE_UNLIMITED);
-	if (!m_ctx) {
-		MessageBox(_T("无法创建MuPDF上下文"), _T("错误"), MB_OK | MB_ICONERROR);
-		return;
-	}
-
-	fz_try(m_ctx)
-	{
-		// 注册文档处理器
-		fz_register_document_handlers(m_ctx);
-
-		// 打开文档
-		m_doc = fz_open_document(m_ctx, filename);
-		if (!m_doc) {
-			fz_throw(m_ctx, FZ_ERROR_GENERIC, "无法打开PDF文档");
-		}
-
-		// 获取总页数
-		m_totalPages = fz_count_pages(m_ctx, m_doc);
-
-		// ★★★ 计算文档统一缩放比例（确保所有页面宽度一致）
-		// 遍历所有页面，找到最大宽度
-		m_documentMaxPageWidth = 0.0f;
-		for (int i = 0; i < m_totalPages; i++)
-		{
-			fz_page* page = fz_load_page(m_ctx, m_doc, i);
-			if (page)
-			{
-				fz_rect bounds = fz_bound_page(m_ctx, page);
-				float pageWidth = bounds.x1 - bounds.x0;
-				float pageHeight = bounds.y1 - bounds.y0;
-
-				// 根据旋转角度调整（如果有保存的旋转状态）
-				int rotation = GetPageRotation(i);
-				if (rotation == 90 || rotation == 270)
-				{
-					float temp = pageWidth;
-					pageWidth = pageHeight;
-					pageHeight = temp;
-				}
-
-				if (pageWidth > m_documentMaxPageWidth)
-					m_documentMaxPageWidth = pageWidth;
-
-				fz_drop_page(m_ctx, page);
-			}
-		}
-
-		// 基于最大宽度计算统一的缩放比例
-		// 使用预览区域的宽度作为参考
-		CRect viewRect;
-		m_pdfView.GetClientRect(&viewRect);
-		m_documentUniformScale = (m_documentMaxPageWidth > 0) ? ((float)viewRect.Width() / m_documentMaxPageWidth * 0.95f) : 1.0f;
-
-#ifdef _DEBUG
-		TRACE(_T("文档最大页面宽度: %.2f, 统一缩放比例: %.4f\n"), m_documentMaxPageWidth, m_documentUniformScale);
-#endif
-
-		// 初始化缩略图
-		UpdateThumbnails();
-
-		// ★★★ 根据模式渲染页面
-		m_currentPage = 0;
-		if (m_continuousScrollMode)
-		{
-			// 连续滚动模式：计算所有页面位置并渲染可见页面
-			CalculatePagePositions();
-			UpdateScrollBar();
-
-			// ★★★ 确保滚动条可见
-			m_pdfView.ShowScrollBar(SB_VERT, TRUE);
-			m_pdfView.EnableScrollBarCtrl(SB_VERT, TRUE);
-
-			RenderVisiblePages();
-		}
-		else
-		{
-			// 分页模式：渲染第一页
-			RenderPage(m_currentPage);
-		}
-
-		// 更新页码控件
-		UpdatePageControls();
-	}
-	fz_catch(m_ctx)
-	{
-		// ★★★ 修复：获取并显示详细的 MuPDF 错误信息
-		const char* errorMsg = fz_caught_message(m_ctx);
-		CString errorText;
-		errorText.Format(_T("加载PDF文件时发生错误:\n文件: %S\n错误: %S"),
-			filename, errorMsg ? errorMsg : "未知错误");
-
-#ifdef _DEBUG
-		TRACE(_T("RenderPDF 错误: %s\n"), errorText);
-#endif
-
-		MessageBox(errorText, _T("PDF加载错误"), MB_OK | MB_ICONERROR);
-
-		// 恢复状态栏显示
-		m_statusBar.SetWindowText(_T("页码: 0 / 0"));
 	}
 }
 
@@ -2930,7 +2774,8 @@ void CXiaoGongPDFDlg::UpdateStatusBar()
 {
 	if (!m_doc)
 	{
-		m_statusBar.SetWindowText(_T("页码: 0 / 0"));
+		m_statusBar.SetWindowText(_T(""));
+		m_statusBar.ShowWindow(SW_HIDE);
 		return;
 	}
 
@@ -2938,6 +2783,7 @@ void CXiaoGongPDFDlg::UpdateStatusBar()
 	title.Format(_T("第 %d/%d 页"),
 		m_currentPage + 1, m_totalPages);
 	m_statusBar.SetWindowText(title);
+	m_statusBar.ShowWindow(SW_SHOW);
 
 }
 
@@ -4206,8 +4052,10 @@ void CXiaoGongPDFDlg::onMenuRecentFile(UINT nID)
 			return;
 		}
 
+		 
 		// 使用新的多文档模式打开
 		OpenPDFInNewTab(filePath);
+ 		OpenPDFInNewTab(filePath);
 	}
 }
 
@@ -4490,7 +4338,7 @@ bool CXiaoGongPDFDlg::OpenPDFInNewTab(const CString& filePath)
 #endif
 
 	// 检查文件是否已经打开
-	// 规范化路径用于比较（转为小写、获取完整路径）
+	// 规范化路径用于比较（转为小写、获取完整路径,win路径不区分大小写，但是字符比较区分）
 	TCHAR fullPath[MAX_PATH];
 	GetFullPathName(filePath, MAX_PATH, fullPath, NULL);
 	CString normalizedNewPath(fullPath);
@@ -4530,7 +4378,7 @@ bool CXiaoGongPDFDlg::OpenPDFInNewTab(const CString& filePath)
 		}
 	}
 
-	// 转换为UTF-8
+	// 转换为UTF-8 mupdf需要转换成 UTF-8形式
 	CStringW wPath(filePath);
 #ifdef _DEBUG
 	TRACE(_T("原始文件路径: %s\n"), (LPCTSTR)filePath);
@@ -4568,6 +4416,8 @@ bool CXiaoGongPDFDlg::OpenPDFInNewTab(const CString& filePath)
 	}
 	TRACE(_T("\n"));
 #endif
+
+	//以上转化是标准的2次转化模式， 一次得出转换大小，一次实际转换
 
 	// ★★★ 使用后台线程加载PDF，避免大文件加载时UI卡死
 #ifdef _DEBUG
@@ -5351,6 +5201,13 @@ void CXiaoGongPDFDlg::ClearPageCache()
 
 void CXiaoGongPDFDlg::OnLButtonDown(UINT nFlags, CPoint point)
 {
+	// 没有加载PDF时不处理鼠标事件
+	if (m_doc == nullptr)
+	{
+		CDialogEx::OnLButtonDown(nFlags, point);
+		return;
+	}
+
 	// 检查鼠标是否在PDF视图区域内
 	CRect pdfRect;
 	m_pdfView.GetWindowRect(&pdfRect);
@@ -5633,6 +5490,13 @@ void CXiaoGongPDFDlg::OnLButtonDown(UINT nFlags, CPoint point)
 
 void CXiaoGongPDFDlg::OnLButtonUp(UINT nFlags, CPoint point)
 {
+	// 没有加载PDF时不处理鼠标事件
+	if (m_doc == nullptr)
+	{
+		CDialogEx::OnLButtonUp(nFlags, point);
+		return;
+	}
+
 #ifdef _DEBUG
 	TRACE(_T("OnLButtonUp: 被调用! point=(%d,%d), m_isDragging=%d, m_isDraggingScrollbar=%d\n"),
 		point.x, point.y, m_isDragging, m_isDraggingScrollbar);

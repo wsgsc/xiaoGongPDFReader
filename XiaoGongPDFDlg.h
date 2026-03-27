@@ -436,7 +436,6 @@ protected:
     afx_msg void OnBtnPrevMatch();  // 上一个匹配按钮点击事件
 
 public:
-	void RenderPDF(const char* filename);
 	bool RenderPage(int pageNumber);  // 新增：渲染指定页面
 	void CleanupCurrentPage();  // 新增：清理当前页面资源
 	void CleanupBitmap();  // 新增：清理位图资源
