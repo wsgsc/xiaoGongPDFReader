@@ -381,6 +381,15 @@ protected:
 
 	void ClearPageCache();
 
+    // 内部辅助函数
+    void RefreshCurrentView();
+    void RemoveFromCacheOrder(const PageCacheKey& key);
+    void SetControlsVisible(bool visible);
+    void SafeDeleteBitmap(HBITMAP& hBmp);
+    HBITMAP CreatePageDIBSection(int w, int h, HDC hDC, BYTE** ppBits);
+    void CopyMuPDFPixelsToBuffer(fz_pixmap* pixmap, BYTE* pbBits, int width, int height);
+    void ScrollToMatchVisible(int pageNum, fz_quad quad);
+
     // 缩放相关函数
     void SetZoom(float zoom, ZoomMode mode = ZOOM_CUSTOM);
 
