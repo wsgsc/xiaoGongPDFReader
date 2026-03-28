@@ -2637,12 +2637,10 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 			if (m_continuousScrollMode)
 			{
 				// ★★★ 连续滚动模式：需要重新渲染可见页面以适应新的视口大小
-				// 确保滚动条可见
-				m_pdfView.ShowScrollBar(SB_VERT, TRUE);
-				m_pdfView.EnableScrollBarCtrl(SB_VERT, TRUE);
-				m_pdfView.ShowScrollBar(SB_HORZ, TRUE);
-				m_pdfView.EnableScrollBarCtrl(SB_HORZ, TRUE);
-
+				// ★★★ 关键修复：MoveWindow后m_pdfView尺寸已更新，必须先重算页面位置
+				// 否则m_totalScrollHeight基于旧视口尺寸，导致滚动条被错误隐藏
+				CalculatePagePositions();
+				// 使用UpdateScrollBar来统一处理滚动条显示逻辑
 				UpdateScrollBar();
 
 				// ★★★ 重新渲染可见页面（生成新尺寸的位图）
@@ -2650,18 +2648,12 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 			}
 			else
 			{
-				// ★★★ 分页模式：确保滚动条可见
-				m_pdfView.ShowScrollBar(SB_VERT, TRUE);
-				m_pdfView.EnableScrollBarCtrl(SB_VERT, TRUE);
-				m_pdfView.ShowScrollBar(SB_HORZ, TRUE);
-				m_pdfView.EnableScrollBarCtrl(SB_HORZ, TRUE);
+				// ★★★ 分页模式：使用UpdateScrollBar来统一处理滚动条显示逻辑
+				UpdateScrollBar();
 
 				// ★★★ 重置滚动位置，防止使用最大化时的旧值导致溢出
 				m_scrollPosition = 0;
 				m_scrollPositionH = 0;
-
-				// 更新滚动条（不重新渲染）
-				UpdateScrollBar();
 
 				// ★★★ 重新渲染页面以适应新的视口大小（修复最大化→还原后内容溢出问题）
 				RenderPage(m_currentPage);
@@ -4583,11 +4575,11 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 	// ★★★ 连续滚动模式：重新计算页面位置并渲染可见页面
 	CalculatePagePositions();
 	UpdateScrollBar();
-	if (m_continuousScrollMode)
-	{
-		m_pdfView.ShowScrollBar(SB_VERT, TRUE);
-		m_pdfView.EnableScrollBarCtrl(SB_VERT, TRUE);
-	}
+	
+	// ★★★ 修复：打开PDF时确保滚动条正确显示
+	// 使用UpdateScrollBar来统一处理滚动条显示逻辑
+	UpdateScrollBar();
+	
 	RenderVisiblePages();
 
 	// 更新UI控件
@@ -4773,19 +4765,15 @@ void CXiaoGongPDFDlg::ToggleThumbnailPanel()
 			// 连续滚动模式：重新计算页面位置并渲染可见页面
 			CalculatePagePositions();
 
-			// ★★★ 确保滚动条可见
-			m_pdfView.ShowScrollBar(SB_VERT, TRUE);
-			m_pdfView.EnableScrollBarCtrl(SB_VERT, TRUE);
-
+			// ★★★ 使用UpdateScrollBar来统一处理滚动条显示逻辑
 			UpdateScrollBar();
 			RenderVisiblePages();
 		}
 		else
 		{
 			// 分页模式：重新渲染当前页
-
-			// ★★★ 分页模式下隐藏滚动条
-			m_pdfView.ShowScrollBar(SB_VERT, FALSE);
+			// ★★★ 使用UpdateScrollBar来统一处理滚动条显示逻辑
+			UpdateScrollBar();
 
 			CleanupBitmap();
 			RenderPage(m_currentPage);
@@ -6465,8 +6453,30 @@ void CXiaoGongPDFDlg::OnVScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar)
 		break;
 	case SB_THUMBPOSITION:
 	case SB_THUMBTRACK:
-		newPos = nPos;
+	{
+		// ★★★ 修复：将滚动条位置映射回内容坐标系
+		// 获取当前滚动条信息
+		SCROLLINFO si = { 0 };
+		si.cbSize = sizeof(SCROLLINFO);
+		si.fMask = SIF_ALL;
+		::GetScrollInfo(m_pdfView.GetSafeHwnd(), SB_VERT, &si);
+		
+		// 滚动条坐标系：nPos ∈ [0, si.nMax - si.nPage + 1]
+		// 内容坐标系：newPos ∈ [0, m_totalScrollHeight - viewRect.Height()]
+		int scrollbarMaxPos = max(0, si.nMax - si.nPage + 1);
+		int contentMaxScroll = max(0, m_totalScrollHeight - viewRect.Height());
+		
+		if (scrollbarMaxPos > 0 && contentMaxScroll > 0)
+		{
+			// 线性映射：将滚动条位置映射到内容位置
+			newPos = (int)((float)nPos / scrollbarMaxPos * contentMaxScroll);
+		}
+		else
+		{
+			newPos = 0;
+		}
 		break;
+	}
 	}
 
 	// 限制范围
@@ -6512,8 +6522,30 @@ void CXiaoGongPDFDlg::OnHScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar)
 		break;
 	case SB_THUMBPOSITION:
 	case SB_THUMBTRACK:
-		newPos = nPos;
+	{
+		// ★★★ 修复：将滚动条位置映射回内容坐标系
+		// 获取当前滚动条信息
+		SCROLLINFO siH = { 0 };
+		siH.cbSize = sizeof(SCROLLINFO);
+		siH.fMask = SIF_ALL;
+		::GetScrollInfo(m_pdfView.GetSafeHwnd(), SB_HORZ, &siH);
+		
+		// 滚动条坐标系：nPos ∈ [0, siH.nMax - siH.nPage + 1]
+		// 内容坐标系：newPos ∈ [0, m_totalScrollWidth - viewRect.Width()]
+		int scrollbarMaxPosH = max(0, siH.nMax - siH.nPage + 1);
+		int contentMaxScrollH = max(0, m_totalScrollWidth - viewRect.Width());
+		
+		if (scrollbarMaxPosH > 0 && contentMaxScrollH > 0)
+		{
+			// 线性映射：将滚动条位置映射到内容位置
+			newPos = (int)((float)nPos / scrollbarMaxPosH * contentMaxScrollH);
+		}
+		else
+		{
+			newPos = 0;
+		}
 		break;
+	}
 	}
 
 	// 限制范围
@@ -6560,37 +6592,188 @@ void CXiaoGongPDFDlg::UpdateScrollBar()
 	// ★★★ 更新垂直滚动条
 	if (m_continuousScrollMode)
 	{
-		SCROLLINFO si = { 0 };
-		si.cbSize = sizeof(SCROLLINFO);
-		si.fMask = SIF_ALL | SIF_DISABLENOSCROLL;
-		si.nMin = 0;
-		si.nMax = m_totalScrollHeight - 1;  // ★★★ 修正：减1以正确计算滚动范围
-		si.nPage = viewRect.Height();
-		si.nPos = m_scrollPosition;
-		::SetScrollInfo(m_pdfView.GetSafeHwnd(), SB_VERT, &si, TRUE);
+		// 连续滚动模式：只有当内容超过视图时才显示滚动条
+		if (m_totalScrollHeight > viewRect.Height())
+		{
+			// ★★★ 关键修复：确保滚动条可见（SetScrollInfo不会自动显示）
+			m_pdfView.ShowScrollBar(SB_VERT, TRUE);
+			m_pdfView.EnableScrollBarCtrl(SB_VERT, TRUE);
+
+			SCROLLINFO si = { 0 };
+			si.cbSize = sizeof(SCROLLINFO);
+			si.fMask = SIF_ALL | SIF_DISABLENOSCROLL;
+			si.nMin = 0;
+			// nMax = 总内容高度减1
+			si.nMax = max(0, m_totalScrollHeight - 1);
+			si.nPage = viewRect.Height();
+			
+			// ★★★ 修复：确保滑块不会太大
+			// 计算当前滑块比例
+			int scrollRange = si.nMax - si.nMin + 1;
+			if (scrollRange > 0)
+			{
+				float thumbRatio = (float)si.nPage / scrollRange;
+				
+				// 设置最大滑块比例（对应最小滑块高度）
+				// 我们想要较小的滑块，设置最大比例5%
+				const float MAX_THUMB_RATIO = 0.05f;  // 最大滑块比例5%
+				
+				if (thumbRatio > MAX_THUMB_RATIO)
+				{
+					// 调整nPage，使滑块比例不超过MAX_THUMB_RATIO
+					// 这会使滑块变小
+					si.nPage = (int)(scrollRange * MAX_THUMB_RATIO);
+					// 确保nPage至少为1
+					if (si.nPage < 1) si.nPage = 1;
+				}
+			}
+			
+			// ★★★ 修复：将滚动位置从内容坐标系转换到滚动条坐标系
+			// 内容坐标系：m_scrollPosition ∈ [0, m_totalScrollHeight - viewRect.Height()]
+			// 滚动条坐标系：si.nPos ∈ [0, si.nMax - si.nPage + 1]
+			// 需要线性映射
+			int contentMaxScroll = max(0, m_totalScrollHeight - viewRect.Height());
+			int scrollbarMaxPos = max(0, si.nMax - si.nPage + 1);
+			
+			if (contentMaxScroll > 0 && scrollbarMaxPos > 0)
+			{
+				// 线性映射：将m_scrollPosition映射到滚动条位置
+				si.nPos = (int)((float)m_scrollPosition / contentMaxScroll * scrollbarMaxPos);
+			}
+			else
+			{
+				si.nPos = 0;
+			}
+			
+			::SetScrollInfo(m_pdfView.GetSafeHwnd(), SB_VERT, &si, TRUE);
+		}
+		else
+		{
+			// 内容没有超过视图，禁用垂直滚动条
+			m_pdfView.ShowScrollBar(SB_VERT, FALSE);
+		}
 	}
 	else
 	{
-		// 分页模式：只在内容超过视图时显示垂直滚动条
-		SCROLLINFO si = { 0 };
-		si.cbSize = sizeof(SCROLLINFO);
-		si.fMask = SIF_ALL | SIF_DISABLENOSCROLL;
-		si.nMin = 0;
-		si.nMax = m_totalScrollHeight - 1;  // ★★★ 修正：减1以正确计算滚动范围
-		si.nPage = viewRect.Height();
-		si.nPos = m_scrollPosition;
-		::SetScrollInfo(m_pdfView.GetSafeHwnd(), SB_VERT, &si, TRUE);
+		// 分页模式：只在内容超过视图时设置垂直滚动条
+		if (m_totalScrollHeight > viewRect.Height())
+		{
+			// ★★★ 关键修复：确保滚动条可见（SetScrollInfo不会自动显示）
+			m_pdfView.ShowScrollBar(SB_VERT, TRUE);
+			m_pdfView.EnableScrollBarCtrl(SB_VERT, TRUE);
+
+			SCROLLINFO si = { 0 };
+			si.cbSize = sizeof(SCROLLINFO);
+			si.fMask = SIF_ALL | SIF_DISABLENOSCROLL;
+			si.nMin = 0;
+			// nMax = 总内容高度减1
+			si.nMax = max(0, m_totalScrollHeight - 1);
+			si.nPage = viewRect.Height();
+			
+			// ★★★ 修复：确保滑块不会太大
+			// 计算当前滑块比例
+			int scrollRange = si.nMax - si.nMin + 1;
+			if (scrollRange > 0)
+			{
+				float thumbRatio = (float)si.nPage / scrollRange;
+				
+				// 分页模式也使用相同的最大滑块比例
+				const float MAX_THUMB_RATIO = 0.05f;  // 最大滑块比例5%
+				
+				if (thumbRatio > MAX_THUMB_RATIO)
+				{
+					// 调整nPage，使滑块比例不超过MAX_THUMB_RATIO
+					si.nPage = (int)(scrollRange * MAX_THUMB_RATIO);
+					// 确保nPage至少为1
+					if (si.nPage < 1) si.nPage = 1;
+				}
+			}
+			
+			// ★★★ 修复：将滚动位置从内容坐标系转换到滚动条坐标系
+			// 内容坐标系：m_scrollPosition ∈ [0, m_totalScrollHeight - viewRect.Height()]
+			// 滚动条坐标系：si.nPos ∈ [0, si.nMax - si.nPage + 1]
+			// 需要线性映射
+			int contentMaxScroll = max(0, m_totalScrollHeight - viewRect.Height());
+			int scrollbarMaxPos = max(0, si.nMax - si.nPage + 1);
+			
+			if (contentMaxScroll > 0 && scrollbarMaxPos > 0)
+			{
+				// 线性映射：将m_scrollPosition映射到滚动条位置
+				si.nPos = (int)((float)m_scrollPosition / contentMaxScroll * scrollbarMaxPos);
+			}
+			else
+			{
+				si.nPos = 0;
+			}
+			
+			::SetScrollInfo(m_pdfView.GetSafeHwnd(), SB_VERT, &si, TRUE);
+		}
+		else
+		{
+			// 内容没有超过视图，禁用垂直滚动条
+			m_pdfView.ShowScrollBar(SB_VERT, FALSE);
+		}
 	}
 
 	// ★★★ 更新横向滚动条
-	SCROLLINFO siH = { 0 };
-	siH.cbSize = sizeof(SCROLLINFO);
-	siH.fMask = SIF_ALL | SIF_DISABLENOSCROLL;
-	siH.nMin = 0;
-	siH.nMax = m_totalScrollWidth - 1;  // ★★★ 修正：减1以正确计算滚动范围
-	siH.nPage = viewRect.Width();
-	siH.nPos = m_scrollPositionH;
-	::SetScrollInfo(m_pdfView.GetSafeHwnd(), SB_HORZ, &siH, TRUE);
+	// 只在内容超过视图宽度时设置横向滚动条
+	if (m_totalScrollWidth > viewRect.Width())
+	{
+		// ★★★ 关键修复：确保横向滚动条可见
+		m_pdfView.ShowScrollBar(SB_HORZ, TRUE);
+		m_pdfView.EnableScrollBarCtrl(SB_HORZ, TRUE);
+
+		SCROLLINFO siH = { 0 };
+		siH.cbSize = sizeof(SCROLLINFO);
+		siH.fMask = SIF_ALL | SIF_DISABLENOSCROLL;
+		siH.nMin = 0;
+		// nMax = 总内容宽度减1
+		siH.nMax = max(0, m_totalScrollWidth - 1);
+		siH.nPage = viewRect.Width();
+		
+		// ★★★ 修复：确保滑块不会太大
+		// 计算当前滑块比例
+		int scrollRangeH = siH.nMax - siH.nMin + 1;
+		if (scrollRangeH > 0)
+		{
+			float thumbRatioH = (float)siH.nPage / scrollRangeH;
+			
+			// 横向滚动条也使用相同的最大滑块比例
+			const float MAX_THUMB_RATIO_H = 0.05f;  // 最大滑块比例5%
+			
+			if (thumbRatioH > MAX_THUMB_RATIO_H)
+			{
+				// 调整nPage，使滑块比例不超过MAX_THUMB_RATIO_H
+				siH.nPage = (int)(scrollRangeH * MAX_THUMB_RATIO_H);
+				// 确保nPage至少为1
+				if (siH.nPage < 1) siH.nPage = 1;
+			}
+		}
+		
+		// ★★★ 修复：将滚动位置从内容坐标系转换到滚动条坐标系
+		// 内容坐标系：m_scrollPositionH ∈ [0, m_totalScrollWidth - viewRect.Width()]
+		// 滚动条坐标系：siH.nPos ∈ [0, siH.nMax - siH.nPage + 1]
+		// 需要线性映射
+		int contentMaxScrollH = max(0, m_totalScrollWidth - viewRect.Width());
+		int scrollbarMaxPosH = max(0, siH.nMax - siH.nPage + 1);
+		
+		if (contentMaxScrollH > 0 && scrollbarMaxPosH > 0)
+		{
+			// 线性映射：将m_scrollPositionH映射到滚动条位置
+			siH.nPos = (int)((float)m_scrollPositionH / contentMaxScrollH * scrollbarMaxPosH);
+		}
+		else
+		{
+			siH.nPos = 0;
+		}
+		
+		::SetScrollInfo(m_pdfView.GetSafeHwnd(), SB_HORZ, &siH, TRUE);
+	}
+	else
+	{
+		// 内容没有超过视图宽度，禁用横向滚动条
+		m_pdfView.ShowScrollBar(SB_HORZ, FALSE);
+	}
 }
 
 // 获取指定位置的页面索引
