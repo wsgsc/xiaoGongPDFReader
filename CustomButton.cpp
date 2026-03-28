@@ -4,11 +4,11 @@
 IMPLEMENT_DYNAMIC(CCustomButton, CButton)
 
 CCustomButton::CCustomButton()
-	: m_normalColor(RGB(70, 130, 180))      // 钢蓝色
-	, m_hoverColor(RGB(100, 149, 237))      // 矢车菊蓝
-	, m_pressedColor(RGB(65, 105, 225))     // 皇家蓝
-	, m_textColor(RGB(255, 255, 255))       // 白色文字
-	, m_cornerRadius(6)                      // 圆角半径6像素
+	: m_normalColor(RGB(255, 255, 255))
+	, m_hoverColor(RGB(232, 234, 237))
+	, m_pressedColor(RGB(218, 220, 224))
+	, m_textColor(RGB(32, 33, 36))
+	, m_cornerRadius(5)
 	, m_bHover(FALSE)
 	, m_bTracking(FALSE)
 {
@@ -55,7 +55,6 @@ void CCustomButton::PreSubclassWindow()
 	CButton::PreSubclassWindow();
 	ModifyStyle(0, BS_OWNERDRAW);
 
-	// 创建字体
 	if (!m_buttonFont.GetSafeHandle())
 	{
 		m_buttonFont.CreatePointFont(90, _T("Microsoft YaHei UI"));
@@ -68,21 +67,36 @@ void CCustomButton::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 	CRect rect = lpDrawItemStruct->rcItem;
 	UINT state = lpDrawItemStruct->itemState;
 
-	// 确定按钮状态和颜色
-	COLORREF btnColor = m_normalColor;
-	if (state & ODS_SELECTED)
-		btnColor = m_pressedColor;
+	// Fill entire area with toolbar white background to clear residuals
+	CBrush bgBrush(RGB(255, 255, 255));
+	pDC->FillRect(rect, &bgBrush);
+
+	// Determine button state
+	bool bDisabled = (state & ODS_DISABLED) != 0;
+	bool bPressed  = (state & ODS_SELECTED) != 0;
+
+	if (bDisabled)
+	{
+		// Disabled: white fill + light gray border
+		DrawRoundRect(pDC, rect, m_cornerRadius, RGB(255, 255, 255), RGB(210, 210, 210));
+	}
+	else if (bPressed)
+	{
+		// Pressed: medium gray fill, no visible border
+		DrawRoundRect(pDC, rect, m_cornerRadius, m_pressedColor, m_pressedColor);
+	}
 	else if (m_bHover)
-		btnColor = m_hoverColor;
+	{
+		// Hover: light gray fill, no visible border
+		DrawRoundRect(pDC, rect, m_cornerRadius, m_hoverColor, m_hoverColor);
+	}
+	else
+	{
+		// Normal: white fill + gray border (makes button visible)
+		DrawRoundRect(pDC, rect, m_cornerRadius, m_normalColor, RGB(218, 220, 224));
+	}
 
-	// 禁用状态
-	if (state & ODS_DISABLED)
-		btnColor = RGB(180, 180, 180);
-
-	// 绘制圆角矩形背景
-	DrawRoundRect(pDC, rect, m_cornerRadius, btnColor);
-
-	// 绘制文字
+	// Draw text
 	CString strText;
 	GetWindowText(strText);
 
@@ -91,54 +105,45 @@ void CCustomButton::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 		CFont* pOldFont = pDC->SelectObject(&m_buttonFont);
 		pDC->SetBkMode(TRANSPARENT);
 
-		// 禁用状态下文字颜色变灰
-		if (state & ODS_DISABLED)
-			pDC->SetTextColor(RGB(120, 120, 120));
+		if (bDisabled)
+			pDC->SetTextColor(RGB(180, 180, 180));
 		else
 			pDC->SetTextColor(m_textColor);
 
 		pDC->DrawText(strText, rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 		pDC->SelectObject(pOldFont);
 	}
-
-	// 绘制焦点框（如果有焦点）
-	if (state & ODS_FOCUS)
-	{
-		CRect focusRect = rect;
-		focusRect.DeflateRect(3, 3);
-		CPen pen(PS_DOT, 1, RGB(255, 255, 255));
-		CPen* pOldPen = pDC->SelectObject(&pen);
-		pDC->SelectStockObject(NULL_BRUSH);
-		pDC->RoundRect(focusRect, CPoint(m_cornerRadius - 2, m_cornerRadius - 2));
-		pDC->SelectObject(pOldPen);
-	}
 }
 
-void CCustomButton::DrawRoundRect(CDC* pDC, CRect rect, int radius, COLORREF color)
+void CCustomButton::DrawRoundRect(CDC* pDC, CRect rect, int radius, COLORREF fillColor, COLORREF borderColor)
 {
-	// 使用GDI+绘制圆角矩形以获得更平滑的效果
 	Gdiplus::Graphics graphics(pDC->GetSafeHdc());
 	graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
 
-	// 创建圆角路径
-	Gdiplus::GraphicsPath path;
-	int diameter = radius * 2;
+	Gdiplus::RectF rf(
+		(Gdiplus::REAL)rect.left   + 0.5f,
+		(Gdiplus::REAL)rect.top    + 0.5f,
+		(Gdiplus::REAL)(rect.Width()  - 1),
+		(Gdiplus::REAL)(rect.Height() - 1)
+	);
 
-	path.AddArc(rect.left, rect.top, diameter, diameter, 180, 90);
-	path.AddArc(rect.right - diameter, rect.top, diameter, diameter, 270, 90);
-	path.AddArc(rect.right - diameter, rect.bottom - diameter, diameter, diameter, 0, 90);
-	path.AddArc(rect.left, rect.bottom - diameter, diameter, diameter, 90, 90);
+	float diameter = (float)(radius * 2);
+
+	Gdiplus::GraphicsPath path;
+	path.AddArc(rf.X,                        rf.Y,                        diameter, diameter, 180, 90);
+	path.AddArc(rf.X + rf.Width - diameter,  rf.Y,                        diameter, diameter, 270, 90);
+	path.AddArc(rf.X + rf.Width - diameter,  rf.Y + rf.Height - diameter, diameter, diameter,   0, 90);
+	path.AddArc(rf.X,                        rf.Y + rf.Height - diameter, diameter, diameter,  90, 90);
 	path.CloseFigure();
 
-	// 填充背景
-	Gdiplus::SolidBrush brush(Gdiplus::Color(GetRValue(color), GetGValue(color), GetBValue(color)));
+	// Fill
+	Gdiplus::SolidBrush brush(Gdiplus::Color(255,
+		GetRValue(fillColor), GetGValue(fillColor), GetBValue(fillColor)));
 	graphics.FillPath(&brush, &path);
 
-	// 绘制边框（稍微深一点的颜色）
-	int r = max(0, GetRValue(color) - 30);
-	int g = max(0, GetGValue(color) - 30);
-	int b = max(0, GetBValue(color) - 30);
-	Gdiplus::Pen pen(Gdiplus::Color(r, g, b), 1.0f);
+	// Border
+	Gdiplus::Pen pen(Gdiplus::Color(255,
+		GetRValue(borderColor), GetGValue(borderColor), GetBValue(borderColor)), 1.0f);
 	graphics.DrawPath(&pen, &path);
 }
 
@@ -180,6 +185,5 @@ void CCustomButton::OnMouseLeave()
 
 BOOL CCustomButton::OnEraseBkgnd(CDC* pDC)
 {
-	// 防止闪烁
 	return TRUE;
 }

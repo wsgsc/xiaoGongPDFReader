@@ -192,6 +192,7 @@ private:
     static const int THUMBNAIL_SPACING = 10;  // 缩略图间距
 	CBrush m_highlightBrush;  // 高亮背景画刷
 	CBrush m_whiteBrush;      // 白色背景画刷（用于标签页）
+	CBrush m_toolbarBrush;    // 工具栏背景画刷（浅灰色，扁平化风格）
     int m_thumbnailPicHeight;  // 当前缩略图高度
 	int m_thumbnailPicWidth;   // 当前缩略图宽度
 	int m_scrollBarWidth; //系统垂直滚动条的宽度

@@ -324,7 +324,8 @@ CXiaoGongPDFDlg::CXiaoGongPDFDlg(CWnd* pParent /*=nullptr*/)
 {
 	m_hIcon = AfxGetApp()->LoadIcon(IDR_MAINFRAME);
 	m_highlightBrush.CreateSolidBrush(RGB(173, 216, 230));  // 浅蓝色
-	m_whiteBrush.CreateSolidBrush(RGB(255, 255, 255));  // 白色（用于标签页背景）
+	m_whiteBrush.CreateSolidBrush(RGB(255, 255, 255));     // 白色（用于标签页背景）
+	m_toolbarBrush.CreateSolidBrush(RGB(255, 255, 255));   // 白色（Chrome/Edge 风格工具栏背景）
 	LoadRecentFiles();
 
 	// 加载手形光标
@@ -950,27 +951,36 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	}
 
 
-	// ===== 自定义按钮颜色配置 =====
-	// 蓝色 SetColors(RGB(70, 130, 180), RGB(100, 149, 237), RGB(65, 105, 225));
-	// 深邃蓝色 SetColors(RGB(41, 128, 185), RGB(52, 152, 219), RGB(31, 97, 141));
-	// 活力橙色 SetColors(RGB(230, 126, 34), RGB(243, 156, 18), RGB(211, 84, 0));
-	// 清新绿色  SetColors(RGB(39, 174, 96), RGB(46, 204, 113), RGB(30, 130, 76));
-	// 警示红色  SetColors(RGB(192, 57, 43), RGB(231, 76, 60), RGB(169, 50, 38));
-	// 优雅青色  SetColors(RGB(22, 160, 133), RGB(26, 188, 156), RGB(17, 122, 101));
+	// ===== 扁平化按钮颜色配置 =====
+	// 扁平化风格：正常=极浅背景（融入工具栏），悬停=柔和高亮，按下=主色调
+	// 正常: RGB(245,246,247) 与工具栏背景同色（隐形感）
+	// 悬停: RGB(220,232,248) 淡蓝色高亮
+	// 按下: RGB(66,133,244)  Google蓝（清晰反馈）
 	
-	// 导航按钮 - 专业蓝色主题
-	m_btnFirst.SetColors(RGB(70, 130, 180), RGB(100, 149, 237), RGB(65, 105, 225));
-	m_btnLast.SetColors(RGB(70, 130, 180), RGB(100, 149, 237), RGB(65, 105, 225));
-	
-	// 全屏按钮
-	m_btnFullscreen.SetColors(RGB(70, 130, 180), RGB(100, 149, 237), RGB(65, 105, 225));
-	
-	// 旋转按钮
-	m_btnRotateLeft.SetColors(RGB(70, 130, 180), RGB(100, 149, 237), RGB(65, 105, 225));
-	m_btnRotateRight.SetColors(RGB(70, 130, 180), RGB(100, 149, 237), RGB(65, 105, 225));
+	// Chrome/Edge 风格配色：
+	// 正常态 = 白色（与工具栏背景同色，完全透明感）
+	// 悬停   = 浅灰圆角高亮 RGB(232,234,237)
+	// 按下   = 中灰         RGB(218,220,224)
+	m_btnFirst.SetColors     (RGB(255, 255, 255), RGB(232, 234, 237), RGB(218, 220, 224));
+	m_btnLast.SetColors      (RGB(255, 255, 255), RGB(232, 234, 237), RGB(218, 220, 224));
+	m_btnFullscreen.SetColors(RGB(255, 255, 255), RGB(232, 234, 237), RGB(218, 220, 224));
+	m_btnRotateLeft.SetColors(RGB(255, 255, 255), RGB(232, 234, 237), RGB(218, 220, 224));
+	m_btnRotateRight.SetColors(RGB(255, 255, 255), RGB(232, 234, 237), RGB(218, 220, 224));
+	m_btnEdit.SetColors      (RGB(255, 255, 255), RGB(232, 234, 237), RGB(218, 220, 224));
+	m_btnFind.SetColors      (RGB(255, 255, 255), RGB(232, 234, 237), RGB(218, 220, 224));
+	m_btnPrevMatch.SetColors (RGB(255, 255, 255), RGB(232, 234, 237), RGB(218, 220, 224));
+	m_btnNextMatch.SetColors (RGB(255, 255, 255), RGB(232, 234, 237), RGB(218, 220, 224));
 
-	// 编辑按钮
-	m_btnEdit.SetColors(RGB(70, 130, 180), RGB(100, 149, 237), RGB(65, 105, 225));
+	// 文字颜色：Google 深灰 RGB(32,33,36)，按下时也保持深灰（背景够浅）
+	m_btnFirst.SetTextColor     (RGB(32, 33, 36));
+	m_btnLast.SetTextColor      (RGB(32, 33, 36));
+	m_btnFullscreen.SetTextColor(RGB(32, 33, 36));
+	m_btnRotateLeft.SetTextColor(RGB(32, 33, 36));
+	m_btnRotateRight.SetTextColor(RGB(32, 33, 36));
+	m_btnEdit.SetTextColor      (RGB(32, 33, 36));
+	m_btnFind.SetTextColor      (RGB(32, 33, 36));
+	m_btnPrevMatch.SetTextColor (RGB(32, 33, 36));
+	m_btnNextMatch.SetTextColor (RGB(32, 33, 36));
 
 	// ===== 颜色配置结束 =====
 	return TRUE;  // 除非将焦点设置到控件，否则返回 TRUE
@@ -1005,6 +1015,25 @@ void CXiaoGongPDFDlg::OnPaint()
 	else
 	{
 		CDialogEx::OnPaint();
+
+		// 在工具栏底部绘制 1px 分隔线（Chrome/Edge 风格）
+		if (m_toolbar.GetSafeHwnd())
+		{
+			CRect toolbarRect;
+			m_toolbar.GetWindowRect(&toolbarRect);
+			ScreenToClient(&toolbarRect);
+
+			CDC* pDC = GetDC();
+			if (pDC)
+			{
+				CPen pen(PS_SOLID, 1, RGB(218, 220, 224));
+				CPen* pOldPen = pDC->SelectObject(&pen);
+				pDC->MoveTo(toolbarRect.left,  toolbarRect.bottom);
+				pDC->LineTo(toolbarRect.right, toolbarRect.bottom);
+				pDC->SelectObject(pOldPen);
+				ReleaseDC(pDC);
+			}
+		}
 	}
 }
 
@@ -1030,8 +1059,33 @@ HBRUSH CXiaoGongPDFDlg::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor)
 	// 如果是标签页控件，返回白色背景
 	if (pWnd->GetSafeHwnd() == m_tabCtrl.GetSafeHwnd())
 	{
-		pDC->SetBkColor(RGB(255, 255, 255));  // 设置文本背景为白色
+		pDC->SetBkColor(RGB(255, 255, 255));
 		return m_whiteBrush;
+	}
+
+	// 工具栏背景：白色（Chrome/Edge 风格）
+	if (pWnd->GetSafeHwnd() == m_toolbar.GetSafeHwnd())
+	{
+		pDC->SetBkColor(RGB(255, 255, 255));
+		return m_toolbarBrush;
+	}
+
+	// 工具栏内的编辑框（页码输入、搜索框）：白色背景，深色文字
+	if (nCtlColor == CTLCOLOR_EDIT &&
+		(pWnd->GetSafeHwnd() == m_editCurrent.GetSafeHwnd() ||
+		 pWnd->GetSafeHwnd() == m_editSearch.GetSafeHwnd()))
+	{
+		pDC->SetBkColor(RGB(255, 255, 255));
+		pDC->SetTextColor(RGB(32, 33, 36));
+		return m_toolbarBrush;
+	}
+
+	// 缩略图复选框：白色背景，深色文字
+	if (pWnd->GetSafeHwnd() == m_checkThumbnail.GetSafeHwnd())
+	{
+		pDC->SetBkColor(RGB(255, 255, 255));
+		pDC->SetTextColor(RGB(32, 33, 36));
+		return m_toolbarBrush;
 	}
 
 	return hbr;
@@ -3285,20 +3339,17 @@ void CXiaoGongPDFDlg::OnEditCurrentKillFocus()
 
 void CXiaoGongPDFDlg::InitializeToolbar()
 {
-	// 修改工具栏样式，使其更加明显
-	m_toolbar.ModifyStyle(SS_BLACKFRAME, SS_WHITEFRAME);
-
-	// 创建字体
+	// 创建字体 - 扁平化风格使用细体，更轻盈现代
 	LOGFONT lf;
 	memset(&lf, 0, sizeof(LOGFONT));
-	lf.lfHeight = 20;         // 字体高度
-	lf.lfWeight = FW_BOLD;    // 粗体
+	lf.lfHeight = -13;          // 字体高度（负值按像素，正值按逻辑单位）
+	lf.lfWeight = FW_NORMAL;    // 细体，扁平化更美观
 	lf.lfCharSet = DEFAULT_CHARSET;
 	lf.lfOutPrecision = OUT_DEFAULT_PRECIS;
 	lf.lfClipPrecision = CLIP_DEFAULT_PRECIS;
-	lf.lfQuality = DEFAULT_QUALITY;
+	lf.lfQuality = CLEARTYPE_QUALITY;  // ClearType渲染，更锐利
 	lf.lfPitchAndFamily = DEFAULT_PITCH | FF_SWISS;
-	_tcscpy_s(lf.lfFaceName, _T("微软雅黑"));  // 使用微软雅黑字体
+	_tcscpy_s(lf.lfFaceName, _T("微软雅黑"));
 
 	// 确保先删除可能存在的字体对象
 	m_buttonFont.DeleteObject();
@@ -3306,7 +3357,7 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 
 	// 创建新的字体对象
 	m_buttonFont.CreateFontIndirect(&lf);
-	
+
 	// 为所有按钮设置新字体
 	m_btnFirst.SetFont(&m_buttonFont);
 	m_btnLast.SetFont(&m_buttonFont);
@@ -3314,9 +3365,13 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_btnRotateLeft.SetFont(&m_buttonFont);
 	m_btnRotateRight.SetFont(&m_buttonFont);
 	m_btnEdit.SetFont(&m_buttonFont);
+	m_btnFind.SetFont(&m_buttonFont);
+	m_btnPrevMatch.SetFont(&m_buttonFont);
+	m_btnNextMatch.SetFont(&m_buttonFont);
 
 	// 设置编辑框的字体和外观
 	m_editCurrent.SetFont(&m_buttonFont);
+	m_editSearch.SetFont(&m_buttonFont);
 
 	// 设置按钮文本
 	m_btnFirst.SetWindowText(_T("首页"));
@@ -3325,6 +3380,7 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_btnRotateLeft.SetWindowText(_T("左旋"));
 	m_btnRotateRight.SetWindowText(_T("右旋"));
 	m_btnEdit.SetWindowText(_T("编辑"));
+	m_btnFind.SetWindowText(_T("查找"));
 	m_btnPrevMatch.SetWindowText(_T("上一个"));
 	m_btnNextMatch.SetWindowText(_T("下一个"));
 
@@ -3339,6 +3395,17 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_btnRotateRight.EnableWindow(TRUE);
 	m_btnEdit.EnableWindow(TRUE);
 	m_editCurrent.EnableWindow(TRUE);
+
+	// 设置圆角半径（扁平化风格用较小圆角）
+	m_btnFirst.SetCornerRadius(5);
+	m_btnLast.SetCornerRadius(5);
+	m_btnFullscreen.SetCornerRadius(5);
+	m_btnRotateLeft.SetCornerRadius(5);
+	m_btnRotateRight.SetCornerRadius(5);
+	m_btnEdit.SetCornerRadius(5);
+	m_btnFind.SetCornerRadius(5);
+	m_btnPrevMatch.SetCornerRadius(5);
+	m_btnNextMatch.SetCornerRadius(5);
 }
 
 void CXiaoGongPDFDlg::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)

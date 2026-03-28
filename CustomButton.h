@@ -36,5 +36,5 @@ private:
 	BOOL m_bTracking;            // 鼠标跟踪标志
 	CFont m_buttonFont;          // 按钮字体
 
-	void DrawRoundRect(CDC* pDC, CRect rect, int radius, COLORREF color);
+	void DrawRoundRect(CDC* pDC, CRect rect, int radius, COLORREF fillColor, COLORREF borderColor);
 };
