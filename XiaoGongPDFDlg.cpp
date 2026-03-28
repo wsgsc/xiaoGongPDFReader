@@ -2637,9 +2637,6 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 			if (m_continuousScrollMode)
 			{
 				// ★★★ 连续滚动模式：需要重新渲染可见页面以适应新的视口大小
-				// ★★★ 关键修复：MoveWindow后m_pdfView尺寸已更新，必须先重算页面位置
-				// 否则m_totalScrollHeight基于旧视口尺寸，导致滚动条被错误隐藏
-				CalculatePagePositions();
 				// 使用UpdateScrollBar来统一处理滚动条显示逻辑
 				UpdateScrollBar();
 
