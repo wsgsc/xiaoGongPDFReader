@@ -224,18 +224,6 @@ private:
 	// 旋转相关
 	std::map<int, int> m_pageRotations;  // 存储每个页面的旋转角度 (0, 90, 180, 270)
 
-	// 缩放相关 - 每页独立保存
-	struct PageZoomState {
-		ZoomMode zoomMode;   // 缩放模式
-		float customZoom;    // 自定义缩放比例
-		CPoint panOffset;    // 平移偏移量（拖拽位置）
-
-		PageZoomState() : zoomMode(ZOOM_CUSTOM), customZoom(1.0f), panOffset(0, 0) {}
-		PageZoomState(ZoomMode mode, float zoom, CPoint offset)
-			: zoomMode(mode), customZoom(zoom), panOffset(offset) {}
-	};
-	std::map<int, PageZoomState> m_pageZoomStates;  // 存储每个页面的缩放状态和平移位置
-
 	// 拖拽平移相关
 	bool m_isDragging;          // 是否正在拖拽
 	CPoint m_lastMousePos;      // 上次鼠标位置
@@ -363,10 +351,10 @@ protected:
     int GetPageRotation(int pageNumber);  // 获取指定页面的旋转角度
     HBITMAP RotateBitmap(HBITMAP hSrcBitmap, int rotation);  // 安全地旋转位图
 
-    // 缩放状态管理函数
-    void SaveCurrentPageZoomState();  // 保存当前页面的缩放状态
-    void RestorePageZoomState(int pageNumber);  // 恢复指定页面的缩放状态
-    PageZoomState GetPageZoomState(int pageNumber);  // 获取页面缩放状态
+	// 缩放状态管理函数
+	void SaveCurrentPageZoomState();  // 保存当前页面的缩放状态
+	void RestorePageZoomState(int pageNumber);  // 恢复指定页面的缩放状态
+	::PageZoomState GetPageZoomState(int pageNumber);  // 获取页面缩放状态
 
     // 全屏相关
     void EnterFullscreen();  // 进入全屏
@@ -391,6 +379,11 @@ protected:
 	void ResourceRelease();
 
 	void ClearPageCache();
+	void SaveDialogStateToDocument(CPDFDocument* pDoc, bool transferBitmaps = true);
+	void LoadDialogStateFromDocument(CPDFDocument* pDoc);
+	void CloseProgressDialog();
+	void ReleaseLoadThread();
+	void CleanupPendingLoad();
 
     // 内部辅助函数
     void RefreshCurrentView();

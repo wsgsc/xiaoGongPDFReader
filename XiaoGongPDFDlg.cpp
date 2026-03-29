@@ -331,6 +331,7 @@ CXiaoGongPDFDlg::~CXiaoGongPDFDlg()
 #endif
 
 	// 析构仅做"纯资源"清理，不碰 UI
+	CleanupPendingLoad();
 
 	// ★★★ 重要：在删除文档对象之前，先释放主对话框持有的页面对象
 	// 页面对象持有对文档的引用，必须先释放才能让文档的引用计数归零
@@ -356,47 +357,7 @@ CXiaoGongPDFDlg::~CXiaoGongPDFDlg()
 		CPDFDocument* activeDoc = m_documents[m_activeDocIndex];
 		if (activeDoc)
 		{
-			// 保存当前页面状态
-			activeDoc->SaveCurrentPageZoomState();
-			activeDoc->SetCurrentPage(m_currentPage);
-
-			// 转移位图所有权（只转移有效的位图）
-			if (m_hCurrentBitmap)
-			{
-				// 验证位图是否有效
-				BITMAP bm;
-				if (::GetObject(m_hCurrentBitmap, sizeof(BITMAP), &bm) != 0)
-				{
-					activeDoc->SetCurrentBitmap(m_hCurrentBitmap);
-					m_hCurrentBitmap = NULL;
-				}
-				else
-				{
-					m_hCurrentBitmap = NULL;  // 清空无效句柄
-				}
-			}
-
-			if (m_hPanPageBitmap)
-			{
-				// 验证位图是否有效
-				BITMAP bm;
-				if (::GetObject(m_hPanPageBitmap, sizeof(BITMAP), &bm) != 0)
-				{
-					activeDoc->SetPanPageBitmap(m_hPanPageBitmap);
-					m_hPanPageBitmap = NULL;
-				}
-				else
-				{
-					m_hPanPageBitmap = NULL;  // 清空无效句柄
-				}
-			}
-
-			// 转移缩略图缓存（使用swap避免浅拷贝）
-			activeDoc->GetThumbnailCache().swap(m_thumbnailCache);
-
-			// 保存缩略图尺寸
-			activeDoc->SetThumbnailPicWidth(m_thumbnailPicWidth);
-			activeDoc->SetThumbnailPicHeight(m_thumbnailPicHeight);
+			SaveDialogStateToDocument(activeDoc);
 		}
 	}
 
@@ -426,7 +387,7 @@ CXiaoGongPDFDlg::~CXiaoGongPDFDlg()
 	m_currentPageObj = nullptr;
 	m_hCurrentBitmap = NULL;
 	m_hPanPageBitmap = NULL;
-	m_thumbnailCache.clear();  // 已经转移所有权，这里只是清空map
+	m_thumbnailCache.clear();  // 对话框侧不再持有缩略图位图所有权
 	// 注意：m_pageCache 不在这里清空，让 ResourceRelease() 来清理
 	// 否则位图不会被释放，导致内存泄漏
 
@@ -444,6 +405,125 @@ CXiaoGongPDFDlg::~CXiaoGongPDFDlg()
 		m_highlightBrush.DeleteObject();
 	if (m_whiteBrush.GetSafeHandle())
 		m_whiteBrush.DeleteObject();
+}
+
+void CXiaoGongPDFDlg::SaveDialogStateToDocument(CPDFDocument* pDoc, bool transferBitmaps)
+{
+	if (!pDoc)
+		return;
+
+	if (m_currentPage >= 0 && m_currentPage < m_totalPages)
+	{
+		pDoc->SetCurrentPage(m_currentPage);
+		pDoc->SetZoom(m_customZoom, m_zoomMode);
+		pDoc->SetPanOffset(m_panOffset);
+		pDoc->SetCanDrag(m_canDrag);
+		pDoc->SaveCurrentPageZoomState();
+	}
+
+	pDoc->SetUniformScale(m_uniformScale);
+	pDoc->SetScrollPosition(m_scrollPosition);
+	pDoc->SetThumbnailPicWidth(m_thumbnailPicWidth);
+	pDoc->SetThumbnailPicHeight(m_thumbnailPicHeight);
+	pDoc->SetSearchMatches(m_searchMatches);
+	pDoc->SetCurrentMatchIndex(m_currentMatchIndex);
+
+	CString searchKeyword;
+	if (m_editSearch.GetSafeHwnd())
+		m_editSearch.GetWindowText(searchKeyword);
+	else
+		searchKeyword = m_searchKeyword;
+	pDoc->SetSearchKeyword(searchKeyword);
+
+	pDoc->GetPageRotations() = m_pageRotations;
+
+	if (!transferBitmaps)
+		return;
+
+	if (m_hCurrentBitmap)
+	{
+		BITMAP bm;
+		if (::GetObject(m_hCurrentBitmap, sizeof(BITMAP), &bm) != 0)
+			pDoc->SetCurrentBitmap(m_hCurrentBitmap);
+		m_hCurrentBitmap = NULL;
+	}
+
+	if (m_hPanPageBitmap)
+	{
+		BITMAP bm;
+		if (::GetObject(m_hPanPageBitmap, sizeof(BITMAP), &bm) != 0)
+			pDoc->SetPanPageBitmap(m_hPanPageBitmap);
+		m_hPanPageBitmap = NULL;
+	}
+}
+
+void CXiaoGongPDFDlg::LoadDialogStateFromDocument(CPDFDocument* pDoc)
+{
+	if (!pDoc)
+		return;
+
+	m_doc = pDoc->GetDocument();
+	m_totalPages = pDoc->GetTotalPages();
+	m_currentPage = pDoc->GetCurrentPage();
+	m_zoom = pDoc->GetZoom();
+	m_zoomMode = pDoc->GetZoomMode();
+	m_customZoom = pDoc->GetCustomZoom();
+	m_panOffset = pDoc->GetPanOffset();
+	m_canDrag = pDoc->GetCanDrag();
+	m_scrollPosition = pDoc->GetScrollPosition();
+	m_thumbnailPicWidth = pDoc->GetThumbnailPicWidth();
+	m_thumbnailPicHeight = pDoc->GetThumbnailPicHeight();
+	m_searchMatches = pDoc->GetSearchMatches();
+	m_currentMatchIndex = pDoc->GetCurrentMatchIndex();
+	m_searchKeyword = pDoc->GetSearchKeyword();
+	m_pageRotations = pDoc->GetPageRotations();
+	m_hCurrentBitmap = pDoc->TransferCurrentBitmap();
+	m_hPanPageBitmap = pDoc->TransferPanPageBitmap();
+}
+
+void CXiaoGongPDFDlg::CloseProgressDialog()
+{
+	if (!m_pProgressDlg)
+		return;
+
+	if (m_pProgressDlg->GetSafeHwnd() && ::IsWindow(m_pProgressDlg->GetSafeHwnd()))
+		m_pProgressDlg->DestroyWindow();
+
+	delete m_pProgressDlg;
+	m_pProgressDlg = nullptr;
+}
+
+void CXiaoGongPDFDlg::ReleaseLoadThread()
+{
+	if (!m_pLoadThread)
+		return;
+
+	if (m_pLoadThread->m_hThread)
+		WaitForSingleObject(m_pLoadThread->m_hThread, INFINITE);
+
+	delete m_pLoadThread;
+	m_pLoadThread = nullptr;
+}
+
+void CXiaoGongPDFDlg::CleanupPendingLoad()
+{
+	if (m_pLoadParams)
+		m_pLoadParams->pDlg = nullptr;
+
+	CloseProgressDialog();
+	ReleaseLoadThread();
+
+	if (m_pLoadParams)
+	{
+		if (m_pLoadParams->pDoc)
+		{
+			delete m_pLoadParams->pDoc;
+			m_pLoadParams->pDoc = nullptr;
+		}
+
+		delete m_pLoadParams;
+		m_pLoadParams = nullptr;
+	}
 }
 
 void CXiaoGongPDFDlg::CleanupBitmap()
@@ -2008,7 +2088,8 @@ void CXiaoGongPDFDlg::UpdateThumbnails()
 #ifdef _DEBUG
 	TRACE(_T("UpdateThumbnails() 开始\n"));
 	TRACE(_T("m_doc: %p, m_totalPages: %d\n"), m_doc, m_totalPages);
-	TRACE(_T("缩略图缓存数量: %d\n"), (int)m_thumbnailCache.size());
+	CPDFDocument* pDebugDoc = GetActiveDocument();
+	TRACE(_T("缩略图缓存数量: %d\n"), pDebugDoc ? (int)pDebugDoc->GetThumbnailCache().size() : 0);
 #endif
 
 	if (!m_doc || m_totalPages <= 0)
@@ -3040,14 +3121,17 @@ void CXiaoGongPDFDlg::RotatePage(int degrees)
 	if (!m_doc || m_totalPages <= 0 || m_currentPage < 0)
 		return;
 
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (!pDoc)
+		return;
+
 	// 获取当前页面的旋转角度
 	int currentRotation = GetPageRotation(m_currentPage);
-
 	// 计算新的旋转角度（保持在0-270范围内）
 	int newRotation = (currentRotation + degrees + 360) % 360;
-
-	// 更新旋转角度存储
+	// 更新旋转角度存储，并让文档对象同步失效页面尺寸缓存
 	m_pageRotations[m_currentPage] = newRotation;
+	pDoc->SetPageRotation(m_currentPage, newRotation);
 
 	// ★★★ 清除当前页的所有缓存（因为旋转角度变了）
 	// 遍历所有缓存，删除与当前页相关的所有条目（不同尺寸的缓存）
@@ -3076,9 +3160,29 @@ void CXiaoGongPDFDlg::RotatePage(int degrees)
 		}
 	}
 
+	// 清除当前页的连续滚动缓存（因为旋转角度变了）
+	auto& docPageCache = pDoc->GetPageCache();
+	auto& docCacheOrder = pDoc->GetCacheOrder();
+	for (auto it = docPageCache.begin(); it != docPageCache.end(); )
+	{
+		if (it->first.pageNumber == m_currentPage)
+		{
+			if (it->second.hBitmap)
+				DeleteObject(it->second.hBitmap);
+
+			docCacheOrder.remove(it->first);
+			it = docPageCache.erase(it);
+		}
+		else
+		{
+			++it;
+		}
+	}
+
 	// 清除当前页的缩略图缓存（因为旋转角度变了）
-	auto thumbIt = m_thumbnailCache.find(m_currentPage);
-	if (thumbIt != m_thumbnailCache.end())
+	auto& docThumbnailCache = pDoc->GetThumbnailCache();
+	auto thumbIt = docThumbnailCache.find(m_currentPage);
+	if (thumbIt != docThumbnailCache.end())
 	{
 		if (thumbIt->second.hBitmap)
 		{
@@ -3087,7 +3191,7 @@ void CXiaoGongPDFDlg::RotatePage(int degrees)
 			TRACE(_T("清除旋转页面的缩略图缓存: 页面 %d\n"), m_currentPage);
 #endif
 		}
-		m_thumbnailCache.erase(thumbIt);
+		docThumbnailCache.erase(thumbIt);
 	}
 
 	// ★★★ 旋转后需要重置平移偏移量（因为页面尺寸改变了）
@@ -3783,14 +3887,20 @@ void CXiaoGongPDFDlg::ExitFullscreen()
 // 保存当前页面的缩放状态和平移位置
 void CXiaoGongPDFDlg::SaveCurrentPageZoomState()
 {
-	if (m_currentPage >= 0 && m_currentPage < m_totalPages)
-	{
-		m_pageZoomStates[m_currentPage] = PageZoomState(m_zoomMode, m_customZoom, m_panOffset);
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (!pDoc || m_currentPage < 0 || m_currentPage >= m_totalPages)
+		return;
+
+	pDoc->SetCurrentPage(m_currentPage);
+	pDoc->SetZoom(m_customZoom, m_zoomMode);
+	pDoc->SetPanOffset(m_panOffset);
+	pDoc->SetCanDrag(m_canDrag);
+	pDoc->SaveCurrentPageZoomState();
+
 #ifdef _DEBUG
-		TRACE(_T("保存页面 %d 的状态: mode=%d, zoom=%.2f, offset=(%d,%d)\n"),
-			m_currentPage, m_zoomMode, m_customZoom, m_panOffset.x, m_panOffset.y);
+	TRACE(_T("保存页面 %d 的状态: mode=%d, zoom=%.2f, offset=(%d,%d)\n"),
+		m_currentPage, m_zoomMode, m_customZoom, m_panOffset.x, m_panOffset.y);
 #endif
-	}
 }
 
 // 恢复指定页面的缩放状态和平移位置
@@ -3799,39 +3909,32 @@ void CXiaoGongPDFDlg::RestorePageZoomState(int pageNumber)
 	if (pageNumber < 0 || pageNumber >= m_totalPages)
 		return;
 
-	auto it = m_pageZoomStates.find(pageNumber);
-	if (it != m_pageZoomStates.end())
-	{
-		// 找到了该页面的状态，恢复它
-		m_zoomMode = it->second.zoomMode;
-		m_customZoom = it->second.customZoom;
-		m_panOffset = it->second.panOffset;  // ★★★ 恢复平移位置
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (!pDoc)
+		return;
+
+	pDoc->RestorePageZoomState(pageNumber);
+	m_zoomMode = pDoc->GetZoomMode();
+	m_customZoom = pDoc->GetCustomZoom();
+	m_panOffset = pDoc->GetPanOffset();
+	m_canDrag = pDoc->GetCanDrag();
+	m_zoom = (m_zoomMode == ZOOM_CUSTOM) ? m_customZoom : pDoc->GetZoom();
+
 #ifdef _DEBUG
-		TRACE(_T("恢复页面 %d 的状态: mode=%d, zoom=%.2f, offset=(%d,%d)\n"),
-			pageNumber, m_zoomMode, m_customZoom, m_panOffset.x, m_panOffset.y);
+	TRACE(_T("恢复页面 %d 的状态: mode=%d, zoom=%.2f, offset=(%d,%d)\n"),
+		pageNumber, m_zoomMode, m_customZoom, m_panOffset.x, m_panOffset.y);
 #endif
-	}
-	else
-	{
-		// 没有保存过该页面的状态，使用默认值
-		m_zoomMode = ZOOM_CUSTOM;
-		m_customZoom = 1.0f;
-		m_panOffset = CPoint(0, 0);  // ★★★ 重置平移位置
-#ifdef _DEBUG
-		TRACE(_T("页面 %d 使用默认状态\n"), pageNumber);
-#endif
-	}
 }
 
 // 获取页面缩放状态
-CXiaoGongPDFDlg::PageZoomState CXiaoGongPDFDlg::GetPageZoomState(int pageNumber)
+::PageZoomState CXiaoGongPDFDlg::GetPageZoomState(int pageNumber)
 {
-	auto it = m_pageZoomStates.find(pageNumber);
-	if (it != m_pageZoomStates.end())
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (pDoc)
 	{
-		return it->second;
+		return pDoc->GetPageZoomState(pageNumber);
 	}
-	return PageZoomState();  // 返回默认状态
+	return ::PageZoomState();
 }
 
 // ============ 缩放功能实现 ============
@@ -4353,6 +4456,12 @@ bool CXiaoGongPDFDlg::OpenPDFInNewTab(const CString& filePath)
 	TRACE(_T("标签页控件句柄: %p\n"), m_tabCtrl.GetSafeHwnd());
 #endif
 
+	if (m_pLoadThread || m_pLoadParams)
+	{
+		MessageBox(_T("请等待当前PDF加载完成后再打开新文件。"), _T("提示"), MB_OK | MB_ICONINFORMATION);
+		return false;
+	}
+
 	// 检查文件是否已经打开
 	// 规范化路径用于比较（转为小写、获取完整路径,win路径不区分大小写，但是字符比较区分）
 	TCHAR fullPath[MAX_PATH];
@@ -4470,8 +4579,10 @@ bool CXiaoGongPDFDlg::OpenPDFInNewTab(const CString& filePath)
 	{
 		// 线程创建失败 ,电脑资源极度紧张，概率很小
 		DWORD dwError = GetLastError();
+		delete newDoc;
 		delete m_pLoadParams;
 		m_pLoadParams = nullptr;
+		CloseProgressDialog();
 		CString strMsg;
 		strMsg.Format(_T("启动后台线程失败 (错误码: %d)\n\n")
 			_T("可能原因：系统资源不足\n")
@@ -4507,47 +4618,16 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 		{
 #ifdef _DEBUG
 			TRACE(_T("保存旧文档 %d 的状态\n"), m_activeDocIndex);
-			TRACE(_T("旧文档缩略图数量: %d\n"), (int)m_thumbnailCache.size());
 #endif
-			// 保存当前页面状态
-			oldDoc->SaveCurrentPageZoomState();
-			oldDoc->SetCurrentPage(m_currentPage);
-
-			// ★★★ 保存文档级别的缩放状态（每个PDF文档有自己的缩放比例）
-			oldDoc->SetZoom(m_customZoom, m_zoomMode);
-			// ★★★ 保存实际渲染缩放比例，切换回来时直接恢复，不因视图宽度变化而重算
-			oldDoc->SetUniformScale(m_uniformScale);
-
-			oldDoc->SetCurrentBitmap(m_hCurrentBitmap);
-			m_hCurrentBitmap = NULL;  // 转移所有权给文档对象
-
-			// ★★★ 保存缩略图缓存到文档对象（使用swap避免浅拷贝导致的重复删除）
-			oldDoc->GetThumbnailCache().swap(m_thumbnailCache);
-
-			// ★★★ 保存缩略图尺寸信息
-			oldDoc->SetThumbnailPicWidth(m_thumbnailPicWidth);
-			oldDoc->SetThumbnailPicHeight(m_thumbnailPicHeight);
-
-			// ★★★ 保存搜索信息到文档对象
-			oldDoc->SetSearchMatches(m_searchMatches);
-			oldDoc->SetCurrentMatchIndex(m_currentMatchIndex);
-			CString searchKeyword;
-			m_editSearch.GetWindowText(searchKeyword);
-			oldDoc->SetSearchKeyword(searchKeyword);
-
-			// ★★★ 保存滚动位置到文档对象
-			oldDoc->SetScrollPosition(m_scrollPosition);
-
-			// ★★★ 保存旋转状态到文档对象（使用swap避免浅拷贝）
-			oldDoc->GetPageRotations().swap(m_pageRotations);
+			SaveDialogStateToDocument(oldDoc);
 
 #ifdef _DEBUG
-			TRACE(_T("已保存缩略图缓存到文档对象，尺寸: %d x %d\n"),
-				m_thumbnailPicWidth, m_thumbnailPicHeight);
 			TRACE(_T("已保存滚动位置: %d\n"), m_scrollPosition);
 #endif
 		}
 	}
+
+	CleanupCurrentPage();
 
 	// 切换到新文档
 	m_activeDocIndex = index;
@@ -4559,19 +4639,8 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 	TRACE(_T("新文档文件名: %s\n"), newDoc->GetFileName());
 #endif
 
-	// ★★★ 清空旧文档的缩放状态（每个文档应该有独立的状态）
-	m_pageZoomStates.clear();
-
-	// ★★★ 重置缩放和平移状态为默认值（稍后会从新文档恢复）
-	m_zoomMode = ZOOM_CUSTOM;
-	m_customZoom = 1.0f;
-	m_panOffset = CPoint(0, 0);
-	m_canDrag = false;
-
 	// 更新对话框的成员变量（从CPDFDocument复制到对话框）
-	m_doc = newDoc->GetDocument();
-	m_totalPages = newDoc->GetTotalPages();
-	m_currentPage = newDoc->GetCurrentPage();
+	LoadDialogStateFromDocument(newDoc);
 
 	// ★★★ 立即清空页面位置缓存，防止在CalculatePagePositions()调用前触发RenderVisiblePages()导致越界
 	m_pageYPositions.clear();
@@ -4581,41 +4650,18 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 	TRACE(_T("m_doc: %p, 总页数: %d, 当前页: %d\n"), m_doc, m_totalPages, m_currentPage);
 #endif
 
-	// 转移位图所有权（使用 TransferCurrentBitmap 避免误删除）
-	m_hCurrentBitmap = newDoc->TransferCurrentBitmap();
-
-#ifdef _DEBUG
-	TRACE(_T("位图句柄: %p\n"), m_hCurrentBitmap);
-#endif
-
-	// ★★★ 恢复缩略图缓存（使用swap避免浅拷贝导致的重复删除）
-	m_thumbnailCache.swap(newDoc->GetThumbnailCache());
-
-	// ★★★ 恢复缩略图尺寸信息
-	m_thumbnailPicWidth = newDoc->GetThumbnailPicWidth();
-	m_thumbnailPicHeight = newDoc->GetThumbnailPicHeight();
-
-#ifdef _DEBUG
-	TRACE(_T("恢复缩略图缓存，数量: %d，尺寸: %d x %d\n"),
-		(int)m_thumbnailCache.size(), m_thumbnailPicWidth, m_thumbnailPicHeight);
-#endif
-
-	// ★★★ 恢复页面旋转状态（使用swap避免浅拷贝）
-	m_pageRotations.swap(newDoc->GetPageRotations());
-
-	// ★★★ 恢复文档级别的缩放状态（每个PDF文档有自己的缩放比例）
-	m_zoom = newDoc->GetZoom();
-	m_zoomMode = newDoc->GetZoomMode();
-	m_customZoom = newDoc->GetCustomZoom();
-
 	// ★★★ 在连续滚动模式下，重置平移位置（连续滚动不使用拖拽平移）
-	m_panOffset = CPoint(0, 0);
-	m_canDrag = false;
+	if (m_continuousScrollMode)
+	{
+		m_panOffset = CPoint(0, 0);
+		m_canDrag = false;
+	}
 
 #ifdef _DEBUG
 	TRACE(_T("恢复旋转状态，旋转信息数量: %d\n"), (int)m_pageRotations.size());
 	TRACE(_T("恢复文档缩放状态: zoom=%.2f, mode=%d, customZoom=%.2f\n"),
 		m_zoom, m_zoomMode, m_customZoom);
+	TRACE(_T("位图句柄: %p\n"), m_hCurrentBitmap);
 #endif
 
 	// 更新窗口标题
@@ -4638,20 +4684,11 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 #endif
 
 	// ★★★ 恢复搜索信息（每个文档的搜索结果应该独立）
-	m_searchMatches = newDoc->GetSearchMatches();
-	m_currentMatchIndex = newDoc->GetCurrentMatchIndex();
-	m_editSearch.SetWindowText(newDoc->GetSearchKeyword());
+	m_editSearch.SetWindowText(m_searchKeyword);
 
 #ifdef _DEBUG
 	TRACE(_T("已恢复搜索信息: %d 个匹配项, 当前索引=%d\n"),
 		(int)m_searchMatches.size(), m_currentMatchIndex);
-#endif
-
-	// ★★★ 恢复滚动位置（保持用户之前的浏览位置）
-	m_scrollPosition = newDoc->GetScrollPosition();
-
-#ifdef _DEBUG
-	TRACE(_T("已恢复滚动位置: %d\n"), m_scrollPosition);
 #endif
 
 	// ★★★ 连续滚动模式：恢复该文档上次的实际渲染缩放比例
@@ -4677,11 +4714,7 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 		CalculatePagePositions(false);  // 用新的 m_uniformScale=1.0f 重排页面位置/高度
 	}
 	UpdateScrollBar();
-	
-	// ★★★ 修复：打开PDF时确保滚动条正确显示
-	// 使用UpdateScrollBar来统一处理滚动条显示逻辑
-	UpdateScrollBar();
-	
+
 	RenderVisiblePages();
 
 	// 更新UI控件
@@ -4704,8 +4737,34 @@ void CXiaoGongPDFDlg::CloseDocument(int index)
 		return;
 	}
 
-	// 删除文档对象
+	bool isActiveDocument = (index == m_activeDocIndex);
 	CPDFDocument* doc = m_documents[index];
+
+	if (isActiveDocument)
+	{
+		m_pdfView.SetDisplayBitmap(NULL);
+		SafeDeleteBitmap(m_hContinuousViewBitmap);
+		CleanupCurrentPage();
+
+		if (doc)
+			SaveDialogStateToDocument(doc);
+
+		m_doc = nullptr;
+		m_totalPages = 0;
+		m_currentPage = 0;
+		m_hCurrentBitmap = NULL;
+		m_hPanPageBitmap = NULL;
+		m_scrollPosition = 0;
+		m_scrollPositionH = 0;
+		m_panOffset = CPoint(0, 0);
+		m_canDrag = false;
+		m_pageRotations.clear();
+		m_searchMatches.clear();
+		m_currentMatchIndex = -1;
+		m_searchKeyword.Empty();
+	}
+
+	// 删除文档对象
 	if (doc)
 	{
 		delete doc;
@@ -4718,7 +4777,7 @@ void CXiaoGongPDFDlg::CloseDocument(int index)
 	m_tabCtrl.DeleteItem(index);
 
 	// 如果关闭的是当前文档
-	if (index == m_activeDocIndex)
+	if (isActiveDocument)
 	{
 		if (m_documents.empty())
 		{
@@ -4727,6 +4786,8 @@ void CXiaoGongPDFDlg::CloseDocument(int index)
 			m_doc = nullptr;
 			m_totalPages = 0;
 			m_currentPage = 0;
+			if (m_editSearch.GetSafeHwnd())
+				m_editSearch.SetWindowText(_T(""));
 			SetWindowText(_T("小龚PDF阅读器"));
 
 			// ★★★ 彻底清理并隐藏标签页控件
@@ -4759,6 +4820,7 @@ void CXiaoGongPDFDlg::CloseDocument(int index)
 		{
 			// 切换到其他文档
 			int newIndex = (index > 0) ? (index - 1) : 0;
+			m_activeDocIndex = -1;
 			if (m_tabCtrl.GetSafeHwnd())
 			{
 				m_tabCtrl.SetCurSel(newIndex);
@@ -4918,6 +4980,9 @@ void CXiaoGongPDFDlg::OnCancel()
 void CXiaoGongPDFDlg::OnDestroy()
 {
 	TRACE(_T("OnDestroy() called\n"));
+	if (m_pLoadParams)
+		m_pLoadParams->pDlg = nullptr;
+	CloseProgressDialog();
 	UIRelease();             // 先在 HWND 有效时解绑 UI
 	CDialogEx::OnDestroy();
 }
@@ -6224,6 +6289,12 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 	CDC* pDC = m_pdfView.GetDC();
 	CDC memDC;
 	memDC.CreateCompatibleDC(pDC);
+	CPDFDocument* pActiveDoc = GetActiveDocument();
+	if (!pActiveDoc)
+	{
+		m_pdfView.ReleaseDC(pDC);
+		return;
+	}
 
 	CBitmap bmp;
 	bmp.CreateCompatibleBitmap(pDC, viewWidth, viewHeight);
@@ -6242,57 +6313,34 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 		if (pageY + pageHeight < visibleTop || pageY > visibleBottom)
 			continue;
 
-		// ★★★ 优化：先尝试从缓存获取页面位图
 		int rotation = GetPageRotation(i);
+		float pageWidthF = 0.0f;
+		float pageHeightF = 0.0f;
+		bool gotBounds = pActiveDoc->GetPageBounds(i, pageWidthF, pageHeightF);
+		int width = gotBounds ? (int)(pageWidthF * m_uniformScale) : 0;
+		int height = gotBounds ? (int)(pageHeightF * m_uniformScale) : 0;
 
-		// 计算页面尺寸
-		fz_page* page = nullptr;
-		fz_rect bounds = { 0 };  // 声明在外部，供后续使用
-		int width = 0, height = 0;
+		::PageCacheKey cacheKey{ i, width, height, rotation };
+		auto& pageCache = pActiveDoc->GetPageCache();
+		auto& cacheOrder = pActiveDoc->GetCacheOrder();
+		HBITMAP hBitmap = nullptr;
 
-		fz_try(m_ctx)
+		bool pageHasHighlights = false;
+		for (const auto& match : m_searchMatches)
 		{
-			page = fz_load_page(m_ctx, m_doc, i);
-			if (!page)
+			if (match.pageNumber == i)
 			{
-				fz_throw(m_ctx, FZ_ERROR_GENERIC, "Failed to load page");
+				pageHasHighlights = true;
+				break;
 			}
+		}
 
-			bounds = fz_bound_page(m_ctx, page);
-			float pageWidth = bounds.x1 - bounds.x0;
-			float pageHeightF = bounds.y1 - bounds.y0;
-
-			// 根据旋转角度调整
-			if (rotation == 90 || rotation == 270)
-			{
-				float temp = pageWidth;
-				pageWidth = pageHeightF;
-				pageHeightF = temp;
-			}
-
-			// 使用统一的缩放比例
-			width = (int)(pageWidth * m_uniformScale);
-			height = (int)(pageHeightF * m_uniformScale);
-
-			// 构建缓存键
-			::PageCacheKey cacheKey;
-			cacheKey.pageNumber = i;
-			cacheKey.width = width;
-			cacheKey.height = height;
-			cacheKey.rotation = rotation;
-
-			// 尝试从缓存获取
-			HBITMAP hBitmap = nullptr;
-			auto& pageCache = GetActiveDocument()->GetPageCache();
-			auto& cacheOrder = GetActiveDocument()->GetCacheOrder();
+		if (gotBounds)
+		{
 			auto it = pageCache.find(cacheKey);
-
 			if (it != pageCache.end())
 			{
-				// 缓存命中
 				hBitmap = it->second.hBitmap;
-
-				// 更新LRU顺序
 				cacheOrder.remove(cacheKey);
 				cacheOrder.push_back(cacheKey);
 
@@ -6300,204 +6348,224 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 				TRACE(_T("RenderVisiblePages: 缓存命中 Page %d\n"), i);
 #endif
 			}
-			else
-			{
-				// 缓存未命中，需要渲染
-#ifdef _DEBUG
-				TRACE(_T("RenderVisiblePages: 缓存未命中，渲染 Page %d\n"), i);
-#endif
-
-				fz_pixmap* pixmap = nullptr;
-				fz_device* dev = nullptr;
-
-				// 创建pixmap
-				pixmap = fz_new_pixmap(m_ctx, fz_device_rgb(m_ctx), width, height, nullptr, 1);
-				fz_clear_pixmap_with_value(m_ctx, pixmap, 0xff);
-
-				// 渲染页面
-				fz_matrix ctm = fz_scale(m_uniformScale, m_uniformScale);
-
-				// 应用旋转
-				if (rotation != 0)
-				{
-					fz_matrix rotate = fz_rotate((float)rotation);
-					if (rotation == 90)
-						rotate = fz_pre_translate(rotate, 0, -(bounds.y1 - bounds.y0));
-					else if (rotation == 180)
-						rotate = fz_pre_translate(rotate, -(bounds.x1 - bounds.x0), -(bounds.y1 - bounds.y0));
-					else if (rotation == 270)
-						rotate = fz_pre_translate(rotate, -(bounds.x1 - bounds.x0), 0);
-					ctm = fz_concat(rotate, ctm);
-				}
-
-				dev = fz_new_draw_device(m_ctx, ctm, pixmap);
-				fz_run_page(m_ctx, page, dev, fz_identity, nullptr);
-				fz_close_device(m_ctx, dev);
-				fz_drop_device(m_ctx, dev);
-				dev = nullptr;
-
-				// 创建DIB位图
-				BITMAPINFO bmi = { 0 };
-				bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-				bmi.bmiHeader.biWidth = width;
-				bmi.bmiHeader.biHeight = -height;
-				bmi.bmiHeader.biPlanes = 1;
-				bmi.bmiHeader.biBitCount = 24;
-				bmi.bmiHeader.biCompression = BI_RGB;
-
-				BYTE* pbBits = nullptr;
-				hBitmap = CreateDIBSection(memDC.GetSafeHdc(), &bmi,
-					DIB_RGB_COLORS, (void**)&pbBits, NULL, 0);
-
-				if (hBitmap && pbBits)
-				{
-					// 复制像素数据
-					unsigned char* samples = fz_pixmap_samples(m_ctx, pixmap);
-					int stride = (width * 3 + 3) & ~3;
-					int n = fz_pixmap_components(m_ctx, pixmap);
-
-					for (int y = 0; y < height; y++) {
-						for (int x = 0; x < width; x++) {
-							pbBits[y * stride + x * 3 + 0] = samples[(y * width + x) * n + 2];
-							pbBits[y * stride + x * 3 + 1] = samples[(y * width + x) * n + 1];
-							pbBits[y * stride + x * 3 + 2] = samples[(y * width + x) * n + 0];
-						}
-					}
-
-					// 添加到缓存
-					::PageCacheItem cacheItem;
-					cacheItem.hBitmap = hBitmap;
-					pageCache[cacheKey] = cacheItem;
-					cacheOrder.push_back(cacheKey);
-
-					// LRU淘汰
-					const int CACHE_LIMIT = 50;
-					while (cacheOrder.size() > CACHE_LIMIT)
-					{
-						::PageCacheKey oldKey = cacheOrder.front();
-						cacheOrder.pop_front();
-						auto oldIt = pageCache.find(oldKey);
-						if (oldIt != pageCache.end())
-						{
-							if (oldIt->second.hBitmap)
-								DeleteObject(oldIt->second.hBitmap);
-							pageCache.erase(oldIt);
-						}
-					}
-				}
-
-				if (pixmap)
-					fz_drop_pixmap(m_ctx, pixmap);
-			}
-
-			// 绘制位图到内存DC
-			if (hBitmap)
-			{
-				CDC pageDC;
-				pageDC.CreateCompatibleDC(&memDC);
-				HBITMAP oldPageBmp = (HBITMAP)pageDC.SelectObject(hBitmap);
-
-				int destY = pageY - visibleTop + m_panOffset.y;  // 应用垂直拖拽偏移
-				int destX = (viewWidth - width) / 2 + m_panOffset.x;  // 居中显示并应用水平拖拽偏移
-
-#ifdef _DEBUG
-				TRACE(_T("  Page %d: pageY=%d, size=(%d,%d), dest=(%d,%d)\n"),
-					i, pageY, width, height, destX, destY);
-#endif
-
-				memDC.BitBlt(destX, destY, width, height, &pageDC, 0, 0, SRCCOPY);
-
-				// 绘制搜索高亮（如果有搜索结果）
-				if (!m_searchMatches.empty())
-				{
-					// 获取原始页面尺寸（未旋转）
-					fz_rect bounds = fz_bound_page(m_ctx, page);
-					float origPageWidth = bounds.x1 - bounds.x0;
-					float origPageHeight = bounds.y1 - bounds.y0;
-
-					for (size_t matchIdx = 0; matchIdx < m_searchMatches.size(); matchIdx++)
-					{
-						if (m_searchMatches[matchIdx].pageNumber != i)
-							continue;
-
-						// 将quad坐标转换为屏幕坐标
-						fz_quad quad = m_searchMatches[matchIdx].quad;
-
-						// 计算高亮矩形（在原始PDF坐标系中）
-						float minX = min(min(quad.ul.x, quad.ur.x), min(quad.ll.x, quad.lr.x));
-						float maxX = max(max(quad.ul.x, quad.ur.x), max(quad.ll.x, quad.lr.x));
-						float minY = min(min(quad.ul.y, quad.ur.y), min(quad.ll.y, quad.lr.y));
-						float maxY = max(max(quad.ul.y, quad.ur.y), max(quad.ll.y, quad.lr.y));
-
-#ifdef _DEBUG
-						TRACE(_T("  quad corners: ul=(%.1f,%.1f) ur=(%.1f,%.1f) ll=(%.1f,%.1f) lr=(%.1f,%.1f)\n"),
-							quad.ul.x, quad.ul.y, quad.ur.x, quad.ur.y,
-							quad.ll.x, quad.ll.y, quad.lr.x, quad.lr.y);
-#endif
-
-						// 转换为屏幕坐标（PDF坐标系原点在左下，屏幕坐标系原点在左上）
-						// ★★★ 修复：MuPDF返回的quad坐标是相对于页面bounds的绝对坐标，需要减去bounds.x0
-						// 且Y轴变换应使用bounds.y1（PDF坐标系的顶部）而非origPageHeight
-						int x1 = destX + (int)((minX - bounds.x0) * m_uniformScale);
-						int y1 = destY + (int)(minY * m_uniformScale);
-						int x2 = destX + (int)((maxX - bounds.x0) * m_uniformScale);
-						int y2 = destY + (int)(maxY * m_uniformScale);
-
-						CRect highlightRect(x1, y1, x2, y2);
-
-#ifdef _DEBUG
-						TRACE(_T("Page %d, Match %d: destX=%d, destY=%d, scale=%.3f, origH=%.1f\n"),
-							i, (int)matchIdx, destX, destY, m_uniformScale, origPageHeight);
-						TRACE(_T("  quad: minX=%.1f, maxX=%.1f, minY=%.1f, maxY=%.1f\n"),
-							minX, maxX, minY, maxY);
-						TRACE(_T("  rect: (%d,%d,%d,%d)\n"), x1, y1, x2, y2);
-#endif
-
-						// 选择颜色
-						COLORREF fillColor;
-						if ((int)matchIdx == m_currentMatchIndex)
-							fillColor = RGB(255, 150, 0);  // 当前匹配项用橙色
-						else
-							fillColor = RGB(255, 200, 0);  // 其他匹配项用深黄色（更明显）
-
-						// 创建临时DC用于AlphaBlend
-						CDC tempDC;
-						tempDC.CreateCompatibleDC(&memDC);
-						CBitmap tempBmp;
-						tempBmp.CreateCompatibleBitmap(&memDC, highlightRect.Width(), highlightRect.Height());
-						CBitmap* pOldTempBmp = tempDC.SelectObject(&tempBmp);
-						tempDC.FillSolidRect(0, 0, highlightRect.Width(), highlightRect.Height(), fillColor);
-
-						// 使用AlphaBlend提高不透明度
-						BLENDFUNCTION bf;
-						bf.BlendOp = AC_SRC_OVER;
-						bf.BlendFlags = 0;
-						bf.SourceConstantAlpha = ((int)matchIdx == m_currentMatchIndex) ? 200 : 180;
-						bf.AlphaFormat = 0;
-						memDC.AlphaBlend(highlightRect.left, highlightRect.top,
-							highlightRect.Width(), highlightRect.Height(),
-							&tempDC, 0, 0, highlightRect.Width(), highlightRect.Height(), bf);
-						tempDC.SelectObject(pOldTempBmp);
-
-						// 绘制边框使其更明显
-						CPen borderPen(PS_SOLID, 1, RGB(255, 140, 0));
-						CPen* pOldPen = memDC.SelectObject(&borderPen);
-						memDC.SelectStockObject(NULL_BRUSH);
-						memDC.Rectangle(highlightRect);
-						memDC.SelectObject(pOldPen);
-					}
-				}
-
-				pageDC.SelectObject(oldPageBmp);
-				// ★★★ 注意：不要删除缓存的位图！
-			}
-
-			fz_drop_page(m_ctx, page);
 		}
-		fz_catch(m_ctx)
+
+		fz_page* page = nullptr;
+		fz_rect bounds = { 0 };
+		bool renderFailed = false;
+
+		if (!hBitmap || pageHasHighlights || !gotBounds)
 		{
-			if (page) fz_drop_page(m_ctx, page);
+			fz_try(m_ctx)
+			{
+				page = fz_load_page(m_ctx, m_doc, i);
+				if (!page)
+					fz_throw(m_ctx, FZ_ERROR_GENERIC, "Failed to load page");
+
+				bounds = fz_bound_page(m_ctx, page);
+
+				if (!gotBounds)
+				{
+					pageWidthF = bounds.x1 - bounds.x0;
+					pageHeightF = bounds.y1 - bounds.y0;
+					if (rotation == 90 || rotation == 270)
+					{
+						float temp = pageWidthF;
+						pageWidthF = pageHeightF;
+						pageHeightF = temp;
+					}
+
+					width = (int)(pageWidthF * m_uniformScale);
+					height = (int)(pageHeightF * m_uniformScale);
+					cacheKey.pageNumber = i;
+					cacheKey.width = width;
+					cacheKey.height = height;
+					cacheKey.rotation = rotation;
+
+					auto it = pageCache.find(cacheKey);
+					if (it != pageCache.end())
+					{
+						hBitmap = it->second.hBitmap;
+						cacheOrder.remove(cacheKey);
+						cacheOrder.push_back(cacheKey);
+					}
+				}
+
+				if (!hBitmap)
+				{
+#ifdef _DEBUG
+					TRACE(_T("RenderVisiblePages: 缓存未命中，渲染 Page %d\n"), i);
+#endif
+
+					fz_pixmap* pixmap = nullptr;
+					fz_device* dev = nullptr;
+
+					pixmap = fz_new_pixmap(m_ctx, fz_device_rgb(m_ctx), width, height, nullptr, 1);
+					fz_clear_pixmap_with_value(m_ctx, pixmap, 0xff);
+
+					fz_matrix ctm = fz_scale(m_uniformScale, m_uniformScale);
+					if (rotation != 0)
+					{
+						fz_matrix rotate = fz_rotate((float)rotation);
+						if (rotation == 90)
+							rotate = fz_pre_translate(rotate, 0, -(bounds.y1 - bounds.y0));
+						else if (rotation == 180)
+							rotate = fz_pre_translate(rotate, -(bounds.x1 - bounds.x0), -(bounds.y1 - bounds.y0));
+						else if (rotation == 270)
+							rotate = fz_pre_translate(rotate, -(bounds.x1 - bounds.x0), 0);
+						ctm = fz_concat(rotate, ctm);
+					}
+
+					dev = fz_new_draw_device(m_ctx, ctm, pixmap);
+					fz_run_page(m_ctx, page, dev, fz_identity, nullptr);
+					fz_close_device(m_ctx, dev);
+					fz_drop_device(m_ctx, dev);
+					dev = nullptr;
+
+					BITMAPINFO bmi = { 0 };
+					bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+					bmi.bmiHeader.biWidth = width;
+					bmi.bmiHeader.biHeight = -height;
+					bmi.bmiHeader.biPlanes = 1;
+					bmi.bmiHeader.biBitCount = 24;
+					bmi.bmiHeader.biCompression = BI_RGB;
+
+					BYTE* pbBits = nullptr;
+					hBitmap = CreateDIBSection(memDC.GetSafeHdc(), &bmi,
+						DIB_RGB_COLORS, (void**)&pbBits, NULL, 0);
+
+					if (hBitmap && pbBits)
+					{
+						unsigned char* samples = fz_pixmap_samples(m_ctx, pixmap);
+						int stride = (width * 3 + 3) & ~3;
+						int n = fz_pixmap_components(m_ctx, pixmap);
+
+						for (int y = 0; y < height; y++) {
+							for (int x = 0; x < width; x++) {
+								pbBits[y * stride + x * 3 + 0] = samples[(y * width + x) * n + 2];
+								pbBits[y * stride + x * 3 + 1] = samples[(y * width + x) * n + 1];
+								pbBits[y * stride + x * 3 + 2] = samples[(y * width + x) * n + 0];
+							}
+						}
+
+						::PageCacheItem cacheItem;
+						cacheItem.hBitmap = hBitmap;
+						pageCache[cacheKey] = cacheItem;
+						cacheOrder.push_back(cacheKey);
+
+						const int CACHE_LIMIT = 50;
+						while (cacheOrder.size() > CACHE_LIMIT)
+						{
+							::PageCacheKey oldKey = cacheOrder.front();
+							cacheOrder.pop_front();
+							auto oldIt = pageCache.find(oldKey);
+							if (oldIt != pageCache.end())
+							{
+								if (oldIt->second.hBitmap)
+									DeleteObject(oldIt->second.hBitmap);
+								pageCache.erase(oldIt);
+							}
+						}
+					}
+
+					if (pixmap)
+						fz_drop_pixmap(m_ctx, pixmap);
+				}
+			}
+			fz_catch(m_ctx)
+			{
+				if (page)
+				{
+					fz_drop_page(m_ctx, page);
+					page = nullptr;
+				}
+				renderFailed = true;
+			}
 		}
+
+		if (renderFailed || !hBitmap)
+			continue;
+
+		CDC pageDC;
+		pageDC.CreateCompatibleDC(&memDC);
+		HBITMAP oldPageBmp = (HBITMAP)pageDC.SelectObject(hBitmap);
+
+		int destY = pageY - visibleTop + m_panOffset.y;
+		int destX = (viewWidth - width) / 2 + m_panOffset.x;
+
+#ifdef _DEBUG
+		TRACE(_T("  Page %d: pageY=%d, size=(%d,%d), dest=(%d,%d)\n"),
+			i, pageY, width, height, destX, destY);
+#endif
+
+		memDC.BitBlt(destX, destY, width, height, &pageDC, 0, 0, SRCCOPY);
+
+		if (pageHasHighlights && page)
+		{
+			float origPageHeight = bounds.y1 - bounds.y0;
+
+			for (size_t matchIdx = 0; matchIdx < m_searchMatches.size(); matchIdx++)
+			{
+				if (m_searchMatches[matchIdx].pageNumber != i)
+					continue;
+
+				fz_quad quad = m_searchMatches[matchIdx].quad;
+				float minX = min(min(quad.ul.x, quad.ur.x), min(quad.ll.x, quad.lr.x));
+				float maxX = max(max(quad.ul.x, quad.ur.x), max(quad.ll.x, quad.lr.x));
+				float minY = min(min(quad.ul.y, quad.ur.y), min(quad.ll.y, quad.lr.y));
+				float maxY = max(max(quad.ul.y, quad.ur.y), max(quad.ll.y, quad.lr.y));
+
+#ifdef _DEBUG
+				TRACE(_T("  quad corners: ul=(%.1f,%.1f) ur=(%.1f,%.1f) ll=(%.1f,%.1f) lr=(%.1f,%.1f)\n"),
+					quad.ul.x, quad.ul.y, quad.ur.x, quad.ur.y,
+					quad.ll.x, quad.ll.y, quad.lr.x, quad.lr.y);
+#endif
+
+				int x1 = destX + (int)((minX - bounds.x0) * m_uniformScale);
+				int y1 = destY + (int)(minY * m_uniformScale);
+				int x2 = destX + (int)((maxX - bounds.x0) * m_uniformScale);
+				int y2 = destY + (int)(maxY * m_uniformScale);
+
+				CRect highlightRect(x1, y1, x2, y2);
+
+#ifdef _DEBUG
+				TRACE(_T("Page %d, Match %d: destX=%d, destY=%d, scale=%.3f, origH=%.1f\n"),
+					i, (int)matchIdx, destX, destY, m_uniformScale, origPageHeight);
+				TRACE(_T("  quad: minX=%.1f, maxX=%.1f, minY=%.1f, maxY=%.1f\n"),
+					minX, maxX, minY, maxY);
+				TRACE(_T("  rect: (%d,%d,%d,%d)\n"), x1, y1, x2, y2);
+#endif
+
+				COLORREF fillColor = ((int)matchIdx == m_currentMatchIndex) ? RGB(255, 150, 0) : RGB(255, 200, 0);
+
+				CDC tempDC;
+				tempDC.CreateCompatibleDC(&memDC);
+				CBitmap tempBmp;
+				tempBmp.CreateCompatibleBitmap(&memDC, highlightRect.Width(), highlightRect.Height());
+				CBitmap* pOldTempBmp = tempDC.SelectObject(&tempBmp);
+				tempDC.FillSolidRect(0, 0, highlightRect.Width(), highlightRect.Height(), fillColor);
+
+				BLENDFUNCTION bf;
+				bf.BlendOp = AC_SRC_OVER;
+				bf.BlendFlags = 0;
+				bf.SourceConstantAlpha = ((int)matchIdx == m_currentMatchIndex) ? 200 : 180;
+				bf.AlphaFormat = 0;
+				memDC.AlphaBlend(highlightRect.left, highlightRect.top,
+					highlightRect.Width(), highlightRect.Height(),
+					&tempDC, 0, 0, highlightRect.Width(), highlightRect.Height(), bf);
+				tempDC.SelectObject(pOldTempBmp);
+
+				CPen borderPen(PS_SOLID, 1, RGB(255, 140, 0));
+				CPen* pOldPen = memDC.SelectObject(&borderPen);
+				memDC.SelectStockObject(NULL_BRUSH);
+				memDC.Rectangle(highlightRect);
+				memDC.SelectObject(pOldPen);
+			}
+		}
+
+		pageDC.SelectObject(oldPageBmp);
+		if (page)
+			fz_drop_page(m_ctx, page);
 	}
 
 	// ★★★ 保存位图并设置到控件（这样控件可以自动处理重绘）
@@ -7389,13 +7457,7 @@ LRESULT CXiaoGongPDFDlg::OnPDFLoadComplete(WPARAM wParam, LPARAM lParam)
 	PDFLoadParams* pParams = (PDFLoadParams*)lParam;
 	if (!pParams)
 	{
-		// 关闭进度对话框
-		if (m_pProgressDlg)
-		{
-			m_pProgressDlg->DestroyWindow();
-			delete m_pProgressDlg;
-			m_pProgressDlg = nullptr;
-		}
+		CloseProgressDialog();
 		return 0;
 	}
 
@@ -7406,15 +7468,9 @@ LRESULT CXiaoGongPDFDlg::OnPDFLoadComplete(WPARAM wParam, LPARAM lParam)
 		delete pParams->pDoc;
 		delete pParams;
 		m_pLoadParams = nullptr;
-		m_pLoadThread = nullptr;
+		ReleaseLoadThread();
 
-		// 关闭进度对话框
-		if (m_pProgressDlg)
-		{
-			m_pProgressDlg->DestroyWindow();
-			delete m_pProgressDlg;
-			m_pProgressDlg = nullptr;
-		}
+		CloseProgressDialog();
 
 		MessageBox(errMsg, _T("错误"), MB_OK | MB_ICONERROR);
 		UpdateStatusBar();
@@ -7487,16 +7543,11 @@ LRESULT CXiaoGongPDFDlg::OnPDFLoadComplete(WPARAM wParam, LPARAM lParam)
 	// 清理
 	delete pParams;
 	m_pLoadParams = nullptr;
-	m_pLoadThread = nullptr;
+	ReleaseLoadThread();
 
 	// ★★★ 关键：在所有UI更新完成后才关闭进度对话框
 	// 这样用户看到进度条消失时，PDF页面已经显示出来了
-	if (m_pProgressDlg)
-	{
-		m_pProgressDlg->DestroyWindow();
-		delete m_pProgressDlg;
-		m_pProgressDlg = nullptr;
-	}
+	CloseProgressDialog();
 
 	return 0;
 }
