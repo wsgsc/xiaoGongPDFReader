@@ -150,11 +150,6 @@ void CPDFViewCtrl::OnPaint()
 		return;
 	}
 
-	// 创建内存DC
-	CDC memDC;
-	memDC.CreateCompatibleDC(&dc);
-	HBITMAP hOldBitmap = (HBITMAP)memDC.SelectObject(hBitmap);
-
 	// 获取位图信息
 	BITMAP bm;
 	::GetObject(hBitmap, sizeof(BITMAP), &bm);
@@ -171,51 +166,49 @@ void CPDFViewCtrl::OnPaint()
 		bm.bmWidth, bm.bmHeight, isContinuousMode ? _T("连续") : _T("分页"));
 #endif
 
+	// ★★★ 双缓冲输出：在离屏 backDC 上先填背景再贴位图，最后一次性 BitBlt 到屏幕。
+	// 屏幕只有一次写入，彻底消除"先灰/白后图"的中间态闪烁。
+	CDC backDC;
+	backDC.CreateCompatibleDC(&dc);
+	CBitmap backBmp;
+	backBmp.CreateCompatibleBitmap(&dc, clientRect.Width(), clientRect.Height());
+	CBitmap* pOldBackBmp = backDC.SelectObject(&backBmp);
+
+	// 将源位图选入临时 srcDC，用于后续 BitBlt
+	CDC srcDC;
+	srcDC.CreateCompatibleDC(&dc);
+	HBITMAP hOldSrcBmp = (HBITMAP)srcDC.SelectObject(hBitmap);
+
 	if (isContinuousMode)
 	{
-		// ★★★ 连续滚动模式：位图已经是可见区域
-		// 填充背景
-		dc.FillSolidRect(&clientRect, RGB(128, 128, 128));
+		// ★★★ 连续滚动模式：位图已经是可见区域，填灰色背景后居中贴图
+		backDC.FillSolidRect(&clientRect, RGB(128, 128, 128));
 
-		// ★★★ 计算绘制位置（应用居中）
 		int destX = 0;
 		int destY = 0;
 
-		// 如果位图宽度小于客户区宽度，居中显示
 		if (bm.bmWidth < clientRect.Width())
-		{
 			destX = (clientRect.Width() - bm.bmWidth) / 2;
-#ifdef _DEBUG
-			TRACE(_T("CPDFViewCtrl::OnPaint - 连续模式居中: clientW=%d, bmpW=%d, destX=%d\n"),
-				clientRect.Width(), bm.bmWidth, destX);
-#endif
-		}
 
-		// 如果位图高度小于客户区高度，居中显示
 		if (bm.bmHeight < clientRect.Height())
-		{
 			destY = (clientRect.Height() - bm.bmHeight) / 2;
-#ifdef _DEBUG
-			TRACE(_T("CPDFViewCtrl::OnPaint - 连续模式居中: clientH=%d, bmpH=%d, destY=%d\n"),
-				clientRect.Height(), bm.bmHeight, destY);
-#endif
-		}
 
-		// 绘制位图（应用居中或直接绘制，限制在客户区范围内防止溢出）
-		{
-			int srcX = max(0, -destX);
-			int srcY = max(0, -destY);
-			int dstX = max(0, destX);
-			int dstY = max(0, destY);
-			int drawW = min(bm.bmWidth  - srcX, clientRect.Width()  - dstX);
-			int drawH = min(bm.bmHeight - srcY, clientRect.Height() - dstY);
-			if (drawW > 0 && drawH > 0)
-				dc.BitBlt(dstX, dstY, drawW, drawH, &memDC, srcX, srcY, SRCCOPY);
-		}
+#ifdef _DEBUG
+		TRACE(_T("CPDFViewCtrl::OnPaint - 连续模式: destX=%d, destY=%d\n"), destX, destY);
+#endif
+
+		int srcX  = max(0, -destX);
+		int srcY  = max(0, -destY);
+		int dstX  = max(0,  destX);
+		int dstY  = max(0,  destY);
+		int drawW = min(bm.bmWidth  - srcX, clientRect.Width()  - dstX);
+		int drawH = min(bm.bmHeight - srcY, clientRect.Height() - dstY);
+		if (drawW > 0 && drawH > 0)
+			backDC.BitBlt(dstX, dstY, drawW, drawH, &srcDC, srcX, srcY, SRCCOPY);
 	}
 	else
 	{
-		// ★★★ 分页模式：位图是完整的PDF页面，需要根据滚动位置偏移绘制
+		// ★★★ 分页模式：位图是完整的 PDF 页面，根据滚动位置偏移后居中贴图
 		int scrollX = 0;
 		int scrollY = 0;
 		if (m_pParentDlg)
@@ -224,14 +217,11 @@ void CPDFViewCtrl::OnPaint()
 			scrollY = m_pParentDlg->m_scrollPosition;
 		}
 
-		// 填充背景色
-		dc.FillSolidRect(&clientRect, RGB(240, 240, 240));
+		backDC.FillSolidRect(&clientRect, RGB(240, 240, 240));
 
-		// ★★★ 计算绘制位置（应用滚动偏移和居中）
 		int destX = 0;
 		int destY = 0;
 
-		// 如果位图宽度小于客户区宽度，居中显示
 		if (bm.bmWidth < clientRect.Width())
 		{
 			destX = (clientRect.Width() - bm.bmWidth) / 2;
@@ -242,7 +232,6 @@ void CPDFViewCtrl::OnPaint()
 		}
 		else
 		{
-			// 位图宽度大于客户区，应用横向滚动偏移
 			destX = -scrollX;
 #ifdef _DEBUG
 			TRACE(_T("CPDFViewCtrl::OnPaint - 滚动显示: clientW=%d, bmpW=%d, scrollX=%d, destX=%d\n"),
@@ -250,31 +239,26 @@ void CPDFViewCtrl::OnPaint()
 #endif
 		}
 
-		// 如果位图高度小于客户区高度，居中显示
 		if (bm.bmHeight < clientRect.Height())
-		{
 			destY = (clientRect.Height() - bm.bmHeight) / 2;
-		}
 		else
-		{
-			// 位图高度大于客户区，应用垂直滚动偏移
 			destY = -scrollY;
-		}
 
-		// 绘制位图（应用滚动偏移或居中，限制在客户区范围内防止溢出）
-		{
-			int srcX = max(0, -destX);
-			int srcY = max(0, -destY);
-			int dstX = max(0, destX);
-			int dstY = max(0, destY);
-			int drawW = min(bm.bmWidth  - srcX, clientRect.Width()  - dstX);
-			int drawH = min(bm.bmHeight - srcY, clientRect.Height() - dstY);
-			if (drawW > 0 && drawH > 0)
-				dc.BitBlt(dstX, dstY, drawW, drawH, &memDC, srcX, srcY, SRCCOPY);
-		}
+		int srcX  = max(0, -destX);
+		int srcY  = max(0, -destY);
+		int dstX  = max(0,  destX);
+		int dstY  = max(0,  destY);
+		int drawW = min(bm.bmWidth  - srcX, clientRect.Width()  - dstX);
+		int drawH = min(bm.bmHeight - srcY, clientRect.Height() - dstY);
+		if (drawW > 0 && drawH > 0)
+			backDC.BitBlt(dstX, dstY, drawW, drawH, &srcDC, srcX, srcY, SRCCOPY);
 	}
 
-	memDC.SelectObject(hOldBitmap);
+	// ★★★ 离屏合成完成，一次性输出到屏幕 DC
+	dc.BitBlt(0, 0, clientRect.Width(), clientRect.Height(), &backDC, 0, 0, SRCCOPY);
+
+	srcDC.SelectObject(hOldSrcBmp);
+	backDC.SelectObject(pOldBackBmp);
 }
 
 // ============================================================================
@@ -2679,8 +2663,8 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		// PDF视图，为状态栏留出空间
 		m_pdfView.MoveWindow(pdfX, contentY, pdfWidth, contentHeight);
 
-		// ★★★ 立即清除旧位图，防止新尺寸下用旧的大位图绘制导致溢出窗口边界
-		m_pdfView.SetDisplayBitmap(NULL);
+		// ★★★ 不清除旧位图，让旧位图保留到防抖渲染完成后原子替换，避免 150ms 灰屏。
+		// OnPaint 中的裁剪逻辑（drawW/drawH 限制在客户区范围内）保证旧位图不会溢出新边界。
 
 		// ★★★ MoveWindow 会重置控件状态，需要立即根据模式设置滚动条
 		if (m_continuousScrollMode)
@@ -2740,9 +2724,13 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		// ★★★ 重新启用重绘，一次性刷新整个窗口（高刷新率显示器优化）
 		SetRedraw(TRUE);
 
-		// ★★★ 使用RedrawWindow强制立即重绘整个窗口及所有子控件
-		// RDW_ERASE: 触发WM_ERASEBKGND，确保最大化→还原后旧区域被背景色覆盖
-		RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+		// ★★★ 两步刷新策略：
+		// 第一步：只对主对话框自身触发 ERASE（OnEraseBkgnd 填 COLOR_3DFACE），
+		//         不传播到子控件（无 RDW_ALLCHILDREN），避免标准控件白屏。
+		//         这一步确保最大化→还原后新暴露的背景区域被正确填色。
+		RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
+		// 第二步：让所有子控件重绘自身内容，但不触发它们的 ERASEBKGND。
+		RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 
 		// ★★★ 确保PDF视图也立即重绘（应用居中等布局变化）
 		if (m_doc && m_currentPage >= 0)
@@ -3687,12 +3675,11 @@ void CXiaoGongPDFDlg::EnterFullscreen()
 	// 调整窗口大小为全屏
 	SetWindowPos(NULL, 0, 0, screenWidth, screenHeight, SWP_NOZORDER);
 
-	// 等待緩存
+	// 在全屏模式下，只调整PDF预览控件大小为整个客户区
+	// ★★★ 不隐藏 m_pdfView：让旧位图保持可见直到新位图渲染完成后原子替换，避免主窗口背景短暂裸露。
 	if (m_pdfView.GetSafeHwnd())
 	{
-		// 在全屏模式下，只调整PDF预览控件大小为整个客户区
 		m_pdfView.MoveWindow(0, 0, screenWidth, screenHeight);
-		m_pdfView.ShowWindow(SW_HIDE);
 	}
 
 	// ★★★ 重新渲染当前页面以适应新的窗口尺寸
@@ -6205,12 +6192,6 @@ void CXiaoGongPDFDlg::CalculatePagePositions(bool recalcScale)
 // 渲染可见的页面
 void CXiaoGongPDFDlg::RenderVisiblePages()
 {
-	// 等待数据缓存好了在显示PDF，避免闪烁问题
-	if (m_pdfView.GetSafeHwnd() && !m_pdfView.IsWindowVisible())
-	{
-		m_pdfView.ShowWindow(SW_SHOW);
-	}
-
 	// 添加更严格的边界检查，防止切换PDF时vector越界
 	if (!m_doc || m_totalPages <= 0 || m_pageYPositions.empty())
 		return;
