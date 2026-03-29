@@ -211,6 +211,12 @@ private:
 	int m_minWidth;             // 窗口最小宽度
 	int m_minHeight;            // 窗口最小高度
 
+	// ★★★ P1优化：OnSize 防抖定时器，避免拖拽调整窗口时高频触发完整重渲染
+	static const UINT_PTR TIMER_ID_RESIZE_DEBOUNCE = 1002;  // 防抖定时器 ID
+	static const UINT RESIZE_DEBOUNCE_MS = 150;             // 防抖延迟（毫秒）
+	int m_pendingResizeCx;   // 待处理的 OnSize 宽度
+	int m_pendingResizeCy;   // 待处理的 OnSize 高度
+
 	bool m_thumbnailVisible;    // 缩略图面板是否可见
 
 	CShortcutsDialog m_shortcutsDialog;  // 快捷键对话框

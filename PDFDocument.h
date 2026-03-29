@@ -57,6 +57,12 @@ struct PageCacheItem {
 	HBITMAP hBitmap;
 };
 
+// 页面原始尺寸（PDF 点单位，已计入旋转）
+struct PageBounds {
+	float width;   // 经旋转后的宽度
+	float height;  // 经旋转后的高度
+};
+
 // PDF文档类 - 封装单个PDF文档的所有数据
 class CPDFDocument
 {
@@ -93,6 +99,15 @@ public:
 	int GetPageRotation(int pageNumber);
 	void SetPageRotation(int pageNumber, int rotation);
 	std::map<int, int>& GetPageRotations() { return m_pageRotations; }
+
+	// 页面尺寸缓存（避免每次 CalculatePagePositions 都调用 fz_load_page）
+	bool CachePageseBounds();                          // 在打开文档后缓存所有页面尺寸
+	void InvalidatePagesBoundsCache();                 // 旋转后使缓存失效，触发下一次重算
+	bool HasPageBoundsCache() const { return m_pageBoundsCached; }
+	// 获取指定页面经旋转后的尺寸；若缓存无效则返回 false
+	bool GetPageBounds(int pageNumber, float& outWidth, float& outHeight) const;
+	// 获取所有页面中最大宽度（已计旋转）
+	float GetMaxPageWidth() const { return m_maxPageWidth; }
 
 	// 页面状态管理
 	void SaveCurrentPageZoomState();
@@ -170,6 +185,11 @@ private:
 
 	// 旋转状态
 	std::map<int, int> m_pageRotations;  // 每页的旋转角度
+
+	// 页面尺寸缓存（打开文档时一次性构建，旋转时失效）
+	std::vector<PageBounds> m_pageBoundsCache;  // 每页经旋转后的宽高
+	bool m_pageBoundsCached;                    // 缓存是否有效
+	float m_maxPageWidth;                       // 所有页面中最大宽度（用于 CalculatePagePositions）
 
 	// 页面缩放状态
 	std::map<int, PageZoomState> m_pageZoomStates;

@@ -325,6 +325,8 @@ CXiaoGongPDFDlg::CXiaoGongPDFDlg(CWnd* pParent /*=nullptr*/)
 	, m_scrollbarDragStartPos(0)    // 初始化滚动条拖拽起始位置
 	, m_currentMatchIndex(-1)       // 初始化当前匹配项索引
 	, m_searchCaseSensitive(false)  // 默认不区分大小写
+	, m_pendingResizeCx(0)          // ★★★ P1优化：防抖待处理宽度
+	, m_pendingResizeCy(0)          // ★★★ P1优化：防抖待处理高度
 {
 	m_hIcon = AfxGetApp()->LoadIcon(IDR_MAINFRAME);
 	m_highlightBrush.CreateSolidBrush(RGB(173, 216, 230));  // 浅蓝色
@@ -2297,6 +2299,39 @@ void CXiaoGongPDFDlg::OnTimer(UINT_PTR nIDEvent)
 		return;
 	}
 
+	// ★★★ P1优化：OnSize 防抖定时器触发，执行真正的重渲染
+	if (nIDEvent == TIMER_ID_RESIZE_DEBOUNCE)
+	{
+		// 销毁一次性定时器
+		KillTimer(TIMER_ID_RESIZE_DEBOUNCE);
+
+#ifdef _DEBUG
+		TRACE(_T("OnTimer: 执行窗口大小变化后的重渲染（防抖定时器触发，cx=%d, cy=%d）\n"),
+			m_pendingResizeCx, m_pendingResizeCy);
+#endif
+
+		// 确认文档仍然有效
+		if (m_doc && m_currentPage >= 0)
+		{
+			if (m_continuousScrollMode)
+			{
+				// 连续滚动模式：重新计算页面布局，保持用户设定的缩放比例不变
+				CalculatePagePositions(false);
+				UpdateScrollBar();
+				RenderVisiblePages();
+			}
+			else
+			{
+				// 分页模式：重置滚动位置，重新渲染页面
+				UpdateScrollBar();
+				m_scrollPosition = 0;
+				m_scrollPositionH = 0;
+				RenderPage(m_currentPage);
+			}
+		}
+		return;
+	}
+
 	CDialogEx::OnTimer(nIDEvent);
 }
 
@@ -2689,31 +2724,17 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		m_statusBar.Invalidate(FALSE);
 		m_statusBar.UpdateWindow();
 
-		// ★★★ 修改：窗口大小改变时的处理
+		// ★★★ P1优化：使用防抖定时器延迟重渲染，避免拖拽调整窗口时高频触发完整渲染
+		// 拖拽过程中 WM_SIZE 以约 60fps 频率到来，每次都重渲染会严重阻塞 UI 线程
 		if (m_doc && m_currentPage >= 0)
 		{
-			if (m_continuousScrollMode)
-			{
-				// ★★★ 连续滚动模式：窗口大小改变时只重新计算页面布局位置，
-				// 不重算 m_uniformScale，保持用户设定的缩放比例不变
-				CalculatePagePositions(false);
-				UpdateScrollBar();
+			// 保存最新的窗口尺寸，定时器触发时使用
+			m_pendingResizeCx = cx;
+			m_pendingResizeCy = cy;
 
-				// ★★★ 重新渲染可见页面（生成新尺寸的位图）
-				RenderVisiblePages();
-			}
-			else
-			{
-				// ★★★ 分页模式：使用UpdateScrollBar来统一处理滚动条显示逻辑
-				UpdateScrollBar();
-
-				// ★★★ 重置滚动位置，防止使用最大化时的旧值导致溢出
-				m_scrollPosition = 0;
-				m_scrollPositionH = 0;
-
-				// ★★★ 重新渲染页面以适应新的视口大小（修复最大化→还原后内容溢出问题）
-				RenderPage(m_currentPage);
-			}
+			// 重置防抖定时器（每次 OnSize 都推迟 RESIZE_DEBOUNCE_MS 毫秒）
+			KillTimer(TIMER_ID_RESIZE_DEBOUNCE);
+			SetTimer(TIMER_ID_RESIZE_DEBOUNCE, RESIZE_DEBOUNCE_MS, NULL);
 		}
 
 		// ★★★ 重新启用重绘，一次性刷新整个窗口（高刷新率显示器优化）
@@ -5451,23 +5472,21 @@ void CXiaoGongPDFDlg::OnMouseMove(UINT nFlags, CPoint point)
 			m_pdfView.GetClientRect(&viewRect);
 			int viewWidth = viewRect.Width();
 
-			// 获取页面渲染尺寸（用于水平限制）
+			// ★★★ P1优化：使用页面尺寸缓存获取渲染宽度，避免每次鼠标移动都 fz_load_page
 			float pageRenderWidth = 0;
-			fz_page* page = nullptr;
-			fz_try(m_ctx)
+			CPDFDocument* pDoc = GetActiveDocument();
+			if (pDoc && pDoc->HasPageBoundsCache())
 			{
-				page = fz_load_page(m_ctx, m_doc, 0);
-				if (page)
-				{
-					fz_rect bounds = fz_bound_page(m_ctx, page);
-					pageRenderWidth = (bounds.x1 - bounds.x0) * m_uniformScale;
-					fz_drop_page(m_ctx, page);
-				}
+				// 直接从缓存读取第0页宽度，O(1) 操作
+				float cachedW = 0.0f, cachedH = 0.0f;
+				if (pDoc->GetPageBounds(0, cachedW, cachedH))
+					pageRenderWidth = cachedW * m_uniformScale;
 			}
-			fz_catch(m_ctx)
+
+			if (pageRenderWidth <= 0)
 			{
-				if (page)
-					fz_drop_page(m_ctx, page);
+				// 回退：缓存不可用时使用 m_totalScrollWidth（已在 CalculatePagePositions 中算好）
+				pageRenderWidth = (float)m_totalScrollWidth;
 			}
 
 			// ★★★ 连续滚动模式：只限制水平偏移，垂直方向使用滚动
@@ -6041,39 +6060,55 @@ void CXiaoGongPDFDlg::CalculatePagePositions(bool recalcScale)
 	m_pdfView.GetClientRect(&viewRect);
 	int viewWidth = viewRect.Width() - 40;  // 留出左右边距各20像素
 
-	// ★★★ 第一步：遍历所有页面，找到最大宽度（用于统一缩放）
-	float maxPageWidth = 0.0f;
-	for (int i = 0; i < m_totalPages; i++)
+	// ★★★ P1优化：优先使用 CPDFDocument 中的页面尺寸缓存，避免每次全量 fz_load_page
+	// 若缓存失效（首次加载、旋转后），则重建缓存（仅需一次全量加载）
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (pDoc && !pDoc->HasPageBoundsCache())
 	{
-		fz_page* page = nullptr;
-		fz_try(m_ctx)
+		pDoc->CachePageseBounds();
+	}
+
+	// ★★★ 第一步：从缓存中获取最大页面宽度（O(1)，不再调用 MuPDF）
+	float maxPageWidth = 0.0f;
+	if (pDoc && pDoc->HasPageBoundsCache())
+	{
+		// 直接使用缓存中已计算好的最大宽度
+		maxPageWidth = pDoc->GetMaxPageWidth();
+	}
+	else
+	{
+		// 回退：缓存不可用时仍遍历（兼容 m_doc 与 pDoc 不一致的极端情况）
+		for (int i = 0; i < m_totalPages; i++)
 		{
-			page = fz_load_page(m_ctx, m_doc, i);
-			if (page)
+			fz_page* page = nullptr;
+			fz_try(m_ctx)
 			{
-				fz_rect bounds = fz_bound_page(m_ctx, page);
-				float pageWidth = bounds.x1 - bounds.x0;
-				float pageHeight = bounds.y1 - bounds.y0;
-
-				// 根据旋转角度调整
-				int rotation = GetPageRotation(i);
-				if (rotation == 90 || rotation == 270)
+				page = fz_load_page(m_ctx, m_doc, i);
+				if (page)
 				{
-					float temp = pageWidth;
-					pageWidth = pageHeight;
-					pageHeight = temp;
+					fz_rect bounds = fz_bound_page(m_ctx, page);
+					float pageWidth = bounds.x1 - bounds.x0;
+					float pageHeight = bounds.y1 - bounds.y0;
+
+					int rotation = GetPageRotation(i);
+					if (rotation == 90 || rotation == 270)
+					{
+						float temp = pageWidth;
+						pageWidth = pageHeight;
+						pageHeight = temp;
+					}
+
+					if (pageWidth > maxPageWidth)
+						maxPageWidth = pageWidth;
+
+					fz_drop_page(m_ctx, page);
 				}
-
-				if (pageWidth > maxPageWidth)
-					maxPageWidth = pageWidth;
-
-				fz_drop_page(m_ctx, page);
 			}
-		}
-		fz_catch(m_ctx)
-		{
-			if (page)
-				fz_drop_page(m_ctx, page);
+			fz_catch(m_ctx)
+			{
+				if (page)
+					fz_drop_page(m_ctx, page);
+			}
 		}
 	}
 
@@ -6097,45 +6132,62 @@ void CXiaoGongPDFDlg::CalculatePagePositions(bool recalcScale)
 #endif
 
 	// ★★★ 第二步：使用统一的缩放比例计算所有页面的高度
+	// 优先从缓存读取，无需再次调用 fz_load_page
 	// ★★★ 修复：第一页从 PAGE_SPACING 开始，确保顶部有灰色间隔
 	int currentY = PAGE_SPACING;
 	for (int i = 0; i < m_totalPages; i++)
 	{
 		m_pageYPositions[i] = currentY;
 
-		fz_page* page = nullptr;
-		fz_try(m_ctx)
+		float pageHeight = 0.0f;
+		float pageWidth  = 0.0f;
+		bool gotBounds   = false;
+
+		// 尝试从缓存获取
+		if (pDoc)
+			gotBounds = pDoc->GetPageBounds(i, pageWidth, pageHeight);
+
+		if (gotBounds)
 		{
-			page = fz_load_page(m_ctx, m_doc, i);
-			if (page)
-			{
-				fz_rect bounds = fz_bound_page(m_ctx, page);
-				float pageWidth = bounds.x1 - bounds.x0;
-				float pageHeight = bounds.y1 - bounds.y0;
-
-				// 根据旋转角度调整
-				int rotation = GetPageRotation(i);
-				if (rotation == 90 || rotation == 270)
-				{
-					float temp = pageWidth;
-					pageWidth = pageHeight;
-					pageHeight = temp;
-				}
-
-				// ★★★ 使用统一的缩放比例计算高度
-				int scaledHeight = (int)(pageHeight * m_uniformScale);
-				m_pageHeights[i] = scaledHeight;
-
-				currentY += scaledHeight + PAGE_SPACING;
-
-				fz_drop_page(m_ctx, page);
-			}
+			// ★★★ 缓存命中：直接计算，零 MuPDF 调用
+			int scaledHeight = (int)(pageHeight * m_uniformScale);
+			m_pageHeights[i] = scaledHeight;
+			currentY += scaledHeight + PAGE_SPACING;
 		}
-		fz_catch(m_ctx)
+		else
 		{
-			if (page)
-				fz_drop_page(m_ctx, page);
-			m_pageHeights[i] = 0;
+			// 回退：缓存未命中时走原有 fz_load_page 路径
+			fz_page* page = nullptr;
+			fz_try(m_ctx)
+			{
+				page = fz_load_page(m_ctx, m_doc, i);
+				if (page)
+				{
+					fz_rect bounds = fz_bound_page(m_ctx, page);
+					float w = bounds.x1 - bounds.x0;
+					float h = bounds.y1 - bounds.y0;
+
+					int rotation = GetPageRotation(i);
+					if (rotation == 90 || rotation == 270)
+					{
+						float temp = w;
+						w = h;
+						h = temp;
+					}
+
+					int scaledHeight = (int)(h * m_uniformScale);
+					m_pageHeights[i] = scaledHeight;
+					currentY += scaledHeight + PAGE_SPACING;
+
+					fz_drop_page(m_ctx, page);
+				}
+			}
+			fz_catch(m_ctx)
+			{
+				if (page)
+					fz_drop_page(m_ctx, page);
+				m_pageHeights[i] = 0;
+			}
 		}
 	}
 
@@ -7391,6 +7443,10 @@ LRESULT CXiaoGongPDFDlg::OnPDFLoadComplete(WPARAM wParam, LPARAM lParam)
 	// 加载成功，添加到文档列表
 	m_documents.push_back(pParams->pDoc);
 	int newIndex = (int)m_documents.size() - 1;
+
+	// ★★★ P1优化：文档加载完成后立即构建页面尺寸缓存，
+	// 避免后续 CalculatePagePositions 每次调用时全量 fz_load_page
+	pParams->pDoc->CachePageseBounds();
 
 	// 添加标签页
 	if (m_tabCtrl.GetSafeHwnd())

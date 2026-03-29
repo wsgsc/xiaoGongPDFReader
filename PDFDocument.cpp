@@ -21,6 +21,8 @@ CPDFDocument::CPDFDocument(fz_context* ctx)
 	, m_hCurrentBitmap(NULL)
 	, m_currentMatchIndex(-1)
 	, m_scrollPosition(0)
+	, m_pageBoundsCached(false)
+	, m_maxPageWidth(0.0f)
 {
 }
 
@@ -182,6 +184,11 @@ void CPDFDocument::CloseDocument()
 	m_pageZoomStates.clear();
 	m_scrollPosition = 0;
 
+	// 清除页面尺寸缓存
+	m_pageBoundsCache.clear();
+	m_pageBoundsCached = false;
+	m_maxPageWidth = 0.0f;
+
 #ifdef _DEBUG
 	TRACE(_T("CloseDocument() 完成\n"));
 #endif
@@ -265,6 +272,9 @@ void CPDFDocument::SetPageRotation(int pageNumber, int rotation)
 	if (rotation < 0) rotation += 360;
 
 	m_pageRotations[pageNumber] = rotation;
+
+	// ★★★ 旋转会改变页面宽高，使缓存失效，下次 CalculatePagePositions 时重建
+	InvalidatePagesBoundsCache();
 }
 
 void CPDFDocument::SaveCurrentPageZoomState()
@@ -405,4 +415,83 @@ HBITMAP CPDFDocument::TransferPanPageBitmap()
 	HBITMAP hBitmap = m_hPanPageBitmap;
 	m_hPanPageBitmap = NULL;
 	return hBitmap;
+}
+
+// ★★★ P1 优化：打开文档后一次性缓存所有页面尺寸，避免 CalculatePagePositions 每次全量调用 fz_load_page
+bool CPDFDocument::CachePageseBounds()
+{
+	if (!m_doc || !m_ctx || m_totalPages <= 0)
+		return false;
+
+	m_pageBoundsCache.clear();
+	m_pageBoundsCache.resize(m_totalPages);
+	m_maxPageWidth = 0.0f;
+
+	for (int i = 0; i < m_totalPages; i++)
+	{
+		fz_page* page = nullptr;
+		fz_try(m_ctx)
+		{
+			page = fz_load_page(m_ctx, m_doc, i);
+			if (page)
+			{
+				fz_rect bounds = fz_bound_page(m_ctx, page);
+				float w = bounds.x1 - bounds.x0;
+				float h = bounds.y1 - bounds.y0;
+
+				// 根据当前旋转角度调整宽高
+				int rotation = GetPageRotation(i);
+				if (rotation == 90 || rotation == 270)
+				{
+					float temp = w;
+					w = h;
+					h = temp;
+				}
+
+				m_pageBoundsCache[i].width  = w;
+				m_pageBoundsCache[i].height = h;
+
+				if (w > m_maxPageWidth)
+					m_maxPageWidth = w;
+
+				fz_drop_page(m_ctx, page);
+				page = nullptr;
+			}
+		}
+		fz_catch(m_ctx)
+		{
+			if (page)
+			{
+				fz_drop_page(m_ctx, page);
+				page = nullptr;
+			}
+			// 出错时使用默认值，不中断整个缓存过程
+			m_pageBoundsCache[i].width  = 595.0f;  // A4 默认宽度（PDF 点单位）
+			m_pageBoundsCache[i].height = 842.0f;
+		}
+	}
+
+	m_pageBoundsCached = true;
+	return true;
+}
+
+void CPDFDocument::InvalidatePagesBoundsCache()
+{
+	// 旋转或文档变化时调用，使缓存失效
+	m_pageBoundsCached = false;
+	m_pageBoundsCache.clear();
+	m_maxPageWidth = 0.0f;
+}
+
+bool CPDFDocument::GetPageBounds(int pageNumber, float& outWidth, float& outHeight) const
+{
+	if (!m_pageBoundsCached ||
+		pageNumber < 0 ||
+		pageNumber >= (int)m_pageBoundsCache.size())
+	{
+		return false;
+	}
+	outWidth  = m_pageBoundsCache[pageNumber].width;
+	outHeight = m_pageBoundsCache[pageNumber].height;
+	return true;
 }
