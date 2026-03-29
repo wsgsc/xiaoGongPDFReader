@@ -10,8 +10,9 @@ CPDFDocument::CPDFDocument(fz_context* ctx)
 	, m_totalPages(0)
 	, m_currentPage(0)
 	, m_zoom(1.0f)
-	, m_zoomMode(ZOOM_FIT_PAGE)
-	, m_customZoom(1.0f)
+	, m_zoomMode(ZOOM_CUSTOM)  // 初始使用固定缩放，不随窗口大小变化
+	, m_customZoom(1.0f)       // 初始缩放比例 1:1（PDF 原始尺寸）
+	, m_uniformScale(0.0f)     // 0表示未初始化，首次显示时按 m_customZoom 设置
 	, m_panOffset(0, 0)
 	, m_canDrag(false)
 	, m_hPanPageBitmap(NULL)

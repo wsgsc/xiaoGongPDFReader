@@ -199,10 +199,14 @@ private:
 
     CCriticalSection m_renderLock;  // 添加互斥锁成员变量
 
-	bool m_isFullscreen;        // 是否处于全屏状态
-	CRect m_windowRect;         // 存储窗口在进入全屏前的位置和大小
-	ZoomMode m_savedZoomMode;   // 进入全屏前的缩放模式
-	float m_savedCustomZoom;    // 进入全屏前的自定义缩放值
+	bool m_isFullscreen;          // 是否处于全屏状态
+	CRect m_windowRect;           // 存储窗口在进入全屏前的位置和大小（仅非最大化时有效）
+	bool m_wasMaximized;          // 进入全屏前窗口是否处于最大化状态
+	ZoomMode m_savedZoomMode;     // 进入全屏前的缩放模式
+	float m_savedCustomZoom;      // 进入全屏前的自定义缩放值
+	CPoint m_savedPanOffset;      // 进入全屏前的拖拽平移偏移量
+	int m_savedScrollPosition;    // 进入全屏前的滚动位置（连续滚动模式）
+	float m_savedUniformScale;    // 进入全屏前的实际渲染缩放比例
 
 	int m_minWidth;             // 窗口最小宽度
 	int m_minHeight;            // 窗口最小高度
@@ -220,7 +224,7 @@ private:
 		float customZoom;    // 自定义缩放比例
 		CPoint panOffset;    // 平移偏移量（拖拽位置）
 
-		PageZoomState() : zoomMode(ZOOM_FIT_PAGE), customZoom(1.0f), panOffset(0, 0) {}
+		PageZoomState() : zoomMode(ZOOM_CUSTOM), customZoom(1.0f), panOffset(0, 0) {}
 		PageZoomState(ZoomMode mode, float zoom, CPoint offset)
 			: zoomMode(mode), customZoom(zoom), panOffset(offset) {}
 	};
@@ -427,7 +431,7 @@ protected:
     void ResetPanOffset();  // 重置平移偏移量
 
     // 连续滚动模式相关函数
-    void CalculatePagePositions();  // 计算所有页面的位置和高度
+    void CalculatePagePositions(bool recalcScale = true);  // 计算所有页面的位置和高度；recalcScale=false时保持现有m_uniformScale不变
     void RenderVisiblePages();  // 渲染可见的页面
     afx_msg void OnVScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar);  // 垂直滚动条消息处理
     afx_msg void OnHScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar);  // 横向滚动条消息处理

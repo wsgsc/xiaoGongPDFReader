@@ -292,8 +292,12 @@ CXiaoGongPDFDlg::CXiaoGongPDFDlg(CWnd* pParent /*=nullptr*/)
 	, m_thumbnailPicHeight(0)
 	, m_renderLock()
 	, m_isFullscreen(false)
-	, m_savedZoomMode(ZOOM_CUSTOM)     // 初始化保存的缩放模式
+	, m_wasMaximized(false)              // 初始化最大化状态标志
+	, m_savedZoomMode(ZOOM_CUSTOM)       // 初始化保存的缩放模式
 	, m_savedCustomZoom(1.0f)            // 初始化保存的自定义缩放值
+	, m_savedPanOffset(0, 0)             // 初始化保存的平移偏移量
+	, m_savedScrollPosition(0)           // 初始化保存的滚动位置
+	, m_savedUniformScale(0.0f)          // 初始化保存的实际渲染缩放比例
 	, m_zoomMode(ZOOM_CUSTOM)
 	, m_customZoom(1.0f)
 	, m_documentMaxPageWidth(0.0f)  // ★★★ 初始化文档最大页面宽度
@@ -2690,8 +2694,9 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		{
 			if (m_continuousScrollMode)
 			{
-				// ★★★ 连续滚动模式：需要重新渲染可见页面以适应新的视口大小
-				// 使用UpdateScrollBar来统一处理滚动条显示逻辑
+				// ★★★ 连续滚动模式：窗口大小改变时只重新计算页面布局位置，
+				// 不重算 m_uniformScale，保持用户设定的缩放比例不变
+				CalculatePagePositions(false);
 				UpdateScrollBar();
 
 				// ★★★ 重新渲染可见页面（生成新尺寸的位图）
@@ -2880,7 +2885,9 @@ void CXiaoGongPDFDlg::UpdateStatusBar()
 	title.Format(_T("第 %d/%d 页"),
 		m_currentPage + 1, m_totalPages);
 	m_statusBar.SetWindowText(title);
-	m_statusBar.ShowWindow(SW_SHOW);
+	// 全屏模式下不显示状态栏
+	if (!m_isFullscreen)
+		m_statusBar.ShowWindow(SW_SHOW);
 
 }
 
@@ -3626,12 +3633,18 @@ void CXiaoGongPDFDlg::EnterFullscreen()
 		TRACE(_T("进入全屏\n"));
 	#endif
 
-	// 保存当前窗口位置和大小用于恢复
+	// 保存进入全屏前的最大化状态
+	m_wasMaximized = (IsZoomed() != FALSE);
+
+	// 保存当前窗口位置和大小用于恢复（仅在非最大化时有效，最大化时用 ShowWindow 恢复）
 	GetWindowRect(&m_windowRect);
 
-	// ★★★ 保存当前缩放状态，用于退出全屏时恢复
+	// ★★★ 保存当前缩放状态（含平移偏移、滚动位置和实际缩放比例），用于退出全屏时恢复
 	m_savedZoomMode = m_zoomMode;
 	m_savedCustomZoom = m_customZoom;
+	m_savedPanOffset = m_panOffset;
+	m_savedScrollPosition = m_scrollPosition;
+	m_savedUniformScale = m_uniformScale;
 
 	// ★★★ 先设置全屏标志，避免SetWindowPos触发OnSize时重新布局控件
 	m_isFullscreen = true;
@@ -3692,65 +3705,60 @@ void CXiaoGongPDFDlg::ExitFullscreen()
 	// ★★★ 重新填充最近文件列表（因为菜单是重新加载的）
 	UpdateRecentFilesMenu();
 
-	// ★★★ 在窗口大小改变前，保存视口中心点在文档中的位置比例（用于退出全屏后恢复）
-	float savedCenterRatio = 0.0f;
-	if (m_continuousScrollMode && m_totalScrollHeight > 0)
-	{
-		CRect viewRect;
-		m_pdfView.GetClientRect(&viewRect);
-		int centerPos = m_scrollPosition + viewRect.Height() / 2;
-		savedCenterRatio = (float)centerPos / m_totalScrollHeight;
-#ifdef _DEBUG
-		TRACE(_T("退出全屏：保存视口中心比例 = %.4f (centerPos=%d, height=%d)\n"),
-			savedCenterRatio, centerPos, m_totalScrollHeight);
-#endif
-	}
-
-	// ★★★ 先重设全屏标志，让 SetWindowPos 触发的 OnSize 能正确布局控件
+	// ★★★ 先重设全屏标志，让 ShowWindow/SetWindowPos 触发的 OnSize 能正确布局控件
 	m_isFullscreen = false;
 
-	// 恢复窗口位置和大小
-	SetWindowPos(NULL, m_windowRect.left, m_windowRect.top,
-		m_windowRect.Width(), m_windowRect.Height(), SWP_NOZORDER);
+	// 恢复窗口位置和大小：若进入全屏前是最大化，直接还原最大化；否则还原普通窗口
+	if (m_wasMaximized)
+	{
+		ShowWindow(SW_MAXIMIZE);
+		// ★★★ 全屏尺寸与最大化尺寸相同时，ShowWindow(SW_MAXIMIZE) 不会触发 OnSize。
+		// 强制发送 WM_SIZE 确保控件布局被重新计算。
+		CRect clientRect;
+		GetClientRect(&clientRect);
+		SendMessage(WM_SIZE, SIZE_MAXIMIZED,
+			MAKELPARAM(clientRect.Width(), clientRect.Height()));
+	}
+	else
+	{
+		SetWindowPos(NULL, m_windowRect.left, m_windowRect.top,
+			m_windowRect.Width(), m_windowRect.Height(), SWP_NOZORDER);
+	}
 
 	// 显示隐藏的控件
 	SetControlsVisible(true);
 
-	// ★★★ SetWindowPos 会自动触发 OnSize 重新布局所有控件，无需手动调用
-	// 如果有文档加载，恢复进入全屏前的缩放状态
+	// ★★★ SetWindowPos 已触发 OnSize，OnSize 里已用正确的视图尺寸重新计算并渲染。
+	// 这里只需要恢复进入全屏前的缩放模式/值/位置，再触发一次渲染。
 	if (m_doc && m_currentPage >= 0)
 	{
-		// ★★★ 先按比例恢复滚动位置（在SetZoom之前，避免SetZoom内部的渲染使用错误的位置）
-		if (m_continuousScrollMode && m_totalScrollHeight > 0)
+		// ★★★ 恢复进入全屏前的缩放模式和缩放值（直接赋值，不通过SetZoom）
+		m_zoomMode = m_savedZoomMode;
+		m_customZoom = m_savedCustomZoom;
+		// ★★★ 恢复进入全屏前保存的平移偏移量
+		m_panOffset = m_savedPanOffset;
+
+		if (m_continuousScrollMode)
 		{
+			// ★★★ 直接恢复进入全屏前的实际缩放比例，不重算（避免因视图尺寸变化导致缩放改变）
+			if (m_savedUniformScale > 0.0f)
+				m_uniformScale = m_savedUniformScale;
+			CalculatePagePositions(false);
+
+			// ★★★ 恢复进入全屏前的滚动位置，限制在有效范围内
+			m_scrollPosition = m_savedScrollPosition;
 			CRect viewRect;
 			m_pdfView.GetClientRect(&viewRect);
-
-			// 根据保存的视口中心比例计算新的中心位置，然后推算滚动位置
-			int newCenterPos = (int)(savedCenterRatio * m_totalScrollHeight);
-			m_scrollPosition = newCenterPos - viewRect.Height() / 2;
-
-			// 限制范围
 			int maxScroll = max(0, m_totalScrollHeight - viewRect.Height());
 			if (m_scrollPosition > maxScroll) m_scrollPosition = maxScroll;
 			if (m_scrollPosition < 0) m_scrollPosition = 0;
 
-#ifdef _DEBUG
-			TRACE(_T("退出全屏：恢复滚动位置 = %d (centerRatio=%.4f, newCenter=%d, height=%d)\n"),
-				m_scrollPosition, savedCenterRatio, newCenterPos, m_totalScrollHeight);
-#endif
+			UpdateScrollBar();
+			RenderVisiblePages();
 		}
-
-		// ★★★ 强制重置缩放模式，避免 SetZoom 的优化检查跳过渲染
-		m_zoomMode = ZOOM_CUSTOM;
-
-		// ★★★ 恢复进入全屏前的缩放模式和缩放值
-		// SetZoom 内部会调用 UpdateScrollBar() 和 RenderVisiblePages()
-		SetZoom(m_savedCustomZoom, m_savedZoomMode);
-
-		// ★★★ 分页模式下强制重新渲染当前页面，确保滚动条范围正确
-		if (!m_continuousScrollMode)
+		else
 		{
+			// ★★★ 分页模式：重新渲染当前页面
 			CleanupBitmap();
 			RenderPage(m_currentPage);
 		}
@@ -4499,6 +4507,8 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 
 			// ★★★ 保存文档级别的缩放状态（每个PDF文档有自己的缩放比例）
 			oldDoc->SetZoom(m_customZoom, m_zoomMode);
+			// ★★★ 保存实际渲染缩放比例，切换回来时直接恢复，不因视图宽度变化而重算
+			oldDoc->SetUniformScale(m_uniformScale);
 
 			oldDoc->SetCurrentBitmap(m_hCurrentBitmap);
 			m_hCurrentBitmap = NULL;  // 转移所有权给文档对象
@@ -4636,8 +4646,28 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 	TRACE(_T("已恢复滚动位置: %d\n"), m_scrollPosition);
 #endif
 
-	// ★★★ 连续滚动模式：重新计算页面位置并渲染可见页面
-	CalculatePagePositions();
+	// ★★★ 连续滚动模式：恢复该文档上次的实际渲染缩放比例
+	float savedUniformScale = newDoc->GetUniformScale();
+	if (savedUniformScale > 0.0f)
+	{
+		// 已打开过：直接恢复上次的缩放，不重算
+		m_uniformScale = savedUniformScale;
+		CalculatePagePositions(false);
+	}
+	else
+	{
+		// 首次打开：先用 recalcScale=true 算出 baseScale（基于视图宽度的适应宽度值），
+		// 再把 m_customZoom 反推为 1.0f/baseScale，使 m_uniformScale = 1.0f（1:1 显示）
+		// 这样后续 Ctrl+滚轮 的倍率计算（newZoom = m_customZoom * 1.1）仍然正确
+		CalculatePagePositions(true);  // 此时 m_uniformScale = baseScale * 1.0f = baseScale
+		if (m_uniformScale > 0.0f)
+		{
+			float baseScale = m_uniformScale;          // baseScale = viewWidth/maxPageWidth*0.95
+			m_customZoom = 1.0f / baseScale;           // 反推：使 baseScale * m_customZoom = 1.0f
+			m_uniformScale = 1.0f;                     // 1:1 原始尺寸显示
+		}
+		CalculatePagePositions(false);  // 用新的 m_uniformScale=1.0f 重排页面位置/高度
+	}
 	UpdateScrollBar();
 	
 	// ★★★ 修复：打开PDF时确保滚动条正确显示
@@ -5969,7 +5999,7 @@ void CXiaoGongPDFDlg::PrintSinglePage(CDC& dcPrint, int pageNum, int horRes, int
 // ============================================================================
 
 // 计算所有页面的位置和高度（使用统一缩放比例确保宽度一致）
-void CXiaoGongPDFDlg::CalculatePagePositions()
+void CXiaoGongPDFDlg::CalculatePagePositions(bool recalcScale)
 {
 	if (!m_doc || m_totalPages <= 0)
 		return;
@@ -6020,15 +6050,23 @@ void CXiaoGongPDFDlg::CalculatePagePositions()
 		}
 	}
 
-	// ★★★ 计算统一的缩放比例（基于最大宽度）并保存到成员变量
-	// 基准缩放 = 适应宽度的缩放
-	float baseScale = (maxPageWidth > 0) ? ((float)viewWidth / maxPageWidth * 0.95f) : 1.0f;
-	// 实际缩放 = 基准缩放 × 自定义缩放倍数（这样可以支持放大/缩小功能）
-	m_uniformScale = baseScale * m_customZoom;
-
+	// ★★★ 仅在需要时重新计算缩放比例（用户主动缩放或首次加载时）
+	// 窗口大小改变时传 recalcScale=false，保持用户设定的缩放不变
+	if (recalcScale)
+	{
+		float baseScale = (maxPageWidth > 0) ? ((float)viewWidth / maxPageWidth * 0.95f) : 1.0f;
+		m_uniformScale = baseScale * m_customZoom;
 #ifdef _DEBUG
-	TRACE(_T("连续滚动模式: 最大页面宽度=%.2f, 基准缩放=%.4f, customZoom=%.2f, 统一缩放比例=%.4f\n"),
-		maxPageWidth, baseScale, m_customZoom, m_uniformScale);
+		TRACE(_T("连续滚动模式: 最大页面宽度=%.2f, 基准缩放=%.4f, customZoom=%.2f, 统一缩放比例=%.4f\n"),
+			maxPageWidth, baseScale, m_customZoom, m_uniformScale);
+#endif
+	}
+#ifdef _DEBUG
+	else
+	{
+		TRACE(_T("连续滚动模式(保持缩放): 最大页面宽度=%.2f, customZoom=%.2f, 统一缩放比例=%.4f\n"),
+			maxPageWidth, m_customZoom, m_uniformScale);
+	}
 #endif
 
 	// ★★★ 第二步：使用统一的缩放比例计算所有页面的高度
@@ -6639,6 +6677,14 @@ void CXiaoGongPDFDlg::OnHScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar)
 // 更新滚动条
 void CXiaoGongPDFDlg::UpdateScrollBar()
 {
+	// 全屏模式下隐藏所有滚动条并返回
+	if (m_isFullscreen)
+	{
+		m_pdfView.ShowScrollBar(SB_VERT, FALSE);
+		m_pdfView.ShowScrollBar(SB_HORZ, FALSE);
+		return;
+	}
+
 	CRect viewRect;
 	m_pdfView.GetClientRect(&viewRect);
 

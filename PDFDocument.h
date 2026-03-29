@@ -86,6 +86,8 @@ public:
 	float GetZoom() const { return m_zoom; }
 	float GetCustomZoom() const { return m_customZoom; }
 	void SetZoom(float zoom, ZoomMode mode = ZOOM_CUSTOM);
+	float GetUniformScale() const { return m_uniformScale; }
+	void SetUniformScale(float scale) { m_uniformScale = scale; }
 
 	// 旋转操作
 	int GetPageRotation(int pageNumber);
@@ -164,6 +166,7 @@ private:
 	float m_zoom;
 	ZoomMode m_zoomMode;
 	float m_customZoom;
+	float m_uniformScale;  // 连续滚动模式下的实际渲染缩放比例（保存以便切换标签页时恢复）
 
 	// 旋转状态
 	std::map<int, int> m_pageRotations;  // 每页的旋转角度
