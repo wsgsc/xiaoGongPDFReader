@@ -5911,11 +5911,21 @@ void CXiaoGongPDFDlg::PrintSinglePage(CDC& dcPrint, int pageNum, int horRes, int
 	// 开始新页
 	dcPrint.StartPage();
 
-	// 加载PDF页面
+	// 初始化资源为 NULL
+	fz_page* page = nullptr;
+	fz_pixmap* pixmap = nullptr;
+	fz_device* dev = nullptr;
+	HBITMAP hBitmap = nullptr;
+
 	CSingleLock lock(&m_renderLock, TRUE);
-	fz_page* page = fz_load_page(m_ctx, m_doc, pageNum);
-	if (page)
+
+	fz_try(m_ctx)
 	{
+		// 加载PDF页面
+		page = fz_load_page(m_ctx, m_doc, pageNum);
+		if (!page)
+			fz_throw(m_ctx, FZ_ERROR_GENERIC, "Failed to load page %d", pageNum);
+
 		// 获取页面大小
 		fz_rect bounds = fz_bound_page(m_ctx, page);
 		float pageWidth = bounds.x1 - bounds.x0;
@@ -5931,15 +5941,14 @@ void CXiaoGongPDFDlg::PrintSinglePage(CDC& dcPrint, int pageNum, int horRes, int
 		int renderHeight = (int)(pageHeight * scale);
 
 		// 创建pixmap
-		fz_pixmap* pixmap = fz_new_pixmap(m_ctx, fz_device_rgb(m_ctx), renderWidth, renderHeight, nullptr, 1);
+		pixmap = fz_new_pixmap(m_ctx, fz_device_rgb(m_ctx), renderWidth, renderHeight, nullptr, 1);
 		fz_clear_pixmap_with_value(m_ctx, pixmap, 0xff);
 
-		// 渲染页面
+		// 创建渲染设备
 		fz_matrix ctm = fz_scale(scale, scale);
-		fz_device* dev = fz_new_draw_device(m_ctx, ctm, pixmap);
+		dev = fz_new_draw_device(m_ctx, ctm, pixmap);
 		fz_run_page(m_ctx, page, dev, fz_identity, nullptr);
 		fz_close_device(m_ctx, dev);
-		fz_drop_device(m_ctx, dev);
 
 		// 创建DIB用于打印
 		BITMAPINFO bmi = { 0 };
@@ -5952,7 +5961,7 @@ void CXiaoGongPDFDlg::PrintSinglePage(CDC& dcPrint, int pageNum, int horRes, int
 
 		// 创建DIB位图
 		BYTE* pbBits = nullptr;
-		HBITMAP hBitmap = CreateDIBSection(dcPrint.GetSafeHdc(), &bmi, DIB_RGB_COLORS, (void**)&pbBits, NULL, 0);
+		hBitmap = CreateDIBSection(dcPrint.GetSafeHdc(), &bmi, DIB_RGB_COLORS, (void**)&pbBits, NULL, 0);
 
 		if (hBitmap && pbBits)
 		{
@@ -5982,15 +5991,33 @@ void CXiaoGongPDFDlg::PrintSinglePage(CDC& dcPrint, int pageNum, int horRes, int
 				&memDC, 0, 0, renderWidth, renderHeight, SRCCOPY);
 
 			memDC.SelectObject(oldBitmap);
-			DeleteObject(hBitmap);
 		}
-
-		// 清理资源
-		fz_drop_pixmap(m_ctx, pixmap);
-		fz_drop_page(m_ctx, page);
 	}
 
-	// 结束当前页
+	fz_catch(m_ctx)
+	{
+		// 先获取错误消息
+		const char* msg = fz_caught_message(m_ctx);
+		CString strMsg;
+		if (msg)
+			strMsg = CString(msg);  // 直接构造，自动转换编码
+
+		TRACE(_T("PrintSinglePage error for page %d: %s\n"), pageNum, strMsg);
+		// 或者用 TRACE 的宽字符版本
+		// TRACE(L"PrintSinglePage error for page %d: %S\n", pageNum, msg);
+	}
+
+	// 统一清理资源（无论成功还是失败都会执行）
+	if (dev)
+		fz_drop_device(m_ctx, dev);
+	if (pixmap)
+		fz_drop_pixmap(m_ctx, pixmap);
+	if (page)
+		fz_drop_page(m_ctx, page);
+	if (hBitmap)
+		DeleteObject(hBitmap);
+
+	// 结束当前页（即使出错也要结束，否则打印机状态错乱）
 	dcPrint.EndPage();
 }
 
@@ -6938,15 +6965,18 @@ void CXiaoGongPDFDlg::SearchPDF(const CString& keyword, bool caseSensitive)
 
 	// 将CString转换为UTF-8
 	int utf8Len = WideCharToMultiByte(CP_UTF8, 0, keyword, -1, NULL, 0, NULL, NULL);
-	char* utf8Keyword = new char[utf8Len];
-	WideCharToMultiByte(CP_UTF8, 0, keyword, -1, utf8Keyword, utf8Len, NULL, NULL);
+	
+	// 原来方式容易泄露，需要手动delete char* utf8Keyword = new char[utf8Len]; 离开作用于时，会自动释放
+	std::vector<char> utf8Keyword(utf8Len);
+	
+	WideCharToMultiByte(CP_UTF8, 0, keyword, -1, utf8Keyword.data(), utf8Len, NULL, NULL);
 
 	// 如果不区分大小写，转换为小写
-	char* searchKeyword = utf8Keyword;
+	char* searchKeyword = utf8Keyword.data();
 	if (!caseSensitive)
 	{
 		searchKeyword = new char[utf8Len];
-		strcpy(searchKeyword, utf8Keyword);
+		strcpy(searchKeyword, utf8Keyword.data());
 		_strlwr_s(searchKeyword, utf8Len);  // 转换为小写
 	}
 
@@ -7010,9 +7040,9 @@ void CXiaoGongPDFDlg::SearchPDF(const CString& keyword, bool caseSensitive)
 	}
 
 	// 清理内存
-	if (!caseSensitive && searchKeyword != utf8Keyword)
+	if (!caseSensitive && searchKeyword != utf8Keyword.data())
 		delete[] searchKeyword;
-	delete[] utf8Keyword;
+
 
 	// 显示搜索结果
 	CString msg;
@@ -7339,6 +7369,7 @@ LRESULT CXiaoGongPDFDlg::OnPDFLoadComplete(WPARAM wParam, LPARAM lParam)
 	// 检查加载结果
 	if (!pParams->success)
 	{
+		CString errMsg = pParams->errorMsg;
 		delete pParams->pDoc;
 		delete pParams;
 		m_pLoadParams = nullptr;
@@ -7352,7 +7383,7 @@ LRESULT CXiaoGongPDFDlg::OnPDFLoadComplete(WPARAM wParam, LPARAM lParam)
 			m_pProgressDlg = nullptr;
 		}
 
-		MessageBox(pParams->errorMsg, _T("错误"), MB_OK | MB_ICONERROR);
+		MessageBox(errMsg, _T("错误"), MB_OK | MB_ICONERROR);
 		UpdateStatusBar();
 		return 0;
 	}
