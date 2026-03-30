@@ -7,6 +7,8 @@
 #include "ProgressDlg.h"
 #include "afxdialogex.h"
 #include <mupdf/fitz.h>
+#include <algorithm>
+#include <cmath>
 #include <vector>
 #include <WinUser.h>  // 添加这个头文件来获取 HTSCROLLBAR 定义
 #include <dwmapi.h>
@@ -15,6 +17,36 @@
 #ifdef _DEBUG
 #define new DEBUG_NEW
 #endif
+
+namespace
+{
+	struct QuadPointF
+	{
+		float x;
+		float y;
+	};
+
+	QuadPointF TransformPdfPointToBitmap(float x, float y, const fz_rect& bounds,
+		int rotation, float scale)
+	{
+		const float localX = x - bounds.x0;
+		const float localY = y - bounds.y0;
+		const float pageWidth = bounds.x1 - bounds.x0;
+		const float pageHeight = bounds.y1 - bounds.y0;
+
+		switch ((rotation % 360 + 360) % 360)
+		{
+		case 90:
+			return { (pageHeight - localY) * scale, localX * scale };
+		case 180:
+			return { (pageWidth - localX) * scale, (pageHeight - localY) * scale };
+		case 270:
+			return { localY * scale, (pageWidth - localX) * scale };
+		default:
+			return { localX * scale, localY * scale };
+		}
+	}
+}
 
 // ============================================================================
 // CPDFViewCtrl 实现（自定义PDF预览控件，支持滚动条）
@@ -383,6 +415,7 @@ CXiaoGongPDFDlg::~CXiaoGongPDFDlg()
 
 	// ★★★ 重要：清空对话框中的所有资源指针，防止 ResourceRelease() 重复释放
 	// 因为 CPDFDocument 的析构函数已经释放了这些资源
+	m_ctx = nullptr;
 	m_doc = nullptr;
 	m_currentPageObj = nullptr;
 	m_hCurrentBitmap = NULL;
@@ -462,6 +495,7 @@ void CXiaoGongPDFDlg::LoadDialogStateFromDocument(CPDFDocument* pDoc)
 	if (!pDoc)
 		return;
 
+	m_ctx = pDoc->GetContext();
 	m_doc = pDoc->GetDocument();
 	m_totalPages = pDoc->GetTotalPages();
 	m_currentPage = pDoc->GetCurrentPage();
@@ -479,6 +513,7 @@ void CXiaoGongPDFDlg::LoadDialogStateFromDocument(CPDFDocument* pDoc)
 	m_pageRotations = pDoc->GetPageRotations();
 	m_hCurrentBitmap = pDoc->TransferCurrentBitmap();
 	m_hPanPageBitmap = pDoc->TransferPanPageBitmap();
+	RebuildSearchMatchPageIndex();
 }
 
 void CXiaoGongPDFDlg::CloseProgressDialog()
@@ -613,13 +648,18 @@ void CXiaoGongPDFDlg::ScrollToMatchVisible(int pageNum, fz_quad quad)
 	if (!m_continuousScrollMode) return;
 	if (pageNum < 0 || pageNum >= (int)m_pageYPositions.size() || pageNum >= (int)m_pageHeights.size())
 		return;
+
+	fz_rect bounds;
+	if (!TryGetPageBaseBounds(pageNum, bounds))
+		return;
+
 	CRect viewRect;
 	m_pdfView.GetClientRect(&viewRect);
-	float minY = min(min(quad.ul.y, quad.ur.y), min(quad.ll.y, quad.lr.y));
-	float maxY = max(max(quad.ul.y, quad.ur.y), max(quad.ll.y, quad.lr.y));
+	CRect matchRect = TransformQuadToBitmapRect(quad, bounds,
+		GetPageRotation(pageNum), m_uniformScale);
 	int pageYPos = m_pageYPositions[pageNum];
-	int matchTop = pageYPos + (int)(minY * m_uniformScale);
-	int matchBottom = pageYPos + (int)(maxY * m_uniformScale);
+	int matchTop = pageYPos + matchRect.top;
+	int matchBottom = pageYPos + matchRect.bottom;
 	int visibleTop = m_scrollPosition;
 	int visibleBottom = m_scrollPosition + viewRect.Height();
 	int margin = 50;
@@ -970,29 +1010,7 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	m_statusBar.SetWindowText(_T(""));
 	m_statusBar.ShowWindow(SW_HIDE);
 
-	// 初始化MuPDF上下文（多文档共享）
-	if (!m_ctx) {
-		m_ctx = fz_new_context(nullptr, nullptr, FZ_STORE_UNLIMITED);
-		if (!m_ctx) {
-			MessageBox(_T("无法创建MuPDF上下文"), _T("错误"), MB_OK | MB_ICONERROR);
-			return FALSE;
-		}
-#ifdef _DEBUG
-		TRACE(_T("MuPDF上下文已创建: %p\n"), m_ctx);
-#endif
-		// 注册文档类型
-		fz_try(m_ctx)
-		{
-			fz_register_document_handlers(m_ctx);
-		}
-		fz_catch(m_ctx)
-		{
-			MessageBox(_T("无法注册文档处理器"), _T("错误"), MB_OK | MB_ICONERROR);
-			fz_drop_context(m_ctx);
-			m_ctx = nullptr;
-			return FALSE;
-		}
-	}
+	// MuPDF context 由每个 CPDFDocument 自己持有，主对话框只引用当前活动文档。
 
 	// 初始化工具栏
 	InitializeToolbar();
@@ -3399,6 +3417,7 @@ void CXiaoGongPDFDlg::OnEnChangeEditSearch()
 	{
 		// 清除搜索结果
 		m_searchMatches.clear();
+		m_searchMatchesByPage.clear();
 		m_currentMatchIndex = -1;
 
 		// 清除状态栏显示
@@ -4557,7 +4576,7 @@ bool CXiaoGongPDFDlg::OpenPDFInNewTab(const CString& filePath)
 	m_pProgressDlg = pProgressDlg;  // 保存指针，供后续使用
 
 	// 创建新文档对象
-	CPDFDocument* newDoc = new CPDFDocument(m_ctx);
+	CPDFDocument* newDoc = new CPDFDocument();
 
 	// 创建加载参数
 	m_pLoadParams = new PDFLoadParams();
@@ -4749,6 +4768,7 @@ void CXiaoGongPDFDlg::CloseDocument(int index)
 		if (doc)
 			SaveDialogStateToDocument(doc);
 
+		m_ctx = nullptr;
 		m_doc = nullptr;
 		m_totalPages = 0;
 		m_currentPage = 0;
@@ -4760,6 +4780,7 @@ void CXiaoGongPDFDlg::CloseDocument(int index)
 		m_canDrag = false;
 		m_pageRotations.clear();
 		m_searchMatches.clear();
+		m_searchMatchesByPage.clear();
 		m_currentMatchIndex = -1;
 		m_searchKeyword.Empty();
 	}
@@ -4783,6 +4804,7 @@ void CXiaoGongPDFDlg::CloseDocument(int index)
 		{
 			// 没有文档了，重置状态
 			m_activeDocIndex = -1;
+			m_ctx = nullptr;
 			m_doc = nullptr;
 			m_totalPages = 0;
 			m_currentPage = 0;
@@ -5057,19 +5079,10 @@ void CXiaoGongPDFDlg::ResourceRelease()
 		if (kv.second.hBitmap) DeleteObject(kv.second.hBitmap);
 	m_thumbnailCache.clear();
 
-	// MuPDF 对象
-	if (m_currentPageObj) {
-		fz_drop_page(m_ctx, m_currentPageObj);
-		m_currentPageObj = nullptr;
-	}
-	if (m_doc) {
-		fz_drop_document(m_ctx, m_doc);
-		m_doc = nullptr;
-	}
-	if (m_ctx) {
-		fz_drop_context(m_ctx);
-		m_ctx = nullptr;
-	}
+	// 活动文档对象由 CPDFDocument 持有并释放，这里只清空非 owning 引用。
+	m_currentPageObj = nullptr;
+	m_doc = nullptr;
+	m_ctx = nullptr;
 
 	// 页面缓存 - 使用 ClearPageCache() 统一清理
 	ClearPageCache();
@@ -6303,8 +6316,23 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 	// 填充背景色（灰色）
 	memDC.FillSolidRect(0, 0, viewWidth, viewHeight, RGB(128, 128, 128));
 
+	auto firstVisibleIt = std::lower_bound(m_pageYPositions.begin(), m_pageYPositions.end(), visibleTop);
+	int firstVisibleIndex = (int)(firstVisibleIt - m_pageYPositions.begin());
+	if (firstVisibleIndex > 0)
+	{
+		--firstVisibleIndex;
+	}
+
+	auto lastVisibleIt = std::lower_bound(m_pageYPositions.begin(), m_pageYPositions.end(),
+		visibleBottom + PAGE_SPACING);
+	int lastVisibleIndex = (int)(lastVisibleIt - m_pageYPositions.begin());
+	if (lastVisibleIndex < m_totalPages - 1)
+	{
+		++lastVisibleIndex;
+	}
+
 	// 渲染所有可见的页面
-	for (int i = 0; i < m_totalPages; i++)
+	for (int i = firstVisibleIndex; i < m_totalPages && i <= lastVisibleIndex; ++i)
 	{
 		int pageY = m_pageYPositions[i];
 		int pageHeight = m_pageHeights[i];
@@ -6317,6 +6345,8 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 		float pageWidthF = 0.0f;
 		float pageHeightF = 0.0f;
 		bool gotBounds = pActiveDoc->GetPageBounds(i, pageWidthF, pageHeightF);
+		fz_rect baseBounds = { 0 };
+		bool gotBaseBounds = pActiveDoc->GetPageBaseBounds(i, baseBounds);
 		int width = gotBounds ? (int)(pageWidthF * m_uniformScale) : 0;
 		int height = gotBounds ? (int)(pageHeightF * m_uniformScale) : 0;
 
@@ -6324,16 +6354,9 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 		auto& pageCache = pActiveDoc->GetPageCache();
 		auto& cacheOrder = pActiveDoc->GetCacheOrder();
 		HBITMAP hBitmap = nullptr;
-
-		bool pageHasHighlights = false;
-		for (const auto& match : m_searchMatches)
-		{
-			if (match.pageNumber == i)
-			{
-				pageHasHighlights = true;
-				break;
-			}
-		}
+		const std::vector<int>* pMatchIndices =
+			(i >= 0 && i < (int)m_searchMatchesByPage.size()) ? &m_searchMatchesByPage[i] : nullptr;
+		bool pageHasHighlights = pMatchIndices && !pMatchIndices->empty();
 
 		if (gotBounds)
 		{
@@ -6351,10 +6374,10 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 		}
 
 		fz_page* page = nullptr;
-		fz_rect bounds = { 0 };
+		fz_rect bounds = baseBounds;
 		bool renderFailed = false;
 
-		if (!hBitmap || pageHasHighlights || !gotBounds)
+		if (!hBitmap || !gotBounds || !gotBaseBounds)
 		{
 			fz_try(m_ctx)
 			{
@@ -6363,6 +6386,7 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 					fz_throw(m_ctx, FZ_ERROR_GENERIC, "Failed to load page");
 
 				bounds = fz_bound_page(m_ctx, page);
+				gotBaseBounds = true;
 
 				if (!gotBounds)
 				{
@@ -6500,43 +6524,25 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 
 		memDC.BitBlt(destX, destY, width, height, &pageDC, 0, 0, SRCCOPY);
 
-		if (pageHasHighlights && page)
+		if (pageHasHighlights && pMatchIndices && gotBaseBounds)
 		{
-			float origPageHeight = bounds.y1 - bounds.y0;
-
-			for (size_t matchIdx = 0; matchIdx < m_searchMatches.size(); matchIdx++)
+			for (int matchIdx : *pMatchIndices)
 			{
-				if (m_searchMatches[matchIdx].pageNumber != i)
+				CRect highlightRect = TransformQuadToBitmapRect(
+					m_searchMatches[matchIdx].quad, bounds, rotation, m_uniformScale);
+				highlightRect.OffsetRect(destX, destY);
+				if (highlightRect.IsRectEmpty() || highlightRect.Width() <= 0 || highlightRect.Height() <= 0)
+				{
 					continue;
-
-				fz_quad quad = m_searchMatches[matchIdx].quad;
-				float minX = min(min(quad.ul.x, quad.ur.x), min(quad.ll.x, quad.lr.x));
-				float maxX = max(max(quad.ul.x, quad.ur.x), max(quad.ll.x, quad.lr.x));
-				float minY = min(min(quad.ul.y, quad.ur.y), min(quad.ll.y, quad.lr.y));
-				float maxY = max(max(quad.ul.y, quad.ur.y), max(quad.ll.y, quad.lr.y));
+				}
 
 #ifdef _DEBUG
-				TRACE(_T("  quad corners: ul=(%.1f,%.1f) ur=(%.1f,%.1f) ll=(%.1f,%.1f) lr=(%.1f,%.1f)\n"),
-					quad.ul.x, quad.ul.y, quad.ur.x, quad.ur.y,
-					quad.ll.x, quad.ll.y, quad.lr.x, quad.lr.y);
+				TRACE(_T("Page %d, Match %d: rect=(%d,%d,%d,%d), rotation=%d, scale=%.3f\n"),
+					i, matchIdx, highlightRect.left, highlightRect.top,
+					highlightRect.right, highlightRect.bottom, rotation, m_uniformScale);
 #endif
 
-				int x1 = destX + (int)((minX - bounds.x0) * m_uniformScale);
-				int y1 = destY + (int)(minY * m_uniformScale);
-				int x2 = destX + (int)((maxX - bounds.x0) * m_uniformScale);
-				int y2 = destY + (int)(maxY * m_uniformScale);
-
-				CRect highlightRect(x1, y1, x2, y2);
-
-#ifdef _DEBUG
-				TRACE(_T("Page %d, Match %d: destX=%d, destY=%d, scale=%.3f, origH=%.1f\n"),
-					i, (int)matchIdx, destX, destY, m_uniformScale, origPageHeight);
-				TRACE(_T("  quad: minX=%.1f, maxX=%.1f, minY=%.1f, maxY=%.1f\n"),
-					minX, maxX, minY, maxY);
-				TRACE(_T("  rect: (%d,%d,%d,%d)\n"), x1, y1, x2, y2);
-#endif
-
-				COLORREF fillColor = ((int)matchIdx == m_currentMatchIndex) ? RGB(255, 150, 0) : RGB(255, 200, 0);
+				COLORREF fillColor = (matchIdx == m_currentMatchIndex) ? RGB(255, 150, 0) : RGB(255, 200, 0);
 
 				CDC tempDC;
 				tempDC.CreateCompatibleDC(&memDC);
@@ -6548,7 +6554,7 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 				BLENDFUNCTION bf;
 				bf.BlendOp = AC_SRC_OVER;
 				bf.BlendFlags = 0;
-				bf.SourceConstantAlpha = ((int)matchIdx == m_currentMatchIndex) ? 200 : 180;
+				bf.SourceConstantAlpha = (matchIdx == m_currentMatchIndex) ? 200 : 180;
 				bf.AlphaFormat = 0;
 				memDC.AlphaBlend(highlightRect.left, highlightRect.top,
 					highlightRect.Width(), highlightRect.Height(),
@@ -6572,8 +6578,8 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 	// 将内存DC中的位图分离并保存
 	memDC.SelectObject(pOldBmp);
 
-	// 创建位图的副本
-	HBITMAP hNewBitmap = (HBITMAP)CopyImage(bmp.GetSafeHandle(), IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
+	// 直接接管离屏位图句柄，避免整屏 CopyImage 带来的额外拷贝。
+	HBITMAP hNewBitmap = (HBITMAP)bmp.Detach();
 
 	// ★★★ 先设置新位图到控件，再删除旧位图，避免快速拖动时出现闪白
 	if (hNewBitmap)
@@ -6605,7 +6611,7 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 	else
 	{
 		// 创建失败，保持原有位图
-		TRACE(_T("RenderVisiblePages: CopyImage failed\n"));
+		TRACE(_T("RenderVisiblePages: detach bitmap failed\n"));
 	}
 
 #ifdef _DEBUG
@@ -7037,15 +7043,83 @@ int CXiaoGongPDFDlg::GetPageAtPosition(int yPos)
 void CXiaoGongPDFDlg::ClearSearchResults()
 {
 	m_searchMatches.clear();
+	m_searchMatchesByPage.clear();
 	m_currentMatchIndex = -1;
 	m_searchKeyword.Empty();
 
-	// 刷新当前页面以移除高亮
 	if (m_doc && m_currentPage >= 0)
 	{
-		// ★★★ 使用FALSE参数避免擦除背景，减少高刷新率显示器上的闪烁
-		m_pdfView.Invalidate(FALSE);
+		if (m_continuousScrollMode)
+		{
+			RenderVisiblePages();
+		}
+		else
+		{
+			RenderPage(m_currentPage);
+		}
 	}
+}
+
+void CXiaoGongPDFDlg::RebuildSearchMatchPageIndex()
+{
+	m_searchMatchesByPage.clear();
+	if (m_totalPages <= 0)
+	{
+		return;
+	}
+
+	m_searchMatchesByPage.resize(m_totalPages);
+	for (size_t i = 0; i < m_searchMatches.size(); ++i)
+	{
+		int pageNumber = m_searchMatches[i].pageNumber;
+		if (pageNumber >= 0 && pageNumber < m_totalPages)
+		{
+			m_searchMatchesByPage[pageNumber].push_back((int)i);
+		}
+	}
+}
+
+bool CXiaoGongPDFDlg::TryGetPageBaseBounds(int pageNumber, fz_rect& outBounds) const
+{
+	CPDFDocument* pDoc = const_cast<CXiaoGongPDFDlg*>(this)->GetActiveDocument();
+	if (pDoc && pDoc->GetPageBaseBounds(pageNumber, outBounds))
+	{
+		return true;
+	}
+
+	if (pageNumber == m_currentPage && m_currentPageObj && m_ctx)
+	{
+		outBounds = fz_bound_page(m_ctx, m_currentPageObj);
+		return true;
+	}
+
+	return false;
+}
+
+CRect CXiaoGongPDFDlg::TransformQuadToBitmapRect(const fz_quad& quad, const fz_rect& bounds,
+	int rotation, float scale) const
+{
+	const QuadPointF points[] = {
+		TransformPdfPointToBitmap(quad.ul.x, quad.ul.y, bounds, rotation, scale),
+		TransformPdfPointToBitmap(quad.ur.x, quad.ur.y, bounds, rotation, scale),
+		TransformPdfPointToBitmap(quad.ll.x, quad.ll.y, bounds, rotation, scale),
+		TransformPdfPointToBitmap(quad.lr.x, quad.lr.y, bounds, rotation, scale)
+	};
+
+	float minX = points[0].x;
+	float maxX = points[0].x;
+	float minY = points[0].y;
+	float maxY = points[0].y;
+	for (int i = 1; i < _countof(points); ++i)
+	{
+		minX = min(minX, points[i].x);
+		maxX = max(maxX, points[i].x);
+		minY = min(minY, points[i].y);
+		maxY = max(maxY, points[i].y);
+	}
+
+	return CRect((int)std::floor(minX), (int)std::floor(minY),
+		(int)std::ceil(maxX), (int)std::ceil(maxY));
 }
 
 // 搜索PDF文档
@@ -7073,11 +7147,12 @@ void CXiaoGongPDFDlg::SearchPDF(const CString& keyword, bool caseSensitive)
 	WideCharToMultiByte(CP_UTF8, 0, keyword, -1, utf8Keyword.data(), utf8Len, NULL, NULL);
 
 	// 如果不区分大小写，转换为小写
+	std::vector<char> foldedKeyword;
 	char* searchKeyword = utf8Keyword.data();
 	if (!caseSensitive)
 	{
-		searchKeyword = new char[utf8Len];
-		strcpy(searchKeyword, utf8Keyword.data());
+		foldedKeyword = utf8Keyword;
+		searchKeyword = foldedKeyword.data();
 		_strlwr_s(searchKeyword, utf8Len);  // 转换为小写
 	}
 
@@ -7140,10 +7215,7 @@ void CXiaoGongPDFDlg::SearchPDF(const CString& keyword, bool caseSensitive)
 			fz_drop_page(m_ctx, page);
 	}
 
-	// 清理内存
-	if (!caseSensitive && searchKeyword != utf8Keyword.data())
-		delete[] searchKeyword;
-
+	RebuildSearchMatchPageIndex();
 
 	// 显示搜索结果
 	CString msg;
@@ -7155,6 +7227,7 @@ void CXiaoGongPDFDlg::SearchPDF(const CString& keyword, bool caseSensitive)
 		// 跳转到第一个匹配项
 		m_currentMatchIndex = 0;
 		GoToPage(m_searchMatches[0].pageNumber);
+		ScrollToMatchVisible(m_searchMatches[0].pageNumber, m_searchMatches[0].quad);
 	}
 	else
 	{
@@ -7240,11 +7313,10 @@ void CXiaoGongPDFDlg::OnBtnPrevMatch()
 // 将PDF坐标转换为位图坐标
 CRect CXiaoGongPDFDlg::TransformQuadToScreen(const fz_quad& quad, int pageNumber)
 {
-	if (!m_currentPageObj)
+	fz_rect bounds;
+	if (!TryGetPageBaseBounds(pageNumber, bounds))
 		return CRect(0, 0, 0, 0);
 
-	// 获取页面大小
-	fz_rect bounds = fz_bound_page(m_ctx, m_currentPageObj);
 	float origPageWidth = bounds.x1 - bounds.x0;
 	float origPageHeight = bounds.y1 - bounds.y0;
 
@@ -7271,12 +7343,12 @@ CRect CXiaoGongPDFDlg::TransformQuadToScreen(const fz_quad& quad, int pageNumber
 	switch (m_zoomMode)
 	{
 	case ZOOM_FIT_WIDTH:
-		scale = viewWidth / effectivePageWidth * 0.95f;
+		scale = effectivePageWidth > 0.0f ? viewWidth / effectivePageWidth * 0.95f : 1.0f;
 		break;
 	case ZOOM_FIT_PAGE:
 	{
-		float scaleX = viewWidth / effectivePageWidth;
-		float scaleY = viewHeight / effectivePageHeight;
+		float scaleX = effectivePageWidth > 0.0f ? viewWidth / effectivePageWidth : 1.0f;
+		float scaleY = effectivePageHeight > 0.0f ? viewHeight / effectivePageHeight : 1.0f;
 		scale = min(scaleX, scaleY) * 0.95f;
 	}
 	break;
@@ -7285,8 +7357,8 @@ CRect CXiaoGongPDFDlg::TransformQuadToScreen(const fz_quad& quad, int pageNumber
 		break;
 	default:
 	{
-		float scaleX = viewWidth / effectivePageWidth;
-		float scaleY = viewHeight / effectivePageHeight;
+		float scaleX = effectivePageWidth > 0.0f ? viewWidth / effectivePageWidth : 1.0f;
+		float scaleY = effectivePageHeight > 0.0f ? viewHeight / effectivePageHeight : 1.0f;
 		scale = min(scaleX, scaleY) * 0.95f;
 	}
 	}
@@ -7322,60 +7394,36 @@ CRect CXiaoGongPDFDlg::TransformQuadToScreen(const fz_quad& quad, int pageNumber
 		offsetY = 0;
 	}
 
-	// 转换quad坐标（PDF坐标系 -> 位图坐标系）
-	// PDF坐标原点在左下，Y轴向上；位图坐标原点在左上，Y轴向下
-	// 使用quad的四个角来确定矩形范围
-	float minX = min(min(quad.ul.x, quad.ur.x), min(quad.ll.x, quad.lr.x));
-	float maxX = max(max(quad.ul.x, quad.ur.x), max(quad.ll.x, quad.lr.x));
-	float minY = min(min(quad.ul.y, quad.ur.y), min(quad.ll.y, quad.lr.y));
-	float maxY = max(max(quad.ul.y, quad.ur.y), max(quad.ll.y, quad.lr.y));
-
-	// ★★★ 转换到位图坐标（在原始页面坐标系中）
-	// ★★★ 修复：MuPDF返回的quad坐标是相对于页面bounds的绝对坐标，需要减去bounds.x0
-	// 且Y轴变换应使用bounds.y1（PDF坐标系的顶部）而非origPageHeight
-	int x1 = (int)((minX - bounds.x0) * scale);
-	int y1 = (int)(minY * scale);
-	int x2 = (int)((maxX - bounds.x0) * scale);
-	int y2 = (int)(maxY * scale);
-
-	// ★★★ TODO: 如果有旋转，需要对坐标应用旋转变换
-	// 目前暂不支持旋转页面的搜索高亮，需要实现坐标旋转变换
-
-	// ★★★ 添加偏移量
-	x1 += offsetX;
-	y1 += offsetY;
-	x2 += offsetX;
-	y2 += offsetY;
+	CRect rect = TransformQuadToBitmapRect(quad, bounds, rotation, scale);
+	rect.OffsetRect(offsetX, offsetY);
 
 #ifdef _DEBUG
-	TRACE(_T("TransformQuadToScreen: quad=(%f,%f,%f,%f) -> rect=(%d,%d,%d,%d), offset=(%d,%d), scale=%.2f\n"),
-		minX, minY, maxX, maxY, x1, y1, x2, y2, offsetX, offsetY, scale);
+	TRACE(_T("TransformQuadToScreen: rect=(%d,%d,%d,%d), offset=(%d,%d), scale=%.2f, rotation=%d\n"),
+		rect.left, rect.top, rect.right, rect.bottom, offsetX, offsetY, scale, rotation);
 #endif
 
-	return CRect(x1, y1, x2, y2);
+	return rect;
 }
 
 // 高亮显示搜索匹配项
 void CXiaoGongPDFDlg::HighlightSearchMatches(CDC* pDC, int pageNumber)
 {
-	if (m_searchMatches.empty() || !pDC)
+	if (m_searchMatches.empty() || !pDC ||
+		pageNumber < 0 || pageNumber >= (int)m_searchMatchesByPage.size())
 		return;
 
 #ifdef _DEBUG
-	TRACE(_T("HighlightSearchMatches: pageNumber=%d, matchCount=%d\n"), pageNumber, (int)m_searchMatches.size());
+	TRACE(_T("HighlightSearchMatches: pageNumber=%d, matchCount=%d\n"),
+		pageNumber, (int)m_searchMatchesByPage[pageNumber].size());
 #endif
 
-	// 遍历所有匹配项
-	for (size_t i = 0; i < m_searchMatches.size(); i++)
+	for (int matchIndex : m_searchMatchesByPage[pageNumber])
 	{
-		if (m_searchMatches[i].pageNumber != pageNumber)
-			continue;
-
 		// 将PDF坐标转换为位图坐标
-		CRect highlightRect = TransformQuadToScreen(m_searchMatches[i].quad, pageNumber);
+		CRect highlightRect = TransformQuadToScreen(m_searchMatches[matchIndex].quad, pageNumber);
 
 #ifdef _DEBUG
-		TRACE(_T("Match %d: rect=(%d,%d,%d,%d)\n"), (int)i,
+		TRACE(_T("Match %d: rect=(%d,%d,%d,%d)\n"), matchIndex,
 			highlightRect.left, highlightRect.top, highlightRect.right, highlightRect.bottom);
 #endif
 
@@ -7385,7 +7433,7 @@ void CXiaoGongPDFDlg::HighlightSearchMatches(CDC* pDC, int pageNumber)
 
 		// 选择颜色
 		COLORREF fillColor;
-		if ((int)i == m_currentMatchIndex)
+		if (matchIndex == m_currentMatchIndex)
 		{
 			// 当前匹配项用亮橙色
 			fillColor = RGB(255, 150, 0);
@@ -7405,11 +7453,11 @@ void CXiaoGongPDFDlg::HighlightSearchMatches(CDC* pDC, int pageNumber)
 	tempDC.FillSolidRect(0, 0, highlightRect.Width(), highlightRect.Height(), fillColor);
 
 	// 使用AlphaBlend提高不透明度
-	BLENDFUNCTION bf;
-	bf.BlendOp = AC_SRC_OVER;
-	bf.BlendFlags = 0;
-	bf.SourceConstantAlpha = ((int)i == m_currentMatchIndex) ? 200 : 180;
-	bf.AlphaFormat = 0;
+		BLENDFUNCTION bf;
+		bf.BlendOp = AC_SRC_OVER;
+		bf.BlendFlags = 0;
+		bf.SourceConstantAlpha = (matchIndex == m_currentMatchIndex) ? 200 : 180;
+		bf.AlphaFormat = 0;
 	pDC->AlphaBlend(highlightRect.left, highlightRect.top,
 		highlightRect.Width(), highlightRect.Height(),
 		&tempDC, 0, 0, highlightRect.Width(), highlightRect.Height(), bf);
@@ -7480,10 +7528,6 @@ LRESULT CXiaoGongPDFDlg::OnPDFLoadComplete(WPARAM wParam, LPARAM lParam)
 	// 加载成功，添加到文档列表
 	m_documents.push_back(pParams->pDoc);
 	int newIndex = (int)m_documents.size() - 1;
-
-	// ★★★ P1优化：文档加载完成后立即构建页面尺寸缓存，
-	// 避免后续 CalculatePagePositions 每次调用时全量 fz_load_page
-	pParams->pDoc->CachePageseBounds();
 
 	// 添加标签页
 	if (m_tabCtrl.GetSafeHwnd())

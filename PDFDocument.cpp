@@ -1,18 +1,21 @@
-// PDFDocument.cpp: PDF文档数据封装类实现
-
 #include "pch.h"
 #include "PDFDocument.h"
 
-CPDFDocument::CPDFDocument(fz_context* ctx)
-	: m_ctx(ctx)
+namespace
+{
+	constexpr size_t MUPDF_STORE_LIMIT = 256u * 1024u * 1024u;
+}
+
+CPDFDocument::CPDFDocument()
+	: m_ctx(nullptr)
 	, m_doc(nullptr)
 	, m_currentPageObj(nullptr)
 	, m_totalPages(0)
 	, m_currentPage(0)
 	, m_zoom(1.0f)
-	, m_zoomMode(ZOOM_CUSTOM)  // 初始使用固定缩放，不随窗口大小变化
-	, m_customZoom(1.0f)       // 初始缩放比例 1:1（PDF 原始尺寸）
-	, m_uniformScale(0.0f)     // 0表示未初始化，首次显示时按 m_customZoom 设置
+	, m_zoomMode(ZOOM_CUSTOM)
+	, m_customZoom(1.0f)
+	, m_uniformScale(0.0f)
 	, m_panOffset(0, 0)
 	, m_canDrag(false)
 	, m_hPanPageBitmap(NULL)
@@ -24,188 +27,129 @@ CPDFDocument::CPDFDocument(fz_context* ctx)
 	, m_pageBoundsCached(false)
 	, m_maxPageWidth(0.0f)
 {
+	m_ctx = fz_new_context(nullptr, nullptr, MUPDF_STORE_LIMIT);
+	if (m_ctx)
+	{
+		fz_try(m_ctx)
+		{
+			fz_register_document_handlers(m_ctx);
+		}
+		fz_catch(m_ctx)
+		{
+			fz_drop_context(m_ctx);
+			m_ctx = nullptr;
+		}
+	}
 }
 
 CPDFDocument::~CPDFDocument()
 {
-#ifdef _DEBUG
-	TRACE(_T("~CPDFDocument() 析构函数，m_doc=%p, m_ctx=%p\n"), m_doc, m_ctx);
-#endif
 	CloseDocument();
-#ifdef _DEBUG
-	TRACE(_T("~CPDFDocument() 完成\n"));
-#endif
+	if (m_ctx)
+	{
+		fz_drop_context(m_ctx);
+		m_ctx = nullptr;
+	}
 }
 
 bool CPDFDocument::OpenDocument(const char* filename)
 {
-#ifdef _DEBUG
-	TRACE(_T("CPDFDocument::OpenDocument() 开始\n"));
-	TRACE(_T("filename指针: %p\n"), filename);
-	if (filename) {
-		// 将UTF-8转换为Unicode用于调试输出
-		int wlen = MultiByteToWideChar(CP_UTF8, 0, filename, -1, NULL, 0);
-		if (wlen > 0) {
-			wchar_t* wstr = new wchar_t[wlen];
-			MultiByteToWideChar(CP_UTF8, 0, filename, -1, wstr, wlen);
-			TRACE(_T("文件路径(UTF-8转Unicode): %s\n"), wstr);
-			delete[] wstr;
-		}
-		TRACE(_T("文件路径(原始UTF-8): %s\n"), filename);  // 这会显示乱码，但能看到长度
-	}
-#endif
-
-	if (!m_ctx || !filename) {
-#ifdef _DEBUG
-		TRACE(_T("错误: m_ctx或filename为空! m_ctx=%p, filename=%p\n"), m_ctx, filename);
-#endif
+	if (!m_ctx || !filename)
+	{
 		return false;
 	}
 
-	// 关闭现有文档
 	CloseDocument();
 
-	// 打开新文档
 	fz_try(m_ctx)
 	{
-#ifdef _DEBUG
-		TRACE(_T("调用 fz_open_document...\n"));
-#endif
 		m_doc = fz_open_document(m_ctx, filename);
-#ifdef _DEBUG
-		TRACE(_T("fz_open_document 返回: %p\n"), m_doc);
-#endif
 		m_totalPages = fz_count_pages(m_ctx, m_doc);
-#ifdef _DEBUG
-		TRACE(_T("总页数: %d\n"), m_totalPages);
-#endif
 	}
 	fz_catch(m_ctx)
 	{
-#ifdef _DEBUG
-		const char* errMsg = fz_caught_message(m_ctx);
-		TRACE(_T("fz_open_document 异常: %s\n"), errMsg);
-#endif
 		m_doc = nullptr;
+		m_totalPages = 0;
 		return false;
 	}
 
-	if (m_doc && m_totalPages > 0) {
-		// 将 UTF-8 char* 正确转换为 CString (Unicode)
-		int wideLength = MultiByteToWideChar(CP_UTF8, 0, filename, -1, NULL, 0);
-		if (wideLength > 0) {
-			wchar_t* wideStr = new wchar_t[wideLength];
-			MultiByteToWideChar(CP_UTF8, 0, filename, -1, wideStr, wideLength);
-			m_filePath = CString(wideStr);
-			delete[] wideStr;
-		}
-		m_currentPage = 0;
-		m_zoomMode = ZOOM_CUSTOM;
-		m_customZoom = 1.0f;
-		m_zoom = 1.0f;
-		m_panOffset = CPoint(0, 0);
-		m_canDrag = false;
-		m_scrollPosition = 0;
-		return true;
+	if (!m_doc || m_totalPages <= 0)
+	{
+		CloseDocument();
+		return false;
 	}
 
-	return false;
+	int wideLength = MultiByteToWideChar(CP_UTF8, 0, filename, -1, NULL, 0);
+	if (wideLength > 0)
+	{
+		std::vector<wchar_t> widePath(wideLength);
+		MultiByteToWideChar(CP_UTF8, 0, filename, -1, widePath.data(), wideLength);
+		m_filePath = CString(widePath.data());
+	}
+
+	m_currentPage = 0;
+	m_zoomMode = ZOOM_CUSTOM;
+	m_customZoom = 1.0f;
+	m_zoom = 1.0f;
+	m_uniformScale = 0.0f;
+	m_panOffset = CPoint(0, 0);
+	m_canDrag = false;
+	m_scrollPosition = 0;
+
+	CachePageseBounds();
+	return true;
 }
 
 void CPDFDocument::CloseDocument()
 {
-#ifdef _DEBUG
-	TRACE(_T("CloseDocument() 开始，m_doc=%p, m_ctx=%p\n"), m_doc, m_ctx);
-#endif
-
-	// 清理当前页面
 	CleanupCurrentPage();
-#ifdef _DEBUG
-	TRACE(_T("CleanupCurrentPage() 完成\n"));
-#endif
-
-	// 清理位图
 	CleanupBitmap();
 	CleanupPanPageBitmap();
-#ifdef _DEBUG
-	TRACE(_T("清理位图完成\n"));
-#endif
-
-	// 清理缩略图
 	CleanupThumbnails();
-#ifdef _DEBUG
-	TRACE(_T("CleanupThumbnails() 完成\n"));
-#endif
-
-	// 清理页面缓存
 	ClearPageCache();
-#ifdef _DEBUG
-	TRACE(_T("ClearPageCache() 完成\n"));
-#endif
 
-	// 释放文档
-	// 注意：必须在m_ctx有效时释放文档，否则会内存泄漏
-	if (m_doc) {
-#ifdef _DEBUG
-		TRACE(_T("准备释放 m_doc=%p, m_ctx=%p\n"), m_doc, m_ctx);
-#endif
-		if (m_ctx) {
-#ifdef _DEBUG
-			TRACE(_T("调用 fz_drop_document...\n"));
-#endif
-			fz_drop_document(m_ctx, m_doc);
-#ifdef _DEBUG
-			TRACE(_T("fz_drop_document 完成\n"));
-#endif
-		}
-		else {
-#ifdef _DEBUG
-			TRACE(_T("警告: m_ctx 为 nullptr，无法释放 m_doc!\n"));
-#endif
-		}
-		m_doc = nullptr;
+	if (m_doc && m_ctx)
+	{
+		fz_drop_document(m_ctx, m_doc);
 	}
-	else {
-#ifdef _DEBUG
-		TRACE(_T("m_doc 已经是 nullptr，无需释放\n"));
-#endif
-	}
+	m_doc = nullptr;
 
-	// 重置状态
 	m_filePath.Empty();
 	m_totalPages = 0;
 	m_currentPage = 0;
 	m_zoom = 1.0f;
 	m_zoomMode = ZOOM_CUSTOM;
 	m_customZoom = 1.0f;
+	m_uniformScale = 0.0f;
 	m_panOffset = CPoint(0, 0);
 	m_canDrag = false;
 	m_pageRotations.clear();
 	m_pageZoomStates.clear();
 	m_scrollPosition = 0;
+	m_searchMatches.clear();
+	m_currentMatchIndex = -1;
+	m_searchKeyword.Empty();
 
-	// 清除页面尺寸缓存
 	m_pageBoundsCache.clear();
 	m_pageBoundsCached = false;
 	m_maxPageWidth = 0.0f;
-
-#ifdef _DEBUG
-	TRACE(_T("CloseDocument() 完成\n"));
-#endif
 }
 
 CString CPDFDocument::GetFileName() const
 {
-	if (m_filePath.IsEmpty()) {
+	if (m_filePath.IsEmpty())
+	{
 		return _T("");
 	}
 
 	int pos = m_filePath.ReverseFind(_T('\\'));
-	if (pos == -1) {
+	if (pos == -1)
+	{
 		pos = m_filePath.ReverseFind(_T('/'));
 	}
 
-	if (pos != -1) {
+	if (pos != -1)
+	{
 		return m_filePath.Mid(pos + 1);
 	}
 
@@ -214,21 +158,21 @@ CString CPDFDocument::GetFileName() const
 
 void CPDFDocument::SetCurrentPage(int page)
 {
-	if (page >= 0 && page < m_totalPages) {
+	if (page >= 0 && page < m_totalPages)
+	{
 		m_currentPage = page;
 	}
 }
 
 void CPDFDocument::LoadPageObject(int pageNumber)
 {
-	if (!m_doc || !m_ctx) {
+	if (!m_doc || !m_ctx)
+	{
 		return;
 	}
 
-	// 清理旧的页面对象
 	CleanupCurrentPage();
 
-	// 加载新页面
 	fz_try(m_ctx)
 	{
 		m_currentPageObj = fz_load_page(m_ctx, m_doc, pageNumber);
@@ -241,7 +185,8 @@ void CPDFDocument::LoadPageObject(int pageNumber)
 
 void CPDFDocument::CleanupCurrentPage()
 {
-	if (m_currentPageObj && m_ctx) {
+	if (m_currentPageObj && m_ctx)
+	{
 		fz_drop_page(m_ctx, m_currentPageObj);
 		m_currentPageObj = nullptr;
 	}
@@ -251,7 +196,8 @@ void CPDFDocument::SetZoom(float zoom, ZoomMode mode)
 {
 	m_zoom = zoom;
 	m_zoomMode = mode;
-	if (mode == ZOOM_CUSTOM) {
+	if (mode == ZOOM_CUSTOM)
+	{
 		m_customZoom = zoom;
 	}
 }
@@ -259,44 +205,119 @@ void CPDFDocument::SetZoom(float zoom, ZoomMode mode)
 int CPDFDocument::GetPageRotation(int pageNumber)
 {
 	auto it = m_pageRotations.find(pageNumber);
-	if (it != m_pageRotations.end()) {
+	if (it != m_pageRotations.end())
+	{
 		return it->second;
 	}
-	return 0;  // 默认无旋转
+	return 0;
 }
 
 void CPDFDocument::SetPageRotation(int pageNumber, int rotation)
 {
-	// 规范化旋转角度到 0, 90, 180, 270
-	rotation = rotation % 360;
-	if (rotation < 0) rotation += 360;
+	rotation %= 360;
+	if (rotation < 0)
+	{
+		rotation += 360;
+	}
 
 	m_pageRotations[pageNumber] = rotation;
-
-	// ★★★ 旋转会改变页面宽高，使缓存失效，下次 CalculatePagePositions 时重建
 	InvalidatePagesBoundsCache();
+}
+
+void CPDFDocument::InvalidatePagesBoundsCache()
+{
+	RecalculateMaxPageWidth();
+}
+
+bool CPDFDocument::GetPageBounds(int pageNumber, float& outWidth, float& outHeight) const
+{
+	if (!m_pageBoundsCached ||
+		pageNumber < 0 ||
+		pageNumber >= (int)m_pageBoundsCache.size())
+	{
+		return false;
+	}
+
+	const PageBounds& cached = m_pageBoundsCache[pageNumber];
+	outWidth = cached.width;
+	outHeight = cached.height;
+
+	auto rotationIt = m_pageRotations.find(pageNumber);
+	int rotation = (rotationIt != m_pageRotations.end()) ? rotationIt->second : 0;
+	if (rotation == 90 || rotation == 270)
+	{
+		float temp = outWidth;
+		outWidth = outHeight;
+		outHeight = temp;
+	}
+
+	return true;
+}
+
+bool CPDFDocument::GetPageBaseBounds(int pageNumber, fz_rect& outBounds) const
+{
+	if (!m_pageBoundsCached ||
+		pageNumber < 0 ||
+		pageNumber >= (int)m_pageBoundsCache.size())
+	{
+		return false;
+	}
+
+	const PageBounds& cached = m_pageBoundsCache[pageNumber];
+	outBounds.x0 = cached.x0;
+	outBounds.y0 = cached.y0;
+	outBounds.x1 = cached.x0 + cached.width;
+	outBounds.y1 = cached.y0 + cached.height;
+	return true;
+}
+
+void CPDFDocument::RecalculateMaxPageWidth()
+{
+	m_maxPageWidth = 0.0f;
+	if (!m_pageBoundsCached)
+	{
+		return;
+	}
+
+	for (int i = 0; i < (int)m_pageBoundsCache.size(); ++i)
+	{
+		float width = m_pageBoundsCache[i].width;
+		float height = m_pageBoundsCache[i].height;
+		int rotation = GetPageRotation(i);
+		if (rotation == 90 || rotation == 270)
+		{
+			float temp = width;
+			width = height;
+			height = temp;
+		}
+
+		if (width > m_maxPageWidth)
+		{
+			m_maxPageWidth = width;
+		}
+	}
 }
 
 void CPDFDocument::SaveCurrentPageZoomState()
 {
-	PageZoomState state(m_zoomMode, m_customZoom, m_panOffset);
-	m_pageZoomStates[m_currentPage] = state;
+	m_pageZoomStates[m_currentPage] = PageZoomState(m_zoomMode, m_customZoom, m_panOffset);
 }
 
 void CPDFDocument::RestorePageZoomState(int pageNumber)
 {
 	auto it = m_pageZoomStates.find(pageNumber);
-	if (it != m_pageZoomStates.end()) {
+	if (it != m_pageZoomStates.end())
+	{
 		m_zoomMode = it->second.zoomMode;
 		m_customZoom = it->second.customZoom;
 		m_panOffset = it->second.panOffset;
-
-		if (m_zoomMode == ZOOM_CUSTOM) {
+		if (m_zoomMode == ZOOM_CUSTOM)
+		{
 			m_zoom = m_customZoom;
 		}
 	}
-	else {
-		// 使用默认状态
+	else
+	{
 		m_zoomMode = ZOOM_CUSTOM;
 		m_customZoom = 1.0f;
 		m_panOffset = CPoint(0, 0);
@@ -306,17 +327,19 @@ void CPDFDocument::RestorePageZoomState(int pageNumber)
 PageZoomState CPDFDocument::GetPageZoomState(int pageNumber)
 {
 	auto it = m_pageZoomStates.find(pageNumber);
-	if (it != m_pageZoomStates.end()) {
+	if (it != m_pageZoomStates.end())
+	{
 		return it->second;
 	}
-	return PageZoomState();  // 返回默认状态
+	return PageZoomState();
 }
 
 void CPDFDocument::CleanupThumbnails()
 {
-	// 删除所有缩略图位图
-	for (auto& pair : m_thumbnailCache) {
-		if (pair.second.hBitmap) {
+	for (auto& pair : m_thumbnailCache)
+	{
+		if (pair.second.hBitmap)
+		{
 			DeleteObject(pair.second.hBitmap);
 		}
 	}
@@ -326,17 +349,16 @@ void CPDFDocument::CleanupThumbnails()
 
 void CPDFDocument::LimitThumbnailCache(int maxCount)
 {
-	// 使用LRU算法限制缩略图缓存数量，防止大文件内存爆炸
 	while ((int)m_thumbnailCache.size() > maxCount && !m_thumbnailCacheOrder.empty())
 	{
-		// 删除最久未使用的缩略图（列表尾部）
 		int oldestPage = m_thumbnailCacheOrder.back();
 		m_thumbnailCacheOrder.pop_back();
 
 		auto it = m_thumbnailCache.find(oldestPage);
 		if (it != m_thumbnailCache.end())
 		{
-			if (it->second.hBitmap) {
+			if (it->second.hBitmap)
+			{
 				DeleteObject(it->second.hBitmap);
 			}
 			m_thumbnailCache.erase(it);
@@ -346,18 +368,16 @@ void CPDFDocument::LimitThumbnailCache(int maxCount)
 
 void CPDFDocument::UpdateThumbnailLRU(int pageNumber)
 {
-	// 更新LRU顺序：将指定页面移到列表前面（最近使用）
-	// 先从列表中移除该页面（如果存在）
 	m_thumbnailCacheOrder.remove(pageNumber);
-	// 再添加到列表前面
 	m_thumbnailCacheOrder.push_front(pageNumber);
 }
 
 void CPDFDocument::ClearPageCache()
 {
-	// 删除所有缓存的位图
-	for (auto& pair : m_pageCache) {
-		if (pair.second.hBitmap) {
+	for (auto& pair : m_pageCache)
+	{
+		if (pair.second.hBitmap)
+		{
 			DeleteObject(pair.second.hBitmap);
 		}
 	}
@@ -367,19 +387,17 @@ void CPDFDocument::ClearPageCache()
 
 void CPDFDocument::SetCurrentBitmap(HBITMAP hBitmap)
 {
-	// 先清理旧位图
 	CleanupBitmap();
 	m_hCurrentBitmap = hBitmap;
 }
 
 void CPDFDocument::CleanupBitmap()
 {
-	if (m_hCurrentBitmap) {
-		// 验证是否是有效的 GDI 对象
+	if (m_hCurrentBitmap)
+	{
 		BITMAP bm;
 		if (::GetObject(m_hCurrentBitmap, sizeof(BITMAP), &bm) != 0)
 		{
-			// 是有效的位图，可以安全删除
 			DeleteObject(m_hCurrentBitmap);
 		}
 		m_hCurrentBitmap = NULL;
@@ -388,7 +406,6 @@ void CPDFDocument::CleanupBitmap()
 
 HBITMAP CPDFDocument::TransferCurrentBitmap()
 {
-	// 转移位图所有权，不删除位图
 	HBITMAP hBitmap = m_hCurrentBitmap;
 	m_hCurrentBitmap = NULL;
 	return hBitmap;
@@ -396,14 +413,14 @@ HBITMAP CPDFDocument::TransferCurrentBitmap()
 
 void CPDFDocument::SetPanPageBitmap(HBITMAP hBitmap)
 {
-	// 先清理旧位图
 	CleanupPanPageBitmap();
 	m_hPanPageBitmap = hBitmap;
 }
 
 void CPDFDocument::CleanupPanPageBitmap()
 {
-	if (m_hPanPageBitmap) {
+	if (m_hPanPageBitmap)
+	{
 		DeleteObject(m_hPanPageBitmap);
 		m_hPanPageBitmap = NULL;
 	}
@@ -411,23 +428,22 @@ void CPDFDocument::CleanupPanPageBitmap()
 
 HBITMAP CPDFDocument::TransferPanPageBitmap()
 {
-	// 转移拖拽位图所有权，不删除位图
 	HBITMAP hBitmap = m_hPanPageBitmap;
 	m_hPanPageBitmap = NULL;
 	return hBitmap;
 }
 
-// ★★★ P1 优化：打开文档后一次性缓存所有页面尺寸，避免 CalculatePagePositions 每次全量调用 fz_load_page
 bool CPDFDocument::CachePageseBounds()
 {
 	if (!m_doc || !m_ctx || m_totalPages <= 0)
+	{
 		return false;
+	}
 
 	m_pageBoundsCache.clear();
 	m_pageBoundsCache.resize(m_totalPages);
-	m_maxPageWidth = 0.0f;
 
-	for (int i = 0; i < m_totalPages; i++)
+	for (int i = 0; i < m_totalPages; ++i)
 	{
 		fz_page* page = nullptr;
 		fz_try(m_ctx)
@@ -436,23 +452,10 @@ bool CPDFDocument::CachePageseBounds()
 			if (page)
 			{
 				fz_rect bounds = fz_bound_page(m_ctx, page);
-				float w = bounds.x1 - bounds.x0;
-				float h = bounds.y1 - bounds.y0;
-
-				// 根据当前旋转角度调整宽高
-				int rotation = GetPageRotation(i);
-				if (rotation == 90 || rotation == 270)
-				{
-					float temp = w;
-					w = h;
-					h = temp;
-				}
-
-				m_pageBoundsCache[i].width  = w;
-				m_pageBoundsCache[i].height = h;
-
-				if (w > m_maxPageWidth)
-					m_maxPageWidth = w;
+				m_pageBoundsCache[i].x0 = bounds.x0;
+				m_pageBoundsCache[i].y0 = bounds.y0;
+				m_pageBoundsCache[i].width = bounds.x1 - bounds.x0;
+				m_pageBoundsCache[i].height = bounds.y1 - bounds.y0;
 
 				fz_drop_page(m_ctx, page);
 				page = nullptr;
@@ -465,33 +468,15 @@ bool CPDFDocument::CachePageseBounds()
 				fz_drop_page(m_ctx, page);
 				page = nullptr;
 			}
-			// 出错时使用默认值，不中断整个缓存过程
-			m_pageBoundsCache[i].width  = 595.0f;  // A4 默认宽度（PDF 点单位）
+
+			m_pageBoundsCache[i].x0 = 0.0f;
+			m_pageBoundsCache[i].y0 = 0.0f;
+			m_pageBoundsCache[i].width = 595.0f;
 			m_pageBoundsCache[i].height = 842.0f;
 		}
 	}
 
 	m_pageBoundsCached = true;
-	return true;
-}
-
-void CPDFDocument::InvalidatePagesBoundsCache()
-{
-	// 旋转或文档变化时调用，使缓存失效
-	m_pageBoundsCached = false;
-	m_pageBoundsCache.clear();
-	m_maxPageWidth = 0.0f;
-}
-
-bool CPDFDocument::GetPageBounds(int pageNumber, float& outWidth, float& outHeight) const
-{
-	if (!m_pageBoundsCached ||
-		pageNumber < 0 ||
-		pageNumber >= (int)m_pageBoundsCache.size())
-	{
-		return false;
-	}
-	outWidth  = m_pageBoundsCache[pageNumber].width;
-	outHeight = m_pageBoundsCache[pageNumber].height;
+	RecalculateMaxPageWidth();
 	return true;
 }

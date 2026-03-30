@@ -292,6 +292,7 @@ private:
 
 	// 搜索相关成员变量
 	std::vector<SearchMatch> m_searchMatches;  // 所有搜索匹配项
+	std::vector<std::vector<int>> m_searchMatchesByPage;  // 按页索引搜索结果
 	int m_currentMatchIndex;                    // 当前匹配项索引 (-1表示无匹配)
 	CString m_searchKeyword;                    // 当前搜索关键词
 	bool m_searchCaseSensitive;                 // 是否区分大小写
@@ -444,6 +445,10 @@ protected:
     void ClearSearchResults();  // 清除搜索结果
     void HighlightSearchMatches(CDC* pDC, int pageNumber);  // 高亮显示搜索匹配项
     CRect TransformQuadToScreen(const fz_quad& quad, int pageNumber);  // 将PDF坐标转换为屏幕坐标
+	void RebuildSearchMatchPageIndex();
+	bool TryGetPageBaseBounds(int pageNumber, fz_rect& outBounds) const;
+	CRect TransformQuadToBitmapRect(const fz_quad& quad, const fz_rect& bounds,
+		int rotation, float scale) const;
     afx_msg void OnBtnFind();  // 查找按钮点击事件
     afx_msg void OnBtnNextMatch();  // 下一个匹配按钮点击事件
     afx_msg void OnBtnPrevMatch();  // 上一个匹配按钮点击事件

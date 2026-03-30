@@ -1,93 +1,102 @@
-// PDFDocument.h: PDF文档数据封装类
-// 用于多文档标签页支持，封装单个PDF文档的所有数据和状态
-
 #pragma once
-#include <mupdf/fitz.h>
+
 #include <afxwin.h>
+#include <mupdf/fitz.h>
+
+#include <list>
 #include <map>
 #include <vector>
-#include <list>
-#include "SearchTypes.h"  // 包含搜索相关类型定义
 
-// 缩略图信息结构
+#include "SearchTypes.h"
+
 struct ThumbnailInfo {
 	HBITMAP hBitmap;
 	int pageNumber;
 	bool isCurrentPage;
 };
 
-// 缩放模式枚举
 enum ZoomMode { ZOOM_CUSTOM, ZOOM_FIT_WIDTH, ZOOM_FIT_PAGE };
 
-// 页面缩放状态
 struct PageZoomState {
-	ZoomMode zoomMode;   // 缩放模式
-	float customZoom;    // 自定义缩放比例
-	CPoint panOffset;    // 平移偏移量（拖拽位置）
+	ZoomMode zoomMode;
+	float customZoom;
+	CPoint panOffset;
 
-	PageZoomState() : zoomMode(ZOOM_CUSTOM), customZoom(1.0f), panOffset(0, 0) {}
+	PageZoomState()
+		: zoomMode(ZOOM_CUSTOM)
+		, customZoom(1.0f)
+		, panOffset(0, 0)
+	{
+	}
+
 	PageZoomState(ZoomMode mode, float zoom, CPoint offset)
-		: zoomMode(mode), customZoom(zoom), panOffset(offset) {}
+		: zoomMode(mode)
+		, customZoom(zoom)
+		, panOffset(offset)
+	{
+	}
 };
 
-// 页面缓存键
 struct PageCacheKey {
 	int pageNumber;
 	int width;
 	int height;
-	int rotation;  // ★★★ 添加旋转角度，解决旋转后缓存混乱问题
+	int rotation;
 
 	bool operator<(const PageCacheKey& other) const noexcept {
 		if (pageNumber != other.pageNumber) return pageNumber < other.pageNumber;
 		if (width != other.width) return width < other.width;
 		if (height != other.height) return height < other.height;
-		return rotation < other.rotation;  // ★★★ 包含旋转角度比较
+		return rotation < other.rotation;
 	}
 
 	bool operator==(const PageCacheKey& other) const noexcept {
 		return pageNumber == other.pageNumber &&
 			width == other.width &&
 			height == other.height &&
-			rotation == other.rotation;  // ★★★ 包含旋转角度比较
+			rotation == other.rotation;
 	}
 };
 
-// 页面缓存项
 struct PageCacheItem {
 	HBITMAP hBitmap;
 };
 
-// 页面原始尺寸（PDF 点单位，已计入旋转）
 struct PageBounds {
-	float width;   // 经旋转后的宽度
-	float height;  // 经旋转后的高度
+	float x0;
+	float y0;
+	float width;
+	float height;
+
+	PageBounds()
+		: x0(0.0f)
+		, y0(0.0f)
+		, width(0.0f)
+		, height(0.0f)
+	{
+	}
 };
 
-// PDF文档类 - 封装单个PDF文档的所有数据
 class CPDFDocument
 {
 public:
-	CPDFDocument(fz_context* ctx);
+	CPDFDocument();
 	~CPDFDocument();
 
-	// 文档操作
 	bool OpenDocument(const char* filename);
 	void CloseDocument();
 	bool IsOpen() const { return m_doc != nullptr; }
 
-	// 文件信息
 	CString GetFilePath() const { return m_filePath; }
 	CString GetFileName() const;
 	int GetTotalPages() const { return m_totalPages; }
 
-	// 页面操作
 	int GetCurrentPage() const { return m_currentPage; }
 	void SetCurrentPage(int page);
 	fz_page* GetCurrentPageObj() const { return m_currentPageObj; }
 	void LoadPageObject(int pageNumber);
 	void CleanupCurrentPage();
 
-	// 缩放操作
 	ZoomMode GetZoomMode() const { return m_zoomMode; }
 	float GetZoom() const { return m_zoom; }
 	float GetCustomZoom() const { return m_customZoom; }
@@ -95,70 +104,57 @@ public:
 	float GetUniformScale() const { return m_uniformScale; }
 	void SetUniformScale(float scale) { m_uniformScale = scale; }
 
-	// 旋转操作
 	int GetPageRotation(int pageNumber);
 	void SetPageRotation(int pageNumber, int rotation);
 	std::map<int, int>& GetPageRotations() { return m_pageRotations; }
 
-	// 页面尺寸缓存（避免每次 CalculatePagePositions 都调用 fz_load_page）
-	bool CachePageseBounds();                          // 在打开文档后缓存所有页面尺寸
-	void InvalidatePagesBoundsCache();                 // 旋转后使缓存失效，触发下一次重算
+	bool CachePageseBounds();
+	void InvalidatePagesBoundsCache();
 	bool HasPageBoundsCache() const { return m_pageBoundsCached; }
-	// 获取指定页面经旋转后的尺寸；若缓存无效则返回 false
 	bool GetPageBounds(int pageNumber, float& outWidth, float& outHeight) const;
-	// 获取所有页面中最大宽度（已计旋转）
+	bool GetPageBaseBounds(int pageNumber, fz_rect& outBounds) const;
 	float GetMaxPageWidth() const { return m_maxPageWidth; }
 
-	// 页面状态管理
 	void SaveCurrentPageZoomState();
 	void RestorePageZoomState(int pageNumber);
 	PageZoomState GetPageZoomState(int pageNumber);
 
-	// 拖拽平移
 	CPoint GetPanOffset() const { return m_panOffset; }
 	void SetPanOffset(CPoint offset) { m_panOffset = offset; }
 	void ResetPanOffset() { m_panOffset = CPoint(0, 0); }
 	bool GetCanDrag() const { return m_canDrag; }
 	void SetCanDrag(bool canDrag) { m_canDrag = canDrag; }
 
-	// 滚动位置
 	int GetScrollPosition() const { return m_scrollPosition; }
 	void SetScrollPosition(int pos) { m_scrollPosition = pos; }
 
-
-	// 缩略图管理
 	std::map<int, ThumbnailInfo>& GetThumbnailCache() { return m_thumbnailCache; }
-	std::list<int>& GetThumbnailCacheOrder() { return m_thumbnailCacheOrder; }  // 获取LRU顺序列表
+	std::list<int>& GetThumbnailCacheOrder() { return m_thumbnailCacheOrder; }
 	void CleanupThumbnails();
-	void LimitThumbnailCache(int maxCount = 100);  // 限制缩略图缓存大小（LRU）
-	void UpdateThumbnailLRU(int pageNumber);  // 更新缩略图LRU顺序
+	void LimitThumbnailCache(int maxCount = 100);
+	void UpdateThumbnailLRU(int pageNumber);
 
-
-	// 页面缓存管理
 	std::map<PageCacheKey, PageCacheItem>& GetPageCache() { return m_pageCache; }
 	std::list<PageCacheKey>& GetCacheOrder() { return m_cacheOrder; }
 	void ClearPageCache();
 
-	// 位图管理
 	HBITMAP GetCurrentBitmap() const { return m_hCurrentBitmap; }
 	void SetCurrentBitmap(HBITMAP hBitmap);
 	void CleanupBitmap();
-	HBITMAP TransferCurrentBitmap();  // 转移位图所有权（不删除）
+	HBITMAP TransferCurrentBitmap();
 	HBITMAP GetPanPageBitmap() const { return m_hPanPageBitmap; }
 	void SetPanPageBitmap(HBITMAP hBitmap);
 	void CleanupPanPageBitmap();
-	HBITMAP TransferPanPageBitmap();  // 转移拖拽位图所有权（不删除）
+	HBITMAP TransferPanPageBitmap();
 
-	// MuPDF对象访问
+	fz_context* GetContext() const { return m_ctx; }
 	fz_document* GetDocument() const { return m_doc; }
 
-	// 缩略图尺寸
 	int GetThumbnailPicWidth() const { return m_thumbnailPicWidth; }
 	void SetThumbnailPicWidth(int width) { m_thumbnailPicWidth = width; }
 	int GetThumbnailPicHeight() const { return m_thumbnailPicHeight; }
 	void SetThumbnailPicHeight(int height) { m_thumbnailPicHeight = height; }
 
-	// 搜索信息管理
 	std::vector<SearchMatch>& GetSearchMatches() { return m_searchMatches; }
 	void SetSearchMatches(const std::vector<SearchMatch>& matches) { m_searchMatches = matches; }
 	int GetCurrentMatchIndex() const { return m_currentMatchIndex; }
@@ -167,57 +163,47 @@ public:
 	void SetSearchKeyword(const CString& keyword) { m_searchKeyword = keyword; }
 
 private:
-	// MuPDF对象（不拥有ctx，由外部管理）
+	void RecalculateMaxPageWidth();
+
 	fz_context* m_ctx;
 	fz_document* m_doc;
 	fz_page* m_currentPageObj;
 
-	// 文件信息
 	CString m_filePath;
 	int m_totalPages;
 
-	// 页面状态
 	int m_currentPage;
 	float m_zoom;
 	ZoomMode m_zoomMode;
 	float m_customZoom;
-	float m_uniformScale;  // 连续滚动模式下的实际渲染缩放比例（保存以便切换标签页时恢复）
+	float m_uniformScale;
 
-	// 旋转状态
-	std::map<int, int> m_pageRotations;  // 每页的旋转角度
+	std::map<int, int> m_pageRotations;
 
-	// 页面尺寸缓存（打开文档时一次性构建，旋转时失效）
-	std::vector<PageBounds> m_pageBoundsCache;  // 每页经旋转后的宽高
-	bool m_pageBoundsCached;                    // 缓存是否有效
-	float m_maxPageWidth;                       // 所有页面中最大宽度（用于 CalculatePagePositions）
+	std::vector<PageBounds> m_pageBoundsCache;
+	bool m_pageBoundsCached;
+	float m_maxPageWidth;
 
-	// 页面缩放状态
 	std::map<int, PageZoomState> m_pageZoomStates;
 
-	// 拖拽平移
 	CPoint m_panOffset;
 	bool m_canDrag;
 	HBITMAP m_hPanPageBitmap;
 
-	// 缩略图数据
 	std::map<int, ThumbnailInfo> m_thumbnailCache;
-	std::list<int> m_thumbnailCacheOrder;  // LRU顺序（最近使用的在前面）
+	std::list<int> m_thumbnailCacheOrder;
 	int m_thumbnailPicWidth;
 	int m_thumbnailPicHeight;
 
-	// 页面缓存
 	std::map<PageCacheKey, PageCacheItem> m_pageCache;
 	std::list<PageCacheKey> m_cacheOrder;
-	static const int CACHE_LIMIT = 50;  // 增加缓存大小以提升大文件性能
+	static const int CACHE_LIMIT = 50;
 
-	// 当前位图
 	HBITMAP m_hCurrentBitmap;
 
-	// 搜索信息
 	std::vector<SearchMatch> m_searchMatches;
 	int m_currentMatchIndex;
 	CString m_searchKeyword;
 
-	// 滚动位置
 	int m_scrollPosition;
 };
