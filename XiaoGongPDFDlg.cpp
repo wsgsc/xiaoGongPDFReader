@@ -343,6 +343,7 @@ CXiaoGongPDFDlg::CXiaoGongPDFDlg(CWnd* pParent /*=nullptr*/)
 	, m_searchCaseSensitive(false)  // 默认不区分大小写
 	, m_pendingResizeCx(0)          // ★★★ P1优化：防抖待处理宽度
 	, m_pendingResizeCy(0)          // ★★★ P1优化：防抖待处理高度
+	, m_lastResizeRenderTick(0)     // ★★★ 窗口拉伸过程中的节流重渲染时间戳
 {
 	m_hIcon = AfxGetApp()->LoadIcon(IDR_MAINFRAME);
 	m_highlightBrush.CreateSolidBrush(RGB(173, 216, 230));  // 浅蓝色
@@ -2396,26 +2397,36 @@ void CXiaoGongPDFDlg::OnTimer(UINT_PTR nIDEvent)
 		// 确认文档仍然有效
 		if (m_doc && m_currentPage >= 0)
 		{
-			if (m_continuousScrollMode)
-			{
-				// 连续滚动模式：重新计算页面布局，保持用户设定的缩放比例不变
-				CalculatePagePositions(false);
-				UpdateScrollBar();
-				RenderVisiblePages();
-			}
-			else
-			{
-				// 分页模式：重置滚动位置，重新渲染页面
-				UpdateScrollBar();
-				m_scrollPosition = 0;
-				m_scrollPositionH = 0;
-				RenderPage(m_currentPage);
-			}
+			PerformResizeRender();
 		}
 		return;
 	}
 
 	CDialogEx::OnTimer(nIDEvent);
+}
+
+void CXiaoGongPDFDlg::PerformResizeRender()
+{
+	if (!m_doc || m_currentPage < 0)
+	{
+		return;
+	}
+
+	if (m_continuousScrollMode)
+	{
+		CalculatePagePositions(false);
+		UpdateScrollBar();
+		RenderVisiblePages();
+	}
+	else
+	{
+		UpdateScrollBar();
+		m_scrollPosition = 0;
+		m_scrollPositionH = 0;
+		RenderPage(m_currentPage);
+	}
+
+	m_lastResizeRenderTick = GetTickCount64();
 }
 
 void CXiaoGongPDFDlg::CleanupThumbnails()
@@ -2576,6 +2587,8 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 #endif
 
 	CDialogEx::OnSize(nType, cx, cy);
+
+	bool doImmediateResizeRender = false;
 
 	// 全屏模式下不进行调整，已提前調整
 	if (m_isFullscreen && m_pdfView.GetSafeHwnd())
@@ -2818,10 +2831,23 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 			// 重置防抖定时器（每次 OnSize 都推迟 RESIZE_DEBOUNCE_MS 毫秒）
 			KillTimer(TIMER_ID_RESIZE_DEBOUNCE);
 			SetTimer(TIMER_ID_RESIZE_DEBOUNCE, RESIZE_DEBOUNCE_MS, NULL);
+
+			ULONGLONG currentTick = GetTickCount64();
+			if (nType == SIZE_MAXIMIZED ||
+				m_lastResizeRenderTick == 0 ||
+				currentTick - m_lastResizeRenderTick >= RESIZE_THROTTLE_MS)
+			{
+				doImmediateResizeRender = true;
+			}
 		}
 
 		// ★★★ 重新启用重绘，一次性刷新整个窗口（高刷新率显示器优化）
 		SetRedraw(TRUE);
+
+		if (doImmediateResizeRender)
+		{
+			PerformResizeRender();
+		}
 
 		// ★★★ 两步刷新策略：
 		// 第一步：只对主对话框自身触发 ERASE（OnEraseBkgnd 填 COLOR_3DFACE），
@@ -2832,7 +2858,7 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 
 		// ★★★ 确保PDF视图也立即重绘（应用居中等布局变化）
-		if (m_doc && m_currentPage >= 0)
+		if (m_doc && m_currentPage >= 0 && !doImmediateResizeRender)
 		{
 			// 使用RDW_UPDATENOW强制立即处理WM_PAINT消息
 			m_pdfView.RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE);
