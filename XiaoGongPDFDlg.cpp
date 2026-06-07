@@ -26,6 +26,12 @@ namespace
 		float y;
 	};
 
+	int ClampRenderDimension(float value)
+	{
+		const int dimension = static_cast<int>(value);
+		return (dimension > 0) ? dimension : 1;
+	}
+
 	QuadPointF TransformPdfPointToBitmap(float x, float y, const fz_rect& bounds,
 		int rotation, float scale)
 	{
@@ -319,6 +325,7 @@ CXiaoGongPDFDlg::CXiaoGongPDFDlg(CWnd* pParent /*=nullptr*/)
 	, m_documentMaxPageWidth(0.0f)  // ★★★ 初始化文档最大页面宽度
 	, m_documentUniformScale(1.0f)  // ★★★ 初始化文档统一缩放比例
 	, m_thumbnailVisible(false)  // 默认隐藏缩略图面板
+	, m_isUpdatingThumbnails(false)  // 初始化缩略图批量更新标记
 	, m_isDragging(false)       // 初始化拖拽状态
 	, m_panOffset(0, 0)         // 初始化平移偏移量
 	, m_hHandCursor(nullptr)    // 初始化手形光标
@@ -341,6 +348,13 @@ CXiaoGongPDFDlg::CXiaoGongPDFDlg(CWnd* pParent /*=nullptr*/)
 	, m_scrollbarDragStartPos(0)    // 初始化滚动条拖拽起始位置
 	, m_currentMatchIndex(-1)       // 初始化当前匹配项索引
 	, m_searchCaseSensitive(false)  // 默认不区分大小写
+	, m_pSearchThread(nullptr)      // 初始化搜索线程指针
+	, m_pSearchParams(nullptr)      // 初始化搜索参数
+	, m_isSearching(false)          // 初始化搜索状态
+	, m_isThumbnailSubclassed(false) // 初始化缩略图子类化状态
+	, m_lastThumbnailScrollTime(0)  // 初始化缩略图滚动时间
+	, m_lastThumbnailHighlightTime(0) // 初始化缩略图高亮时间
+	, m_isRenderingWheelZoom(false) // 初始化滚轮缩放重入标志
 	, m_pendingResizeCx(0)          // ★★★ P1优化：防抖待处理宽度
 	, m_pendingResizeCy(0)          // ★★★ P1优化：防抖待处理高度
 	, m_lastResizeRenderTick(0)     // ★★★ 窗口拉伸过程中的节流重渲染时间戳
@@ -365,6 +379,23 @@ CXiaoGongPDFDlg::~CXiaoGongPDFDlg()
 
 	// 析构仅做"纯资源"清理，不碰 UI
 	CleanupPendingLoad();
+
+	// 如果搜索线程还在运行，取消并等待
+	if (m_pSearchParams)
+		m_pSearchParams->cancelled = true;
+	// 等待搜索线程结束（超时2秒）
+	if (m_pSearchThread) {
+		DWORD result = ::WaitForSingleObject(m_pSearchThread->m_hThread, 2000);
+		if (result != WAIT_OBJECT_0) {
+			::TerminateThread(m_pSearchThread->m_hThread, 0);
+		}
+		delete m_pSearchThread;
+		m_pSearchThread = nullptr;
+	}
+	if (m_pSearchParams) {
+		delete m_pSearchParams;
+		m_pSearchParams = nullptr;
+	}
 
 	// ★★★ 重要：在删除文档对象之前，先释放主对话框持有的页面对象
 	// 页面对象持有对文档的引用，必须先释放才能让文档的引用计数归零
@@ -623,6 +654,78 @@ void CXiaoGongPDFDlg::CopyMuPDFPixelsToBuffer(fz_pixmap* pixmap, BYTE* pbBits, i
 		}
 }
 
+// 共用渲染函数：将 MuPDF 页面渲染为 HBITMAP，消除多处重复的渲染流水线
+HBITMAP CXiaoGongPDFDlg::RenderMuPDFPageToBitmap(fz_context* ctx, fz_page* page, float scale,
+	int rotation, HDC hDC, int& outWidth, int& outHeight)
+{
+	if (!ctx || !page || scale <= 0.0f)
+		return nullptr;
+
+	fz_pixmap* pixmap = nullptr;
+	fz_device* dev = nullptr;
+	HBITMAP hBitmap = nullptr;
+
+	fz_try(ctx)
+	{
+		fz_rect bounds = fz_bound_page(ctx, page);
+		float pageWidth = bounds.x1 - bounds.x0;
+		float pageHeight = bounds.y1 - bounds.y0;
+
+		int width = ClampRenderDimension(pageWidth * scale);
+		int height = ClampRenderDimension(pageHeight * scale);
+
+		pixmap = fz_new_pixmap(ctx, fz_device_rgb(ctx), width, height, nullptr, 1);
+		fz_clear_pixmap_with_value(ctx, pixmap, 0xff);
+
+		fz_matrix ctm = fz_scale(scale, scale);
+		dev = fz_new_draw_device(ctx, ctm, pixmap);
+		fz_run_page(ctx, page, dev, fz_identity, nullptr);
+		fz_close_device(ctx, dev);
+		fz_drop_device(ctx, dev);
+		dev = nullptr;
+
+		BITMAPINFO bmi = { 0 };
+		bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+		bmi.bmiHeader.biWidth = width;
+		bmi.bmiHeader.biHeight = -height;
+		bmi.bmiHeader.biPlanes = 1;
+		bmi.bmiHeader.biBitCount = 24;
+		bmi.bmiHeader.biCompression = BI_RGB;
+
+		BYTE* pbBits = nullptr;
+		hBitmap = CreateDIBSection(hDC, &bmi, DIB_RGB_COLORS, (void**)&pbBits, NULL, 0);
+
+		if (hBitmap && pbBits)
+		{
+			unsigned char* samples = fz_pixmap_samples(ctx, pixmap);
+			int stride = (width * 3 + 3) & ~3;
+			int n = fz_pixmap_components(ctx, pixmap);
+			for (int y = 0; y < height; y++)
+				for (int x = 0; x < width; x++) {
+					pbBits[y * stride + x * 3 + 0] = samples[(y * width + x) * n + 2];
+					pbBits[y * stride + x * 3 + 1] = samples[(y * width + x) * n + 1];
+					pbBits[y * stride + x * 3 + 2] = samples[(y * width + x) * n + 0];
+				}
+		}
+
+		outWidth = width;
+		outHeight = height;
+	}
+	fz_always(ctx)
+	{
+		if (pixmap) fz_drop_pixmap(ctx, pixmap);
+		if (dev) fz_drop_device(ctx, dev);
+	}
+	fz_catch(ctx)
+	{
+		if (hBitmap) { DeleteObject(hBitmap); hBitmap = nullptr; }
+		outWidth = 0;
+		outHeight = 0;
+	}
+
+	return hBitmap;
+}
+
 void CXiaoGongPDFDlg::SetControlsVisible(bool visible)
 {
 	int nShow = visible ? SW_SHOW : SW_HIDE;
@@ -732,6 +835,7 @@ BEGIN_MESSAGE_MAP(CXiaoGongPDFDlg, CDialogEx)
 	ON_MESSAGE(WM_USER + 102, &CXiaoGongPDFDlg::OnThumbnailScroll)  // 缩略图滚动事件
 	ON_MESSAGE(WM_USER + 103, &CXiaoGongPDFDlg::OnUpdateThumbnailHighlight)  // 延迟更新缩略图高亮
 	ON_MESSAGE(WM_PDF_LOAD_COMPLETE, &CXiaoGongPDFDlg::OnPDFLoadComplete)  // PDF后台加载完成
+	ON_MESSAGE(WM_SEARCH_COMPLETE, &CXiaoGongPDFDlg::OnSearchComplete)  // 搜索后台完成
 	ON_WM_TIMER()  // 定时器消息处理（用于去抖动缩略图高亮更新）
 	ON_WM_MOUSEWHEEL()
 	ON_BN_CLICKED(IDC_BTN_FIRST, &CXiaoGongPDFDlg::OnBtnFirst)
@@ -821,7 +925,7 @@ void CXiaoGongPDFDlg::onMenuSetDefault()
 	if (result == ERROR_SUCCESS)
 	{
 		RegSetValueEx(hKey, NULL, 0, REG_SZ, (BYTE*)_T("XiaoGongPDF.Document"),
-			(_tcslen(_T("XiaoGongPDF.Document")) + 1) * sizeof(TCHAR));
+			(DWORD)((_tcslen(_T("XiaoGongPDF.Document")) + 1) * sizeof(TCHAR)));
 		RegCloseKey(hKey);
 	}
 
@@ -831,7 +935,7 @@ void CXiaoGongPDFDlg::onMenuSetDefault()
 	if (result == ERROR_SUCCESS)
 	{
 		RegSetValueEx(hKey, NULL, 0, REG_SZ, (BYTE*)_T("PDF Document"),
-			(_tcslen(_T("PDF Document")) + 1) * sizeof(TCHAR));
+			(DWORD)((_tcslen(_T("PDF Document")) + 1) * sizeof(TCHAR)));
 		RegCloseKey(hKey);
 	}
 
@@ -887,7 +991,7 @@ void CXiaoGongPDFDlg::onMenuSetDefault()
 	if (result == ERROR_SUCCESS)
 	{
 		RegSetValueEx(hKey, _T(".pdf"), 0, REG_SZ, (BYTE*)_T("XiaoGongPDF.Document"),
-			(DWORD)((_tcslen(_T("XiaoGongPDF.Document")) + 1) * sizeof(TCHAR)));
+			(DWORD)((DWORD)((_tcslen(_T("XiaoGongPDF.Document")) + 1) * sizeof(TCHAR))));
 		RegCloseKey(hKey);
 	}
 
@@ -1211,6 +1315,7 @@ bool CXiaoGongPDFDlg::RenderPage(int pageNumber)
 	TRACE(_T("RenderPage() :  %d\n"), pageNumber);
 #endif
 
+	if (m_isSearching) return false;  // 搜索进行中，跳过渲染
 	if (!m_ctx || !m_doc || pageNumber < 0 || pageNumber >= m_totalPages)
 		return false;
 
@@ -1345,6 +1450,7 @@ bool CXiaoGongPDFDlg::RenderPage(int pageNumber)
 
 	fz_pixmap* pixmap = nullptr;
 	fz_device* dev = nullptr;
+	CDC* pDC = nullptr;  // 在 fz_try 前声明，fz_catch 中需要释放
 
 	fz_try(m_ctx)
 	{
@@ -1419,8 +1525,8 @@ bool CXiaoGongPDFDlg::RenderPage(int pageNumber)
 #endif
 
 		// ★★★ 创建pixmap：MuPDF总是按原始方向渲染，所以用原始页面尺寸
-		int width = (int)(origPageWidth * scale);
-		int height = (int)(origPageHeight * scale);
+		int width = ClampRenderDimension(origPageWidth * scale);
+		int height = ClampRenderDimension(origPageHeight * scale);
 		pixmap = fz_new_pixmap(m_ctx, fz_device_rgb(m_ctx), width, height, nullptr, 1);
 		fz_clear_pixmap_with_value(m_ctx, pixmap, 0xff);
 
@@ -1433,7 +1539,7 @@ bool CXiaoGongPDFDlg::RenderPage(int pageNumber)
 		dev = nullptr;
 
 		// 创建DIB位图
-		CDC* pDC = m_pdfView.GetDC();
+		pDC = m_pdfView.GetDC();
 		BYTE* pbBits = nullptr;
 		m_hCurrentBitmap = CreatePageDIBSection(width, height, pDC->GetSafeHdc(), &pbBits);
 
@@ -1625,6 +1731,8 @@ bool CXiaoGongPDFDlg::RenderPage(int pageNumber)
 		// 清理资源
 		if (dev) fz_drop_device(m_ctx, dev);
 		if (pixmap) fz_drop_pixmap(m_ctx, pixmap);
+		if (pDC) { m_pdfView.ReleaseDC(pDC); pDC = nullptr; }
+		CleanupCurrentPage();
 		CleanupBitmap();
 
 #ifdef _DEBUG
@@ -1748,17 +1856,19 @@ void CXiaoGongPDFDlg::InitializeThumbnailList()
 	}
 
 	// ★★★ 子类化缩略图列表控件以捕获滚动事件
-	static bool isSubclassed = false;
-	if (!isSubclassed && m_thumbnailList.GetSafeHwnd()) {
+	if (!m_isThumbnailSubclassed && m_thumbnailList.GetSafeHwnd()) {
 		::SetWindowLongPtr(m_thumbnailList.GetSafeHwnd(), GWLP_USERDATA, (LONG_PTR)this);
-		isSubclassed = true;
+		m_isThumbnailSubclassed = true;
 	}
 }
 
 bool CXiaoGongPDFDlg::RenderThumbnail(int pageNumber)
 {
 #ifdef _DEBUG
-	TRACE(_T("RenderThumbnail() :  %d\n"), pageNumber);
+	if (pageNumber < 10 || (pageNumber % 100) == 0)
+	{
+		TRACE(_T("RenderThumbnail() :  %d\n"), pageNumber);
+	}
 #endif
 
 	if (!m_ctx || !m_doc || pageNumber < 0 || pageNumber >= m_totalPages)
@@ -1828,8 +1938,9 @@ bool CXiaoGongPDFDlg::RenderThumbnail(int pageNumber)
 
 			// 计算缩放比例,保持宽度为220
 			thumbWidth = THUMBNAIL_WIDTH;
-			float scale = thumbWidth / pageWidth;
-			int pageThumbHeight = (int)(pageHeight * scale);
+			float safePageWidth = (pageWidth > 0.0f) ? pageWidth : 1.0f;
+			float scale = thumbWidth / safePageWidth;
+			int pageThumbHeight = ClampRenderDimension(pageHeight * scale);
 
 			// 使用统一的缩略图高度(取较大值以容纳所有页面)
 			// 第一次渲染时确定统一高度
@@ -1845,6 +1956,7 @@ bool CXiaoGongPDFDlg::RenderThumbnail(int pageNumber)
 			{
 				m_thumbnailPicHeight = thumbHeight;
 			}
+			thumbHeight = max(1, thumbHeight);
 
 			// 创建pixmap用于渲染PDF内容
 			pixmap = fz_new_pixmap(m_ctx, fz_device_rgb(m_ctx), thumbWidth, pageThumbHeight, nullptr, 1);
@@ -1948,6 +2060,13 @@ bool CXiaoGongPDFDlg::RenderThumbnail(int pageNumber)
 				}
 
 				// ★★★ 添加到文档对象的缓存（统一缓存管理）
+				auto oldThumbIt = docThumbnailCache.find(pageNumber);
+				if (oldThumbIt != docThumbnailCache.end() && oldThumbIt->second.hBitmap &&
+					oldThumbIt->second.hBitmap != hBitmap)
+				{
+					DeleteObject(oldThumbIt->second.hBitmap);
+				}
+
 				ThumbnailInfo info = { hBitmap, pageNumber, pageNumber == m_currentPage };
 				docThumbnailCache[pageNumber] = info;
 
@@ -1955,7 +2074,10 @@ bool CXiaoGongPDFDlg::RenderThumbnail(int pageNumber)
 				pDoc->UpdateThumbnailLRU(pageNumber);
 
 #ifdef _DEBUG
-				TRACE(_T("新渲染缩略图: 页面 %d, 尺寸 %d x %d\n"), pageNumber, thumbWidth, thumbHeight);
+				if (pageNumber < 10 || (pageNumber % 100) == 0)
+				{
+					TRACE(_T("新渲染缩略图: 页面 %d, 尺寸 %d x %d\n"), pageNumber, thumbWidth, thumbHeight);
+				}
 #endif
 			}
 			else
@@ -1989,6 +2111,16 @@ bool CXiaoGongPDFDlg::RenderThumbnail(int pageNumber)
 	// ★★★ 添加到列表控件 - 无论是使用缓存还是新渲染，都需要添加到ImageList
 	if (hBitmap && m_thumbnailList.GetSafeHwnd())
 	{
+		int itemIndex = -1;
+		for (int i = 0; i < m_thumbnailList.GetItemCount(); i++)
+		{
+			if (m_thumbnailList.GetItemData(i) == (DWORD_PTR)pageNumber)
+			{
+				itemIndex = i;
+				break;
+			}
+		}
+
 		// 获取或创建图片列表
 		CImageList* pImageList = m_thumbnailList.GetImageList(LVSIL_NORMAL);
 		if (!pImageList)
@@ -1999,7 +2131,7 @@ bool CXiaoGongPDFDlg::RenderThumbnail(int pageNumber)
 			{
 				thumbHeight = m_thumbnailPicHeight > 0 ? m_thumbnailPicHeight : 300;  // 默认高度
 			}
-			if (pImageList->Create(thumbWidth, thumbHeight, ILC_COLOR24, m_totalPages, 1))
+			if (pImageList->Create(thumbWidth, thumbHeight, ILC_COLOR32, m_totalPages, 1))
 			{
 				m_thumbnailList.SetImageList(pImageList, LVSIL_NORMAL);
 				pImageList->Detach();
@@ -2029,22 +2161,28 @@ bool CXiaoGongPDFDlg::RenderThumbnail(int pageNumber)
 
 		if (pImageList)
 		{
-			int imageIndex = pImageList->Add(CBitmap::FromHandle(hBitmap), RGB(0, 0, 0));
+			int imageIndex = -1;
+			auto imageIndexIt = m_thumbnailImageIndices.find(pageNumber);
+			if (imageIndexIt != m_thumbnailImageIndices.end() && imageIndexIt->second >= 0)
+			{
+				CBitmap* pBitmap = CBitmap::FromHandle(hBitmap);
+				if (pBitmap && pImageList->Replace(imageIndexIt->second, pBitmap, nullptr))
+				{
+					imageIndex = imageIndexIt->second;
+				}
+			}
+
+			if (imageIndex == -1)
+			{
+				imageIndex = pImageList->Add(CBitmap::FromHandle(hBitmap), (CBitmap*)nullptr);
+			}
+
 			if (imageIndex != -1)
 			{
+				m_thumbnailImageIndices[pageNumber] = imageIndex;
+
 				CString strPageNum;
 				strPageNum.Format(_T("第 %d 页"), pageNumber + 1);
-
-				// 检查该页面是否已经在列表中
-				int itemIndex = -1;
-				for (int i = 0; i < m_thumbnailList.GetItemCount(); i++)
-				{
-					if (m_thumbnailList.GetItemData(i) == (DWORD_PTR)pageNumber)
-					{
-						itemIndex = i;
-						break;
-					}
-				}
 
 				if (itemIndex == -1)
 				{
@@ -2075,7 +2213,10 @@ bool CXiaoGongPDFDlg::RenderThumbnail(int pageNumber)
 			}
 
 #ifdef _DEBUG
-			TRACE(_T("添加缩略图到ImageList: 页面 %d, 索引 %d\n"), pageNumber, imageIndex);
+			if (pageNumber < 10 || (pageNumber % 100) == 0)
+			{
+				TRACE(_T("添加缩略图到ImageList: 页面 %d, 索引 %d\n"), pageNumber, imageIndex);
+			}
 #endif
 		}
 	}
@@ -2119,6 +2260,15 @@ void CXiaoGongPDFDlg::UpdateThumbnails()
 		return;
 	}
 
+	m_isUpdatingThumbnails = true;
+
+	if (m_thumbnailList.GetSafeHwnd())
+	{
+		m_thumbnailList.SetRedraw(FALSE);
+	}
+
+	m_thumbnailImageIndices.clear();
+
 	// ★★★ 清理列表控件和ImageList（缓存已从文档对象加载，但ImageList需要重建）
 	if (m_thumbnailList.GetSafeHwnd())
 	{
@@ -2151,6 +2301,24 @@ void CXiaoGongPDFDlg::UpdateThumbnails()
 	// 重新初始化缩略图列表
 	InitializeThumbnailList();
 
+	// 先为所有页面建立占位项，后续再按需填充缩略图图像。
+	// 否则大于异步预渲染上限的页面不会出现在列表中，用户无法滚动到后续页面。
+	for (int i = 0; i < m_totalPages; i++)
+	{
+		CString strPageNum;
+		strPageNum.Format(_T("第 %d 页"), i + 1);
+		LVITEM item = { 0 };
+		item.mask = LVIF_TEXT;
+		item.iItem = i;
+		item.iSubItem = 0;
+		item.pszText = const_cast<LPTSTR>((LPCTSTR)strPageNum);
+		int itemIndex = m_thumbnailList.InsertItem(&item);
+		if (itemIndex != -1)
+		{
+			m_thumbnailList.SetItemData(itemIndex, (DWORD_PTR)i);
+		}
+	}
+
 	// ★★★ 优化：先只渲染前面部分缩略图，让界面快速响应
 	// 对于页数多的PDF，避免阻塞UI线程和内存爆炸
 	const int INITIAL_RENDER_COUNT = 10;  // 先渲染前10页，让预览框快速显示
@@ -2166,6 +2334,12 @@ void CXiaoGongPDFDlg::UpdateThumbnails()
 	for (int i = 0; i < renderCount; i++)
 	{
 		RenderThumbnail(i);
+	}
+
+	// 当前页不在首批范围内时，优先补一张当前页缩略图，避免首次打开/切换后滚到陌生位置时开始重刷远端页面。
+	if (m_currentPage >= 0 && m_currentPage < m_totalPages && m_currentPage >= renderCount)
+	{
+		RenderThumbnail(m_currentPage);
 	}
 
 	// ★★★ 对于大文件（超过100页），只异步渲染有限数量的缩略图
@@ -2192,9 +2366,13 @@ void CXiaoGongPDFDlg::UpdateThumbnails()
 
 	HighlightCurrentThumbnail();
 
-	// ★★★ 初始化后，渲染一次可见区域的缩略图
-	// 这样即使异步渲染还没完成，可见区域也能快速显示
-	PostMessage(WM_USER + 102, 0, 0);  // 触发RenderVisibleThumbnails
+	if (m_thumbnailList.GetSafeHwnd())
+	{
+		m_thumbnailList.SetRedraw(TRUE);
+		m_thumbnailList.RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE);
+	}
+
+	m_isUpdatingThumbnails = false;
 }
 
 // 异步渲染剩余缩略图
@@ -2306,15 +2484,19 @@ LRESULT CXiaoGongPDFDlg::OnThumbnailScroll(WPARAM wParam, LPARAM lParam)
 	TRACE(_T("OnThumbnailScroll: 检测到缩略图列表滚动\n"));
 #endif
 
+	if (m_isUpdatingThumbnails)
+	{
+		return 0;
+	}
+
 	// 延迟渲染，避免频繁滚动时过度渲染
-	static DWORD lastScrollTime = 0;
 	DWORD currentTime = GetTickCount();
 
 	// 如果距离上次滚动不到200ms，则跳过
-	if (currentTime - lastScrollTime < 200) {
+	if (currentTime - m_lastThumbnailScrollTime < 200) {
 		return 0;
 	}
-	lastScrollTime = currentTime;
+	m_lastThumbnailScrollTime = currentTime;
 
 	// 渲染可见区域的缩略图
 	RenderVisibleThumbnails();
@@ -2345,7 +2527,6 @@ LRESULT CXiaoGongPDFDlg::OnUpdateThumbnailHighlight(WPARAM wParam, LPARAM lParam
 	const UINT THROTTLE_INTERVAL_MS = 100;  // 节流间隔：拖动过程中最多每100ms更新一次
 	const UINT DEBOUNCE_DELAY_MS = 150;     // 去抖动延迟：确保拖动停止后150ms内会执行最后一次更新
 
-	static DWORD lastUpdateTime = 0;
 	DWORD currentTime = GetTickCount();
 
 	// 取消之前的去抖动定时器（如果有），设置新的定时器
@@ -2354,12 +2535,12 @@ LRESULT CXiaoGongPDFDlg::OnUpdateThumbnailHighlight(WPARAM wParam, LPARAM lParam
 	SetTimer(TIMER_ID_THUMBNAIL_HIGHLIGHT, DEBOUNCE_DELAY_MS, NULL);
 
 	// 节流：如果距离上次更新不到100ms，跳过立即更新（但去抖动定时器会确保最终更新）
-	if (currentTime - lastUpdateTime < THROTTLE_INTERVAL_MS) {
+	if (currentTime - m_lastThumbnailHighlightTime < THROTTLE_INTERVAL_MS) {
 		return 0;
 	}
 
 	// 执行立即更新（拖动过程中实时反馈）
-	lastUpdateTime = currentTime;
+	m_lastThumbnailHighlightTime = currentTime;
 	HighlightCurrentThumbnail();
 
 	return 0;
@@ -2438,8 +2619,16 @@ void CXiaoGongPDFDlg::CleanupThumbnails()
 	// 清理列表控件
 	if (m_thumbnailList.GetSafeHwnd())
 	{
-		// ★★★ 重要：ImageList 通过 Detach 转移所有权后由控件自动管理
-		// 只需要移除关联，不需要手动 delete
+		CImageList* pImageList = m_thumbnailList.GetImageList(LVSIL_NORMAL);
+		if (pImageList)
+		{
+			HIMAGELIST hImageList = pImageList->Detach();
+			if (hImageList)
+			{
+				::ImageList_Destroy(hImageList);
+			}
+		}
+
 		m_thumbnailList.SetImageList(nullptr, LVSIL_NORMAL);
 
 		// 清理列表项
@@ -2456,6 +2645,9 @@ void CXiaoGongPDFDlg::CleanupThumbnails()
 		}
 	}
 	m_thumbnailCache.clear();
+	m_thumbnailImageIndices.clear();
+	m_thumbnailPicWidth = 0;
+	m_thumbnailPicHeight = 0;
 }
 
 void CXiaoGongPDFDlg::HighlightCurrentThumbnail()
@@ -2524,6 +2716,13 @@ void CXiaoGongPDFDlg::HighlightCurrentThumbnail()
 		m_thumbnailList.SetItemState(itemIndex, LVIS_SELECTED, LVIS_SELECTED);
 		// ★★★ 确保缩略图滚动到可见区域（居中显示）
 		m_thumbnailList.EnsureVisible(itemIndex, FALSE);
+
+		// 主 PDF 跳到很后面的页面时，缩略图列表会被滚动到新的可见区域。
+		// 这里主动按新可见范围补渲染，避免后段可见项仍显示旧的/占位图。
+		if (!m_isUpdatingThumbnails)
+		{
+			RenderVisibleThumbnails();
+		}
 	}
 }
 
@@ -2532,9 +2731,18 @@ void CXiaoGongPDFDlg::OnThumbnailItemChanged(NMHDR* pNMHDR, LRESULT* pResult)
 	LPNMLISTVIEW pNMLV = reinterpret_cast<LPNMLISTVIEW>(pNMHDR);
 
 #ifdef _DEBUG
-	TRACE(_T("OnThumbnailItemChanged() - iItem: %d, uChanged: %u, uNewState: %u, uOldState: %u, m_currentPage: %d\n"),
-		pNMLV->iItem, pNMLV->uChanged, pNMLV->uNewState, pNMLV->uOldState, m_currentPage);
+	if (pNMLV->iItem >= 0 && ((pNMLV->uNewState & LVIS_SELECTED) || (pNMLV->uOldState & LVIS_SELECTED)))
+	{
+		TRACE(_T("OnThumbnailItemChanged() - iItem: %d, uChanged: %u, uNewState: %u, uOldState: %u, m_currentPage: %d\n"),
+			pNMLV->iItem, pNMLV->uChanged, pNMLV->uNewState, pNMLV->uOldState, m_currentPage);
+	}
 #endif
+
+	if (m_isUpdatingThumbnails)
+	{
+		*pResult = 0;
+		return;
+	}
 
 	// 只在项被选中时才切换页面（不处理取消选中的情况）
 	// uNewState & LVIS_SELECTED 表示新状态是选中
@@ -2569,12 +2777,6 @@ void CXiaoGongPDFDlg::OnThumbnailItemChanged(NMHDR* pNMHDR, LRESULT* pResult)
 	}
 	else
 	{
-#ifdef _DEBUG
-		TRACE(_T("不满足切换条件：iItem=%d, uNewState&LVIS_SELECTED=%d, uOldState&LVIS_SELECTED=%d\n"),
-			pNMLV->iItem,
-			(pNMLV->uNewState & LVIS_SELECTED) ? 1 : 0,
-			(pNMLV->uOldState & LVIS_SELECTED) ? 1 : 0);
-#endif
 	}
 
 	*pResult = 0;
@@ -2876,9 +3078,8 @@ BOOL CXiaoGongPDFDlg::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
 	if (!m_doc || m_totalPages <= 0)
 		return CDialogEx::OnMouseWheel(nFlags, zDelta, pt);
 
-	// 使用静态变量防止重入
-	static bool isRendering = false;
-	if (isRendering)
+	// 使用成员变量防止重入
+	if (m_isRenderingWheelZoom)
 		return TRUE;
 
 	// 将屏幕坐标转换为客户区坐标
@@ -2895,7 +3096,7 @@ BOOL CXiaoGongPDFDlg::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
 		{
 			try
 			{
-				isRendering = true;  // 标记开始渲染
+				m_isRenderingWheelZoom = true;  // 标记开始渲染
 
 				// 计算新的缩放级别
 				float zoomChange = (zDelta > 0) ? 1.1f : 0.9f;
@@ -2911,12 +3112,12 @@ BOOL CXiaoGongPDFDlg::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
 					SetZoom(newZoom, ZOOM_CUSTOM);
 				}
 
-				isRendering = false;  // 标记渲染完成
+				m_isRenderingWheelZoom = false;  // 标记渲染完成
 				return TRUE;
 			}
 			catch (...)
 			{
-				isRendering = false;  // 确保发生异常时也重置标记
+				m_isRenderingWheelZoom = false;  // 确保发生异常时也重置标记
 				MessageBox(_T("缩放页面时发生错误"), _T("错误"), MB_OK | MB_ICONERROR);
 				return FALSE;
 			}
@@ -2953,7 +3154,7 @@ BOOL CXiaoGongPDFDlg::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
 				// 分页模式：翻页
 				try
 				{
-					isRendering = true;  // 标记开始渲染
+					m_isRenderingWheelZoom = true;  // 标记开始渲染
 
 					// 向上滚动，显示上一页
 					if (zDelta > 0 && m_currentPage > 0)
@@ -2968,12 +3169,12 @@ BOOL CXiaoGongPDFDlg::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
 						RenderPage(m_currentPage + 1);
 					}
 
-					isRendering = false;  // 标记渲染完成
+					m_isRenderingWheelZoom = false;  // 标记渲染完成
 					return TRUE;
 				}
 				catch (...)
 				{
-					isRendering = false;  // 确保发生异常时也重置标记
+					m_isRenderingWheelZoom = false;  // 确保发生异常时也重置标记
 					MessageBox(_T("渲染页面时发生错误"), _T("错误"), MB_OK | MB_ICONERROR);
 					return FALSE;
 				}
@@ -2981,7 +3182,7 @@ BOOL CXiaoGongPDFDlg::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
 		}
 	}
 
-	isRendering = false;  // 确保最后重置标记
+	m_isRenderingWheelZoom = false;  // 确保最后重置标记
 	return CDialogEx::OnMouseWheel(nFlags, zDelta, pt);
 }
 
@@ -4054,7 +4255,7 @@ void CXiaoGongPDFDlg::SetZoom(float zoom, ZoomMode mode)
 		// 更新统一缩放比例（基于自定义缩放值）
 		CRect viewRect;
 		m_pdfView.GetClientRect(&viewRect);
-		int viewWidth = viewRect.Width() - 40;  // 留出左右边距各20像素
+		int viewWidth = max(1, viewRect.Width() - 40);  // 留出左右边距各20像素
 
 		// ★★★ 在连续滚动模式下，使用 m_customZoom 调整 m_uniformScale
 		// m_uniformScale 的基准是适应宽度的缩放，m_customZoom 是在此基础上的倍数
@@ -5190,7 +5391,7 @@ void CXiaoGongPDFDlg::OnLButtonDown(UINT nFlags, CPoint point)
 			// 获取视图尺寸
 			CRect viewRect;
 			m_pdfView.GetClientRect(&viewRect);
-			int viewWidth = viewRect.Width() - 40;  // 减去边距
+			int viewWidth = max(1, viewRect.Width() - 40);  // 减去边距
 			int viewHeight = viewRect.Height();
 
 			// 在连续滚动模式下，判断是否需要拖拽
@@ -5318,6 +5519,7 @@ void CXiaoGongPDFDlg::OnLButtonDown(UINT nFlags, CPoint point)
 
 				CDC* pDC = nullptr;  // ★★★ 提前声明，确保异常时也能释放
 				fz_pixmap* pixmap = nullptr;  // ★★★ 提前声明，确保异常时也能释放
+				fz_device* dev = nullptr;
 
 				fz_try(m_ctx)
 				{
@@ -5330,8 +5532,8 @@ void CXiaoGongPDFDlg::OnLButtonDown(UINT nFlags, CPoint point)
 					// 这样在 ZOOM_FIT_WIDTH/ZOOM_FIT_PAGE 模式下也能正确渲染
 
 					// 计算渲染尺寸
-					int width = (int)(pageWidth * scale);
-					int height = (int)(pageHeight * scale);
+					int width = ClampRenderDimension(pageWidth * scale);
+					int height = ClampRenderDimension(pageHeight * scale);
 
 					// 创建pixmap
 					pixmap = fz_new_pixmap(m_ctx, fz_device_rgb(m_ctx), width, height, nullptr, 1);
@@ -5339,7 +5541,7 @@ void CXiaoGongPDFDlg::OnLButtonDown(UINT nFlags, CPoint point)
 
 					// 渲染页面
 					fz_matrix ctm = fz_scale(scale, scale);
-					fz_device* dev = fz_new_draw_device(m_ctx, ctm, pixmap);
+					dev = fz_new_draw_device(m_ctx, ctm, pixmap);
 					fz_run_page(m_ctx, m_currentPageObj, dev, fz_identity, nullptr);
 					fz_close_device(m_ctx, dev);
 					fz_drop_device(m_ctx, dev);
@@ -5389,12 +5591,22 @@ void CXiaoGongPDFDlg::OnLButtonDown(UINT nFlags, CPoint point)
 
 					// 清理资源
 					fz_drop_pixmap(m_ctx, pixmap);
+					pixmap = nullptr;
 				}
 				fz_catch(m_ctx)
 				{
+					if (dev)
+					{
+						fz_drop_device(m_ctx, dev);
+						dev = nullptr;
+					}
+
 					// ★★★ 修复：渲染失败时也要释放 pixmap
 					if (pixmap)
+					{
 						fz_drop_pixmap(m_ctx, pixmap);
+						pixmap = nullptr;
+					}
 
 					// 渲染失败，清理位图
 					if (m_hPanPageBitmap)
@@ -6042,13 +6254,15 @@ void CXiaoGongPDFDlg::PrintSinglePage(CDC& dcPrint, int pageNum, int horRes, int
 		float pageHeight = bounds.y1 - bounds.y0;
 
 		// 计算缩放比例以适应打印机页面
-		float scaleX = (float)horRes / pageWidth;
-		float scaleY = (float)verRes / pageHeight;
+		float safePageWidth = (pageWidth > 0.0f) ? pageWidth : 1.0f;
+		float safePageHeight = (pageHeight > 0.0f) ? pageHeight : 1.0f;
+		float scaleX = (float)horRes / safePageWidth;
+		float scaleY = (float)verRes / safePageHeight;
 		float scale = min(scaleX, scaleY);
 
 		// 计算渲染尺寸
-		int renderWidth = (int)(pageWidth * scale);
-		int renderHeight = (int)(pageHeight * scale);
+		int renderWidth = ClampRenderDimension(pageWidth * scale);
+		int renderHeight = ClampRenderDimension(pageHeight * scale);
 
 		// 创建pixmap
 		pixmap = fz_new_pixmap(m_ctx, fz_device_rgb(m_ctx), renderWidth, renderHeight, nullptr, 1);
@@ -6149,7 +6363,7 @@ void CXiaoGongPDFDlg::CalculatePagePositions(bool recalcScale)
 	// 获取预览区域宽度
 	CRect viewRect;
 	m_pdfView.GetClientRect(&viewRect);
-	int viewWidth = viewRect.Width() - 40;  // 留出左右边距各20像素
+	int viewWidth = max(1, viewRect.Width() - 40);  // 留出左右边距各20像素
 
 	// ★★★ P1优化：优先使用 CPDFDocument 中的页面尺寸缓存，避免每次全量 fz_load_page
 	// 若缓存失效（首次加载、旋转后），则重建缓存（仅需一次全量加载）
@@ -6373,8 +6587,8 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 		bool gotBounds = pActiveDoc->GetPageBounds(i, pageWidthF, pageHeightF);
 		fz_rect baseBounds = { 0 };
 		bool gotBaseBounds = pActiveDoc->GetPageBaseBounds(i, baseBounds);
-		int width = gotBounds ? (int)(pageWidthF * m_uniformScale) : 0;
-		int height = gotBounds ? (int)(pageHeightF * m_uniformScale) : 0;
+		int width = gotBounds ? ClampRenderDimension(pageWidthF * m_uniformScale) : 0;
+		int height = gotBounds ? ClampRenderDimension(pageHeightF * m_uniformScale) : 0;
 
 		::PageCacheKey cacheKey{ i, width, height, rotation };
 		auto& pageCache = pActiveDoc->GetPageCache();
@@ -6400,6 +6614,8 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 		}
 
 		fz_page* page = nullptr;
+		fz_pixmap* pixmap = nullptr;
+		fz_device* dev = nullptr;
 		fz_rect bounds = baseBounds;
 		bool renderFailed = false;
 
@@ -6425,8 +6641,8 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 						pageHeightF = temp;
 					}
 
-					width = (int)(pageWidthF * m_uniformScale);
-					height = (int)(pageHeightF * m_uniformScale);
+					width = ClampRenderDimension(pageWidthF * m_uniformScale);
+					height = ClampRenderDimension(pageHeightF * m_uniformScale);
 					cacheKey.pageNumber = i;
 					cacheKey.width = width;
 					cacheKey.height = height;
@@ -6446,9 +6662,6 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 #ifdef _DEBUG
 					TRACE(_T("RenderVisiblePages: 缓存未命中，渲染 Page %d\n"), i);
 #endif
-
-					fz_pixmap* pixmap = nullptr;
-					fz_device* dev = nullptr;
 
 					pixmap = fz_new_pixmap(m_ctx, fz_device_rgb(m_ctx), width, height, nullptr, 1);
 					fz_clear_pixmap_with_value(m_ctx, pixmap, 0xff);
@@ -6519,11 +6732,24 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 					}
 
 					if (pixmap)
+					{
 						fz_drop_pixmap(m_ctx, pixmap);
+						pixmap = nullptr;
+					}
 				}
 			}
 			fz_catch(m_ctx)
 			{
+				if (dev)
+				{
+					fz_drop_device(m_ctx, dev);
+					dev = nullptr;
+				}
+				if (pixmap)
+				{
+					fz_drop_pixmap(m_ctx, pixmap);
+					pixmap = nullptr;
+				}
 				if (page)
 				{
 					fz_drop_page(m_ctx, page);
@@ -7065,6 +7291,121 @@ int CXiaoGongPDFDlg::GetPageAtPosition(int yPos)
 // 搜索功能实现
 // ============================================================================
 
+// 后台搜索线程函数
+UINT CXiaoGongPDFDlg::SearchThreadProc(LPVOID pParam)
+{
+	SearchParams* pParams = (SearchParams*)pParam;
+	if (!pParams || !pParams->pDoc)
+		return 1;
+
+	fz_context* ctx = pParams->pDoc->GetContext();
+	fz_document* doc = pParams->pDoc->GetDocument();
+	if (!ctx || !doc)
+	{
+		pParams->results.clear();
+		pParams->pDlg->PostMessage(WM_SEARCH_COMPLETE, 0, (LPARAM)pParams);
+		return 1;
+	}
+
+	const char* keyword = pParams->utf8Keyword.data();
+	int totalPages = pParams->pDoc->GetTotalPages();
+
+	for (int i = 0; i < totalPages; i++)
+	{
+		if (pParams->cancelled)
+			break;
+
+		fz_page* page = nullptr;
+		fz_stext_page* stext = nullptr;
+
+		fz_try(ctx)
+		{
+			page = fz_load_page(ctx, doc, i);
+			if (!page) continue;
+
+			stext = fz_new_stext_page_from_page(ctx, page, nullptr);
+
+			fz_quad quads[512];
+			int hit_marks[512];
+			int hit_count = fz_search_stext_page(ctx, stext, keyword, hit_marks, quads, 512);
+
+			for (int j = 0; j < hit_count; j++)
+			{
+				SearchMatch match;
+				match.pageNumber = i;
+				match.quad = quads[j];
+				match.context = _T("");
+				pParams->results.push_back(match);
+			}
+		}
+		fz_catch(ctx)
+		{
+			// 搜索出错，跳过当前页
+		}
+
+		if (stext) fz_drop_stext_page(ctx, stext);
+		if (page) fz_drop_page(ctx, page);
+	}
+
+	// 通知主线程搜索完成
+	if (pParams->pDlg && pParams->pDlg->GetSafeHwnd())
+	{
+		pParams->pDlg->PostMessage(WM_SEARCH_COMPLETE, 0, (LPARAM)pParams);
+	}
+
+	return 0;
+}
+
+// 搜索完成消息处理
+LRESULT CXiaoGongPDFDlg::OnSearchComplete(WPARAM wParam, LPARAM lParam)
+{
+	SearchParams* pParams = (SearchParams*)lParam;
+	if (!pParams)
+		return 0;
+
+	m_isSearching = false;
+
+	// 如果搜索已被取消或用户关闭了文档，忽略结果
+	if (pParams->cancelled || !m_doc || m_totalPages <= 0)
+	{
+		delete pParams;
+		m_pSearchParams = nullptr;
+		m_pSearchThread = nullptr;
+		return 0;
+	}
+
+	// 将搜索结果转移到主对话框
+	m_searchMatches = std::move(pParams->results);
+
+	RebuildSearchMatchPageIndex();
+
+	if (!m_searchMatches.empty())
+	{
+		CString msg;
+		msg.Format(_T("找到 %d 个匹配项"), (int)m_searchMatches.size());
+		m_statusBar.SetWindowText(msg);
+
+		m_currentMatchIndex = 0;
+		GoToPage(m_searchMatches[0].pageNumber);
+		ScrollToMatchVisible(m_searchMatches[0].pageNumber, m_searchMatches[0].quad);
+	}
+	else
+	{
+		MessageBox(_T("未找到匹配项"), _T("搜索结果"), MB_OK | MB_ICONINFORMATION);
+		m_statusBar.SetWindowText(_T("未找到匹配项"));
+	}
+
+	// 清理
+	delete pParams;
+	m_pSearchParams = nullptr;
+	m_pSearchThread = nullptr;
+
+	// 刷新当前视图以移除搜索高亮（如果有的话，新结果已应用）
+	RefreshCurrentView();
+
+	return 0;
+}
+
 // 清除搜索结果
 void CXiaoGongPDFDlg::ClearSearchResults()
 {
@@ -7157,8 +7498,28 @@ void CXiaoGongPDFDlg::SearchPDF(const CString& keyword, bool caseSensitive)
 		return;
 	}
 
-	// 清除之前的搜索结果
+	// 取消之前可能还在运行的搜索
+	if (m_pSearchParams)
+	{
+		m_pSearchParams->cancelled = true;
+		m_pSearchParams->pDlg = nullptr;
+	}
+	if (m_pSearchThread)
+	{
+		::WaitForSingleObject(m_pSearchThread->m_hThread, 5000);
+		delete m_pSearchThread;
+		m_pSearchThread = nullptr;
+	}
+	if (m_pSearchParams)
+	{
+		delete m_pSearchParams;
+		m_pSearchParams = nullptr;
+	}
+	m_isSearching = false;
+
+	// 清除之前的搜索结果并刷新视图（移除旧高亮）
 	ClearSearchResults();
+	RefreshCurrentView();
 
 	// 保存搜索参数
 	m_searchKeyword = keyword;
@@ -7166,105 +7527,55 @@ void CXiaoGongPDFDlg::SearchPDF(const CString& keyword, bool caseSensitive)
 
 	// 将CString转换为UTF-8
 	int utf8Len = WideCharToMultiByte(CP_UTF8, 0, keyword, -1, NULL, 0, NULL, NULL);
-	
-	// 原来方式容易泄露，需要手动delete char* utf8Keyword = new char[utf8Len]; 离开作用于时，会自动释放
 	std::vector<char> utf8Keyword(utf8Len);
-	
 	WideCharToMultiByte(CP_UTF8, 0, keyword, -1, utf8Keyword.data(), utf8Len, NULL, NULL);
 
 	// 如果不区分大小写，转换为小写
-	std::vector<char> foldedKeyword;
-	char* searchKeyword = utf8Keyword.data();
 	if (!caseSensitive)
 	{
-		foldedKeyword = utf8Keyword;
-		searchKeyword = foldedKeyword.data();
-		_strlwr_s(searchKeyword, utf8Len);  // 转换为小写
+		std::vector<char> foldedKeyword = utf8Keyword;
+		_strlwr_s(foldedKeyword.data(), utf8Len);
+		utf8Keyword = std::move(foldedKeyword);
 	}
 
-	// 遍历所有页面
-	for (int i = 0; i < m_totalPages; i++)
+	// 启动后台搜索线程
+	CPDFDocument* pActiveDoc = GetActiveDocument();
+	if (!pActiveDoc)
 	{
-		fz_page* page = nullptr;
-		fz_stext_page* stext = nullptr;
-
-		fz_try(m_ctx)
-		{
-			// 加载页面
-			page = fz_load_page(m_ctx, m_doc, i);
-
-			// 提取文本
-			stext = fz_new_stext_page_from_page(m_ctx, page, nullptr);
-
-			// 搜索关键词
-			fz_quad quads[512];
-			int hit_marks[512];  // 用于接收匹配标记
-			int hit_count = fz_search_stext_page(m_ctx, stext, searchKeyword, hit_marks, quads, 512);
-
-#ifdef _DEBUG
-			if (hit_count > 0)
-			{
-				TRACE(_T("SearchPDF: 在第 %d 页找到 %d 个匹配项\n"), i, hit_count);
-			}
-#endif
-
-			// 保存匹配项
-			for (int j = 0; j < hit_count; j++)
-			{
-				SearchMatch match;
-				match.pageNumber = i;
-				match.quad = quads[j];
-				match.context = _T("");  // 暂时不提取上下文
-				m_searchMatches.push_back(match);
-
-#ifdef _DEBUG
-				TRACE(_T("  Match %d: quad=(%f,%f,%f,%f,%f,%f,%f,%f)\n"), j,
-					quads[j].ul.x, quads[j].ul.y,
-					quads[j].ur.x, quads[j].ur.y,
-					quads[j].ll.x, quads[j].ll.y,
-					quads[j].lr.x, quads[j].lr.y);
-#endif
-			}
-		}
-		fz_catch(m_ctx)
-		{
-			// 搜索出错，跳过当前页
-#ifdef _DEBUG
-			TRACE(_T("SearchPDF: 搜索第 %d 页时出错\n"), i);
-#endif
-		}
-
-		// 清理资源
-		if (stext)
-			fz_drop_stext_page(m_ctx, stext);
-		if (page)
-			fz_drop_page(m_ctx, page);
+		MessageBox(_T("无法获取当前文档"), _T("错误"), MB_OK | MB_ICONERROR);
+		return;
 	}
 
-	RebuildSearchMatchPageIndex();
+	SearchParams* pParams = new SearchParams();
+	pParams->pDlg = this;
+	pParams->pDoc = pActiveDoc;
+	pParams->utf8Keyword = std::move(utf8Keyword);
+	pParams->caseSensitive = caseSensitive;
 
-	// 显示搜索结果
-	CString msg;
-	if (!m_searchMatches.empty())
+	m_pSearchParams = pParams;
+	m_isSearching = true;
+
+	m_statusBar.SetWindowText(_T("正在搜索..."));
+
+	m_pSearchThread = AfxBeginThread(SearchThreadProc, pParams,
+		THREAD_PRIORITY_BELOW_NORMAL, 0, CREATE_SUSPENDED);
+	if (m_pSearchThread)
 	{
-		msg.Format(_T("找到 %d 个匹配项"), (int)m_searchMatches.size());
-		m_statusBar.SetWindowText(msg);
-
-		// 跳转到第一个匹配项
-		m_currentMatchIndex = 0;
-		GoToPage(m_searchMatches[0].pageNumber);
-		ScrollToMatchVisible(m_searchMatches[0].pageNumber, m_searchMatches[0].quad);
+		m_pSearchThread->m_bAutoDelete = FALSE;
+		m_pSearchThread->ResumeThread();
 	}
 	else
 	{
-		MessageBox(_T("未找到匹配项"), _T("搜索结果"), MB_OK | MB_ICONINFORMATION);
-		m_statusBar.SetWindowText(_T("未找到匹配项"));
+		m_isSearching = false;
+		delete pParams;
+		m_pSearchParams = nullptr;
+		MessageBox(_T("无法启动搜索线程"), _T("错误"), MB_OK | MB_ICONERROR);
 	}
 }
-
 // 跳转到下一个匹配项
 void CXiaoGongPDFDlg::GoToNextMatch()
 {
+	if (m_isSearching) return;  // 搜索进行中
 	if (m_searchMatches.empty())
 	{
 		MessageBox(_T("请先执行搜索"), _T("提示"), MB_OK | MB_ICONINFORMATION);
@@ -7290,6 +7601,7 @@ void CXiaoGongPDFDlg::GoToNextMatch()
 // 跳转到上一个匹配项
 void CXiaoGongPDFDlg::GoToPrevMatch()
 {
+	if (m_isSearching) return;  // 搜索进行中
 	if (m_searchMatches.empty())
 	{
 		MessageBox(_T("请先执行搜索"), _T("提示"), MB_OK | MB_ICONINFORMATION);
@@ -7315,6 +7627,8 @@ void CXiaoGongPDFDlg::GoToPrevMatch()
 // 查找按钮点击事件
 void CXiaoGongPDFDlg::OnBtnFind()
 {
+	if (m_isSearching) return;  // 搜索进行中，忽略重复点击
+
 	CString keyword;
 	m_editSearch.GetWindowText(keyword);
 

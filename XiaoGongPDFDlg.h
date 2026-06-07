@@ -185,6 +185,7 @@ private:
 
     // 缩略图相关
     std::map<int, ThumbnailInfo> m_thumbnailCache;  // 缩略图缓存
+	std::map<int, int> m_thumbnailImageIndices;  // 页面号到 ImageList 索引的映射
     static const float THUMBNAIL_WIDTH_RATIO;  // 缩略图区域宽度比例（30%）
 	static const int THUMBNAIL_WIDTH = 220;
 	static const int LIST_WIDTH = THUMBNAIL_WIDTH + 30;
@@ -220,6 +221,7 @@ private:
 	ULONGLONG m_lastResizeRenderTick;  // 上次窗口拉伸时完成重渲染的时间
 
 	bool m_thumbnailVisible;    // 缩略图面板是否可见
+	bool m_isUpdatingThumbnails;  // 缩略图列表是否处于批量更新中
 
 	CShortcutsDialog m_shortcutsDialog;  // 快捷键对话框
 
@@ -298,6 +300,28 @@ private:
 	int m_currentMatchIndex;                    // 当前匹配项索引 (-1表示无匹配)
 	CString m_searchKeyword;                    // 当前搜索关键词
 	bool m_searchCaseSensitive;                 // 是否区分大小写
+
+	// 搜索后台线程相关
+	struct SearchParams {
+		CXiaoGongPDFDlg* pDlg;
+		CPDFDocument* pDoc;
+		std::vector<char> utf8Keyword;
+		bool caseSensitive;
+		std::vector<SearchMatch> results;
+		bool cancelled;
+		SearchParams() : pDlg(nullptr), pDoc(nullptr), caseSensitive(false), cancelled(false) {}
+	};
+	CWinThread* m_pSearchThread;
+	SearchParams* m_pSearchParams;
+	bool m_isSearching;
+	static UINT SearchThreadProc(LPVOID pParam);
+	afx_msg LRESULT OnSearchComplete(WPARAM wParam, LPARAM lParam);
+
+	// 防止 static 局部变量跨实例污染，改为成员变量
+	bool m_isThumbnailSubclassed;
+	DWORD m_lastThumbnailScrollTime;
+	DWORD m_lastThumbnailHighlightTime;
+	bool m_isRenderingWheelZoom;
 
 // 实现
 protected:
@@ -395,6 +419,8 @@ protected:
     void SafeDeleteBitmap(HBITMAP& hBmp);
     HBITMAP CreatePageDIBSection(int w, int h, HDC hDC, BYTE** ppBits);
     void CopyMuPDFPixelsToBuffer(fz_pixmap* pixmap, BYTE* pbBits, int width, int height);
+    HBITMAP RenderMuPDFPageToBitmap(fz_context* ctx, fz_page* page, float scale,
+        int rotation, HDC hDC, int& outWidth, int& outHeight);
     void ScrollToMatchVisible(int pageNum, fz_quad quad);
 	void PerformResizeRender();
 

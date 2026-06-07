@@ -79,6 +79,7 @@
 #define WM_PDF_LOAD_COMPLETE   (WM_USER + 104)
 #define WM_PDF_LOAD_CANCELLED  (WM_USER + 105)
 #define WM_PDF_LOAD_PROGRESS   (WM_USER + 106)
+#define WM_SEARCH_COMPLETE     (WM_USER + 107)
 // Next default values for new objects
 // 
 #ifdef APSTUDIO_INVOKED
