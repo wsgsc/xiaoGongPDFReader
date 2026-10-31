@@ -74,6 +74,8 @@ void CShortcutsDialog::InitializeShortcutsList()
 	AddShortcut(_T(""), _T(""));
 
 	AddShortcut(_T("Ctrl + F"), _T("打开搜索"));
+	AddShortcut(_T("Ctrl + Shift + F"), _T("切换搜索是否区分大小写"));
+	AddShortcut(_T("Esc"), _T("取消正在进行的搜索"));
 	AddShortcut(_T("F3"), _T("查找下一个"));
 	AddShortcut(_T("Shift + F3"), _T("查找上一个"));
 	AddShortcut(_T(""), _T(""));

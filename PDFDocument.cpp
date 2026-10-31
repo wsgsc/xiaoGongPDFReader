@@ -52,7 +52,7 @@ CPDFDocument::~CPDFDocument()
 	}
 }
 
-bool CPDFDocument::OpenDocument(const char* filename)
+bool CPDFDocument::OpenDocument(const char* filename, const std::atomic<bool>* cancelled)
 {
 	if (!m_ctx || !filename)
 	{
@@ -68,12 +68,14 @@ bool CPDFDocument::OpenDocument(const char* filename)
 	}
 	fz_catch(m_ctx)
 	{
+		if (m_doc)
+			fz_drop_document(m_ctx, m_doc);
 		m_doc = nullptr;
 		m_totalPages = 0;
 		return false;
 	}
 
-	if (!m_doc || m_totalPages <= 0)
+	if (!m_doc || m_totalPages <= 0 || (cancelled && cancelled->load()))
 	{
 		CloseDocument();
 		return false;
@@ -96,7 +98,11 @@ bool CPDFDocument::OpenDocument(const char* filename)
 	m_canDrag = false;
 	m_scrollPosition = 0;
 
-	CachePageseBounds();
+	if (!CachePageseBounds(cancelled))
+	{
+		CloseDocument();
+		return false;
+	}
 	return true;
 }
 
@@ -200,6 +206,14 @@ void CPDFDocument::SetZoom(float zoom, ZoomMode mode)
 	{
 		m_customZoom = zoom;
 	}
+}
+
+void CPDFDocument::RestoreReadingZoom(ZoomMode mode, float customZoom, float uniformScale)
+{
+	m_zoomMode = mode;
+	m_customZoom = customZoom;
+	m_zoom = customZoom;
+	m_uniformScale = uniformScale;
 }
 
 int CPDFDocument::GetPageRotation(int pageNumber)
@@ -433,7 +447,7 @@ HBITMAP CPDFDocument::TransferPanPageBitmap()
 	return hBitmap;
 }
 
-bool CPDFDocument::CachePageseBounds()
+bool CPDFDocument::CachePageseBounds(const std::atomic<bool>* cancelled)
 {
 	if (!m_doc || !m_ctx || m_totalPages <= 0)
 	{
@@ -441,10 +455,16 @@ bool CPDFDocument::CachePageseBounds()
 	}
 
 	m_pageBoundsCache.clear();
+	m_pageBoundsCached = false;
 	m_pageBoundsCache.resize(m_totalPages);
 
 	for (int i = 0; i < m_totalPages; ++i)
 	{
+		if (cancelled && cancelled->load())
+		{
+			m_pageBoundsCache.clear();
+			return false;
+		}
 		fz_page* page = nullptr;
 		fz_try(m_ctx)
 		{

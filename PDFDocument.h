@@ -6,6 +6,7 @@
 #include <list>
 #include <map>
 #include <vector>
+#include <atomic>
 
 #include "SearchTypes.h"
 
@@ -83,7 +84,7 @@ public:
 	CPDFDocument();
 	~CPDFDocument();
 
-	bool OpenDocument(const char* filename);
+	bool OpenDocument(const char* filename, const std::atomic<bool>* cancelled = nullptr);
 	void CloseDocument();
 	bool IsOpen() const { return m_doc != nullptr; }
 
@@ -101,6 +102,7 @@ public:
 	float GetZoom() const { return m_zoom; }
 	float GetCustomZoom() const { return m_customZoom; }
 	void SetZoom(float zoom, ZoomMode mode = ZOOM_CUSTOM);
+	void RestoreReadingZoom(ZoomMode mode, float customZoom, float uniformScale);
 	float GetUniformScale() const { return m_uniformScale; }
 	void SetUniformScale(float scale) { m_uniformScale = scale; }
 
@@ -108,7 +110,7 @@ public:
 	void SetPageRotation(int pageNumber, int rotation);
 	std::map<int, int>& GetPageRotations() { return m_pageRotations; }
 
-	bool CachePageseBounds();
+	bool CachePageseBounds(const std::atomic<bool>* cancelled = nullptr);
 	void InvalidatePagesBoundsCache();
 	bool HasPageBoundsCache() const { return m_pageBoundsCached; }
 	bool GetPageBounds(int pageNumber, float& outWidth, float& outHeight) const;

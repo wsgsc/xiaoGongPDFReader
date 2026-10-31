@@ -4,11 +4,12 @@
 IMPLEMENT_DYNAMIC(CCustomButton, CButton)
 
 CCustomButton::CCustomButton()
-	: m_normalColor(RGB(255, 255, 255))
-	, m_hoverColor(RGB(232, 234, 237))
-	, m_pressedColor(RGB(218, 220, 224))
-	, m_textColor(RGB(32, 33, 36))
-	, m_cornerRadius(5)
+	: m_iconGlyph(0)
+	, m_normalColor(RGB(255, 255, 255))
+	, m_hoverColor(RGB(235, 243, 255))
+	, m_pressedColor(RGB(219, 234, 255))
+	, m_textColor(RGB(45, 58, 75))
+	, m_cornerRadius(6)
 	, m_bHover(FALSE)
 	, m_bTracking(FALSE)
 {
@@ -18,11 +19,12 @@ CCustomButton::~CCustomButton()
 {
 	if (m_buttonFont.GetSafeHandle())
 		m_buttonFont.DeleteObject();
+	if (m_iconFont.GetSafeHandle())
+		m_iconFont.DeleteObject();
 }
 
 BEGIN_MESSAGE_MAP(CCustomButton, CButton)
 	ON_WM_MOUSEMOVE()
-	ON_WM_MOUSEHOVER()
 	ON_WM_MOUSELEAVE()
 	ON_WM_ERASEBKGND()
 END_MESSAGE_MAP()
@@ -33,21 +35,52 @@ void CCustomButton::SetColors(COLORREF normalColor, COLORREF hoverColor, COLORRE
 	m_hoverColor = hoverColor;
 	m_pressedColor = pressedColor;
 	if (GetSafeHwnd())
-		Invalidate();
+		Invalidate(FALSE);
 }
 
 void CCustomButton::SetTextColor(COLORREF textColor)
 {
 	m_textColor = textColor;
 	if (GetSafeHwnd())
-		Invalidate();
+		Invalidate(FALSE);
 }
 
 void CCustomButton::SetCornerRadius(int radius)
 {
 	m_cornerRadius = radius;
 	if (GetSafeHwnd())
-		Invalidate();
+		Invalidate(FALSE);
+}
+
+void CCustomButton::SetIconGlyph(WCHAR glyph)
+{
+	m_iconGlyph = glyph;
+	if (GetSafeHwnd())
+		Invalidate(FALSE);
+}
+
+void CCustomButton::SetToolTipText(LPCTSTR text)
+{
+	if (!GetSafeHwnd())
+		return;
+	if (!m_toolTip.GetSafeHwnd())
+	{
+		if (!m_toolTip.Create(this, TTS_ALWAYSTIP | TTS_NOPREFIX))
+			return;
+		m_toolTip.AddTool(this, text);
+		m_toolTip.Activate(TRUE);
+	}
+	else
+	{
+		m_toolTip.UpdateTipText(text, this);
+	}
+}
+
+BOOL CCustomButton::PreTranslateMessage(MSG* pMsg)
+{
+	if (m_toolTip.GetSafeHwnd())
+		m_toolTip.RelayEvent(pMsg);
+	return CButton::PreTranslateMessage(pMsg);
 }
 
 void CCustomButton::PreSubclassWindow()
@@ -59,6 +92,8 @@ void CCustomButton::PreSubclassWindow()
 	{
 		m_buttonFont.CreatePointFont(90, _T("Microsoft YaHei UI"));
 	}
+	if (!m_iconFont.GetSafeHandle())
+		m_iconFont.CreatePointFont(140, _T("Segoe MDL2 Assets"));
 }
 
 void CCustomButton::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
@@ -67,52 +102,83 @@ void CCustomButton::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 	CRect rect = lpDrawItemStruct->rcItem;
 	UINT state = lpDrawItemStruct->itemState;
 
-	// Fill entire area with toolbar white background to clear residuals
-	CBrush bgBrush(RGB(255, 255, 255));
-	pDC->FillRect(rect, &bgBrush);
+	// Draw into a memory DC so the rounded edge and text update together.
+	CDC bufferDC;
+	CBitmap bufferBitmap;
+	bufferDC.CreateCompatibleDC(pDC);
+	bufferBitmap.CreateCompatibleBitmap(pDC, rect.Width(), rect.Height());
+	CBitmap* pOldBitmap = bufferDC.SelectObject(&bufferBitmap);
+	CRect localRect(0, 0, rect.Width(), rect.Height());
+	bufferDC.FillSolidRect(localRect, RGB(255, 255, 255));
 
-	// Determine button state
-	bool bDisabled = (state & ODS_DISABLED) != 0;
-	bool bPressed  = (state & ODS_SELECTED) != 0;
-
+	const bool bDisabled = (state & ODS_DISABLED) != 0;
+	const bool bPressed = (state & ODS_SELECTED) != 0;
+	COLORREF fillColor = m_normalColor;
+	COLORREF borderColor = RGB(224, 230, 238);
 	if (bDisabled)
 	{
-		// Disabled: white fill + light gray border
-		DrawRoundRect(pDC, rect, m_cornerRadius, RGB(255, 255, 255), RGB(210, 210, 210));
+		fillColor = RGB(250, 251, 253);
+		borderColor = RGB(236, 239, 243);
 	}
 	else if (bPressed)
 	{
-		// Pressed: medium gray fill, no visible border
-		DrawRoundRect(pDC, rect, m_cornerRadius, m_pressedColor, m_pressedColor);
+		fillColor = m_pressedColor;
+		borderColor = RGB(117, 165, 230);
 	}
 	else if (m_bHover)
 	{
-		// Hover: light gray fill, no visible border
-		DrawRoundRect(pDC, rect, m_cornerRadius, m_hoverColor, m_hoverColor);
+		fillColor = m_hoverColor;
+		borderColor = RGB(151, 188, 239);
 	}
-	else
+	else if (m_iconGlyph)
 	{
-		// Normal: white fill + gray border (makes button visible)
-		DrawRoundRect(pDC, rect, m_cornerRadius, m_normalColor, RGB(218, 220, 224));
+		borderColor = RGB(255, 255, 255);
 	}
 
-	// Draw text
+	CRect buttonRect = localRect;
+	buttonRect.DeflateRect(1, 1);
+	DrawRoundRect(&bufferDC, buttonRect, m_cornerRadius, fillColor, borderColor);
+
 	CString strText;
 	GetWindowText(strText);
 
-	if (!strText.IsEmpty())
+	bool useIcon = m_iconGlyph && m_iconFont.GetSafeHandle();
+	if (useIcon)
 	{
-		CFont* pOldFont = pDC->SelectObject(&m_buttonFont);
-		pDC->SetBkMode(TRANSPARENT);
-
-		if (bDisabled)
-			pDC->SetTextColor(RGB(180, 180, 180));
-		else
-			pDC->SetTextColor(m_textColor);
-
-		pDC->DrawText(strText, rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-		pDC->SelectObject(pOldFont);
+		CFont* pOldFont = bufferDC.SelectObject(&m_iconFont);
+		CString face;
+		bufferDC.GetTextFace(face);
+		useIcon = face.CompareNoCase(_T("Segoe MDL2 Assets")) == 0;
+		if (useIcon)
+		{
+			TCHAR glyph[] = { static_cast<TCHAR>(m_iconGlyph), 0 };
+			bufferDC.SetBkMode(TRANSPARENT);
+			bufferDC.SetTextColor(bDisabled ? RGB(163, 173, 185) :
+				(m_bHover || bPressed ? RGB(32, 100, 185) : m_textColor));
+			bufferDC.DrawText(glyph, localRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+		}
+		bufferDC.SelectObject(pOldFont);
 	}
+	if (!useIcon && !strText.IsEmpty())
+	{
+		CFont* pFont = m_iconGlyph ? &m_buttonFont : GetFont();
+		CFont* pOldFont = bufferDC.SelectObject(pFont ? pFont : &m_buttonFont);
+		bufferDC.SetBkMode(TRANSPARENT);
+		bufferDC.SetTextColor(bDisabled ? RGB(163, 173, 185) :
+			(bPressed ? RGB(35, 84, 155) : m_textColor));
+		bufferDC.DrawText(strText, localRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+		bufferDC.SelectObject(pOldFont);
+	}
+
+	if ((state & ODS_FOCUS) && !bDisabled)
+	{
+		CRect focusRect = localRect;
+		focusRect.DeflateRect(4, 4);
+		bufferDC.DrawFocusRect(focusRect);
+	}
+
+	pDC->BitBlt(rect.left, rect.top, rect.Width(), rect.Height(), &bufferDC, 0, 0, SRCCOPY);
+	bufferDC.SelectObject(pOldBitmap);
 }
 
 void CCustomButton::DrawRoundRect(CDC* pDC, CRect rect, int radius, COLORREF fillColor, COLORREF borderColor)
@@ -127,7 +193,7 @@ void CCustomButton::DrawRoundRect(CDC* pDC, CRect rect, int radius, COLORREF fil
 		(Gdiplus::REAL)(rect.Height() - 1)
 	);
 
-	float diameter = (float)(radius * 2);
+	float diameter = (float)(min(radius, min(rect.Width(), rect.Height()) / 2) * 2);
 
 	Gdiplus::GraphicsPath path;
 	path.AddArc(rf.X,                        rf.Y,                        diameter, diameter, 180, 90);
@@ -149,13 +215,18 @@ void CCustomButton::DrawRoundRect(CDC* pDC, CRect rect, int radius, COLORREF fil
 
 void CCustomButton::OnMouseMove(UINT nFlags, CPoint point)
 {
+	if (!m_bHover)
+	{
+		m_bHover = TRUE;
+		Invalidate(FALSE);
+	}
+
 	if (!m_bTracking)
 	{
 		TRACKMOUSEEVENT tme;
 		tme.cbSize = sizeof(TRACKMOUSEEVENT);
-		tme.dwFlags = TME_HOVER | TME_LEAVE;
+		tme.dwFlags = TME_LEAVE;
 		tme.hwndTrack = m_hWnd;
-		tme.dwHoverTime = HOVER_DEFAULT;
 
 		if (TrackMouseEvent(&tme))
 		{
@@ -166,19 +237,11 @@ void CCustomButton::OnMouseMove(UINT nFlags, CPoint point)
 	CButton::OnMouseMove(nFlags, point);
 }
 
-void CCustomButton::OnMouseHover(UINT nFlags, CPoint point)
-{
-	m_bHover = TRUE;
-	Invalidate();
-
-	CButton::OnMouseHover(nFlags, point);
-}
-
 void CCustomButton::OnMouseLeave()
 {
 	m_bHover = FALSE;
 	m_bTracking = FALSE;
-	Invalidate();
+	Invalidate(FALSE);
 
 	CButton::OnMouseLeave();
 }

@@ -15,6 +15,48 @@
 #define new DEBUG_NEW
 #endif
 
+namespace
+{
+	bool SaveValidatedPdf(fz_context* ctx, pdf_document* pdf, const CString& targetPath,
+		int expectedPages, const pdf_write_options& options)
+	{
+		if (expectedPages < 1 || pdf_count_pages(ctx, pdf) != expectedPages)
+			return false;
+
+		int slash = max(targetPath.ReverseFind(_T('\\')), targetPath.ReverseFind(_T('/')));
+		CString directory = slash >= 0 ? targetPath.Left(slash + 1) : _T(".\\");
+		TCHAR tempName[MAX_PATH] = { 0 };
+		if (!GetTempFileName(directory, _T("XGP"), 0, tempName))
+			return false;
+
+		fz_document* checkDoc = nullptr;
+		volatile bool valid = false;
+		CW2A tempPath(tempName, CP_UTF8);
+		fz_try(ctx)
+		{
+			pdf_save_document(ctx, pdf, tempPath, &options);
+			checkDoc = fz_open_document(ctx, tempPath);
+			valid = fz_count_pages(ctx, checkDoc) == expectedPages;
+		}
+		fz_always(ctx)
+		{
+			if (checkDoc)
+				fz_drop_document(ctx, checkDoc);
+		}
+		fz_catch(ctx)
+		{
+			valid = false;
+		}
+
+		if (valid)
+			valid = MoveFileEx(tempName, targetPath,
+				MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+		if (!valid)
+			DeleteFile(tempName);
+		return valid;
+	}
+}
+
 IMPLEMENT_DYNAMIC(CPDFEditDialog, CDialogEx)
 
 BEGIN_MESSAGE_MAP(CPDFEditDialog, CDialogEx)
@@ -78,8 +120,9 @@ BOOL CPDFEditDialog::OnInitDialog()
 	// 初始化缩略图列表
 	InitializeThumbnailList();
 
-	// 加载所有页面
+	// 建立页面列表，缩略图按需生成。
 	LoadAllThumbnails();
+	SetTimer(TIMER_VISIBLE_THUMBNAILS, 180, NULL);
 
 	// 更新信息栏
 	UpdateInfoBar();
@@ -94,8 +137,7 @@ void CPDFEditDialog::InitializeThumbnailList()
 
 	// 创建ImageList（更小的尺寸以适应网格布局）
 	// 尺寸：150×190，适合A4比例的页面
-	m_imageList.Create(150, 190, ILC_COLOR24 | ILC_MASK, m_totalPages, 10);
-	m_thumbnailList.SetImageList(&m_imageList, LVSIL_NORMAL);
+	ResetThumbnailImageList();
 
 	// 设置列表背景色为浅灰色，现代化视觉效果
 	m_thumbnailList.SetBkColor(RGB(248, 248, 248));
@@ -106,6 +148,23 @@ void CPDFEditDialog::InitializeThumbnailList()
 	// cx: 水平间距，cy: 垂直间距
 	CSize iconSpacing(180, 210);  // 调整垂直间距，因为不显示底部文本标签
 	m_thumbnailList.SetIconSpacing(iconSpacing);
+}
+
+void CPDFEditDialog::ResetThumbnailImageList()
+{
+	if (m_imageList.GetSafeHandle())
+		m_imageList.DeleteImageList();
+	m_imageList.Create(150, 190, ILC_COLOR24 | ILC_MASK, 1, 16);
+	m_thumbnailList.SetImageList(&m_imageList, LVSIL_NORMAL);
+	HBITMAP hPlaceholder = CreatePlaceholderBitmap();
+	if (hPlaceholder)
+	{
+		CBitmap bitmap;
+		bitmap.Attach(hPlaceholder);
+		m_imageList.Add(&bitmap, (CBitmap*)nullptr);
+		bitmap.Detach();
+		::DeleteObject(hPlaceholder);
+	}
 }
 
 void CPDFEditDialog::LoadAllThumbnails()
@@ -124,24 +183,8 @@ void CPDFEditDialog::LoadAllThumbnails()
 		page.sourceFile = m_filePath;      // 设置源文件路径
 		page.sourcePageIndex = i;          // 源文件中的页码
 
-		// 渲染缩略图（初始时currentPos和originalPos都是i+1）
-		int currentPos = i + 1;
-		int originalPos = i + 1;
-		page.hThumbnail = RenderThumbnail(i, currentPos, originalPos);
-
 		m_pages.push_back(page);
-
-		// 添加到ImageList
-		if (page.hThumbnail)
-		{
-			CBitmap bmp;
-			bmp.Attach(page.hThumbnail);
-			m_imageList.Add(&bmp, (CBitmap*)nullptr);
-			bmp.Detach();  // 不要删除，由m_pages管理
-		}
-
-		// 添加到列表控件（不显示文本标签）
-		m_thumbnailList.InsertItem(i, _T(""), i);
+		m_thumbnailList.InsertItem(i, _T(""), 0);
 	}
 
 	// 保存原始状态（用于重置）- 深拷贝HBITMAP以避免内存泄漏
@@ -160,6 +203,7 @@ void CPDFEditDialog::LoadAllThumbnails()
 
 	// 保存原始总页数
 	m_originalTotalPages = m_totalPages;
+	RenderVisibleThumbnails();
 }
 
 HBITMAP CPDFEditDialog::RenderThumbnail(int pageNumber, int currentPos, int originalPos, int rotationAngle)
@@ -585,93 +629,109 @@ HBITMAP CPDFEditDialog::RenderPreviewBitmap(const CString& sourceFile, int pageI
 
 void CPDFEditDialog::RefreshThumbnailList()
 {
-	// 清空列表
+	int topIndex = m_thumbnailList.GetTopIndex();
+	std::vector<int> selected;
+	POSITION pos = m_thumbnailList.GetFirstSelectedItemPosition();
+	while (pos)
+		selected.push_back(m_thumbnailList.GetNextSelectedItem(pos));
+	m_thumbnailList.SetRedraw(FALSE);
 	m_thumbnailList.DeleteAllItems();
-	m_imageList.DeleteImageList();
-	m_imageList.Create(150, 190, ILC_COLOR24 | ILC_MASK, m_totalPages, 10);
-	m_thumbnailList.SetImageList(&m_imageList, LVSIL_NORMAL);
-
-	// 重新添加未删除的页面
+	ResetThumbnailImageList();
 	int displayIndex = 0;
-	for (size_t i = 0; i < m_pages.size(); i++)
+	for (auto& page : m_pages)
 	{
-		if (m_pages[i].isDeleted)
-			continue;
-
-		m_pages[i].displayIndex = displayIndex;
-
-		HBITMAP hThumbnailToUse = nullptr;
-		int originalPos = m_pages[i].originalIndex + 1;
-		int currentPos = displayIndex + 1;
-
-		// ★★★ 如果是被拖拽的页面，使用占位虚影
-		if (m_pages[i].isDragging) {
-			// 先删除原有的缩略图（如果存在）
-			if (m_pages[i].hThumbnail) {
-				::DeleteObject(m_pages[i].hThumbnail);
-				m_pages[i].hThumbnail = nullptr;
-			}
-
-			// 创建占位虚影
-			hThumbnailToUse = CreatePlaceholderBitmap();
-			// 临时保存占位图到m_pages[i].hThumbnail，方便后续清理
-			m_pages[i].hThumbnail = hThumbnailToUse;
-		}
-		else {
-			// ★★★ 修复：智能判断是否需要重新渲染
-			bool needRerender = false;
-
-			// 如果缩略图不存在，需要重新渲染
-			if (!m_pages[i].hThumbnail) {
-				needRerender = true;
-			}
-			// 如果来自当前文档（m_filePath），需要重新渲染以更新位置标记
-			else if (m_pages[i].sourceFile == m_filePath) {
-				needRerender = true;
-			}
-
-			if (needRerender) {
-				// 删除旧的缩略图（如果存在）
-				if (m_pages[i].hThumbnail)
-				{
-					::DeleteObject(m_pages[i].hThumbnail);
-					m_pages[i].hThumbnail = nullptr;
-				}
-
-				// 重新渲染缩略图
-				if (m_pages[i].sourceFile == m_filePath) {
-					// 来自当前文档，使用RenderThumbnail
-					hThumbnailToUse = RenderThumbnail(m_pages[i].originalIndex, currentPos, originalPos, m_pages[i].rotationAngle);
-					m_pages[i].hThumbnail = hThumbnailToUse;
-				}
-				else {
-					// 来自其他文件，使用RenderThumbnailFromSource
-					hThumbnailToUse = RenderThumbnailFromSource(m_pages[i].sourceFile, m_pages[i].sourcePageIndex, currentPos, originalPos, m_pages[i].rotationAngle);
-					m_pages[i].hThumbnail = hThumbnailToUse;
-				}
-			}
-			else {
-				// 使用已有的缩略图（来自其他文件且已经渲染好）
-				hThumbnailToUse = m_pages[i].hThumbnail;
-			}
-		}
-
-		// 添加到ImageList
-		if (hThumbnailToUse)
+		if (page.hThumbnail)
 		{
-			CBitmap bmp;
-			bmp.Attach(hThumbnailToUse);
-			m_imageList.Add(&bmp, (CBitmap*)nullptr);
-			bmp.Detach();
+			::DeleteObject(page.hThumbnail);
+			page.hThumbnail = nullptr;
 		}
-
-		// 添加到列表控件（不显示文本标签）
-		m_thumbnailList.InsertItem(displayIndex, _T(""), displayIndex);
-
-		displayIndex++;
+		if (page.isDeleted)
+			continue;
+		page.displayIndex = displayIndex;
+		m_thumbnailList.InsertItem(displayIndex++, _T(""), 0);
 	}
-
+	for (int index : selected)
+		if (index < displayIndex)
+			m_thumbnailList.SetItemState(index, LVIS_SELECTED, LVIS_SELECTED);
+	if (topIndex >= 0 && topIndex < displayIndex)
+		m_thumbnailList.EnsureVisible(topIndex, FALSE);
+	m_thumbnailList.SetRedraw(TRUE);
+	m_thumbnailList.Invalidate(FALSE);
+	RenderVisibleThumbnails();
 	UpdateInfoBar();
+}
+
+void CPDFEditDialog::RenderVisibleThumbnails()
+{
+	if (!m_thumbnailList.GetSafeHwnd())
+		return;
+	if (m_imageList.GetImageCount() > 80 && !m_isDragging)
+	{
+		RefreshThumbnailList();
+		return;
+	}
+	std::vector<PageInfo*> visiblePages;
+	for (auto& page : m_pages)
+		if (!page.isDeleted)
+			visiblePages.push_back(&page);
+	CRect clientRect;
+	m_thumbnailList.GetClientRect(&clientRect);
+	const int listItemCount = m_thumbnailList.GetItemCount();
+	const int pageCount = static_cast<int>(visiblePages.size());
+	const int itemCount = listItemCount < pageCount ? listItemCount : pageCount;
+	int firstVisible = 0;
+	int end = itemCount;
+	while (firstVisible < end)
+	{
+		const int middle = firstVisible + (end - firstVisible) / 2;
+		CRect itemRect;
+		if (!m_thumbnailList.GetItemRect(middle, &itemRect, LVIR_BOUNDS))
+			return;
+		if (itemRect.bottom <= clientRect.top)
+			firstVisible = middle + 1;
+		else
+			end = middle;
+	}
+	for (int item = firstVisible; item < itemCount; ++item)
+	{
+		CRect itemRect;
+		if (!m_thumbnailList.GetItemRect(item, &itemRect, LVIR_BOUNDS))
+			continue;
+		if (itemRect.top >= clientRect.bottom)
+			break;
+		if (itemRect.right <= clientRect.left || itemRect.left >= clientRect.right ||
+			itemRect.bottom <= clientRect.top)
+			continue;
+		LVITEM state = { 0 };
+		state.mask = LVIF_IMAGE;
+		state.iItem = item;
+		if (!m_thumbnailList.GetItem(&state) || state.iImage != 0)
+			continue;
+		PageInfo* page = visiblePages[item];
+		if (page->isDragging)
+			continue;
+		if (!page->hThumbnail)
+		{
+			int originalPos = page->originalIndex + 1;
+			int currentPos = item + 1;
+			page->hThumbnail = (page->sourceFile == m_filePath) ?
+				RenderThumbnail(page->originalIndex, currentPos, originalPos, page->rotationAngle) :
+				RenderThumbnailFromSource(page->sourceFile, page->sourcePageIndex,
+					currentPos, originalPos, page->rotationAngle);
+		}
+		if (page->hThumbnail)
+		{
+			CBitmap bitmap;
+			bitmap.Attach(page->hThumbnail);
+			int imageIndex = m_imageList.Add(&bitmap, (CBitmap*)nullptr);
+			bitmap.Detach();
+			if (imageIndex >= 0)
+			{
+				state.iImage = imageIndex;
+				m_thumbnailList.SetItem(&state);
+			}
+		}
+	}
 }
 
 void CPDFEditDialog::UpdateInfoBar()
@@ -872,9 +932,9 @@ HBITMAP CPDFEditDialog::CreatePlaceholderBitmap()
 	bmi.bmiHeader.biBitCount = 24;
 	bmi.bmiHeader.biCompression = BI_RGB;
 
-	HDC hdc = GetDC()->GetSafeHdc();
+	CClientDC dc(this);
 	void* pBits = nullptr;
-	HBITMAP hBitmap = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &pBits, nullptr, 0);
+	HBITMAP hBitmap = CreateDIBSection(dc.GetSafeHdc(), &bmi, DIB_RGB_COLORS, &pBits, nullptr, 0);
 
 	if (hBitmap && pBits) {
 		unsigned char* dest = (unsigned char*)pBits;
@@ -900,7 +960,7 @@ HBITMAP CPDFEditDialog::CreatePlaceholderBitmap()
 
 		// 使用GDI+绘制虚线边框
 		CDC memDC;
-		memDC.CreateCompatibleDC(GetDC());
+		memDC.CreateCompatibleDC(&dc);
 		HBITMAP hOldBitmap = (HBITMAP)memDC.SelectObject(hBitmap);
 
 		Gdiplus::Graphics graphics(memDC.GetSafeHdc());
@@ -1193,6 +1253,9 @@ void CPDFEditDialog::OnTimer(UINT_PTR nIDEvent)
 				m_pDragImage->DragMove(m_lastMousePoint);
 			}
 		}
+		break;
+	case TIMER_VISIBLE_THUMBNAILS:
+		RenderVisibleThumbnails();
 		break;
 	}
 
@@ -1542,12 +1605,9 @@ void CPDFEditDialog::ExtractSelectedPages()
 			}
 		}
 
-		// 保存到文件
-		CW2A filePathA(outputPath, CP_UTF8);
-		pdf_save_document(m_ctx, newPdf, filePathA, &opts);
-
-		success = true;
-		MessageBox(_T("页面提取成功！"), _T("提示"), MB_OK | MB_ICONINFORMATION);
+		// 先验证页数，再写临时文件并验证；失败时保留原目标文件。
+		success = SaveValidatedPdf(m_ctx, newPdf, outputPath,
+			static_cast<int>(pagesToExtract.size()), opts);
 	}
 	fz_always(m_ctx)
 	{
@@ -1567,9 +1627,12 @@ void CPDFEditDialog::ExtractSelectedPages()
 	}
 	fz_catch(m_ctx)
 	{
-		MessageBox(_T("页面提取失败！请确保所有源文件都可访问。"), _T("错误"), MB_OK | MB_ICONERROR);
 		success = false;
 	}
+	MessageBox(success ? _T("页面提取成功！") :
+		_T("页面提取失败。请检查源文件、页面数量及保存位置。"),
+		success ? _T("提示") : _T("错误"),
+		MB_OK | (success ? MB_ICONINFORMATION : MB_ICONERROR));
 }
 
 // ========== 交换功能 ==========
@@ -1961,11 +2024,11 @@ void CPDFEditDialog::OnBnClickedBtnSave()
 	if (SaveToNewFile(m_savedFilePath))
 	{
 		MessageBox(_T("保存成功！"), _T("提示"), MB_OK | MB_ICONINFORMATION);
+		KillTimer(TIMER_VISIBLE_THUMBNAILS);
 		EndDialog(IDOK);
 	}
 	else
 	{
-		MessageBox(_T("保存失败！请检查文件路径和权限。"), _T("错误"), MB_OK | MB_ICONERROR);
 		m_savedFilePath.Empty();
 	}
 }
@@ -1980,13 +2043,30 @@ bool CPDFEditDialog::SaveToNewFile(const CString& newFilePath)
 
 	bool success = false;
 	pdf_document* newPdf = nullptr;
+	pdf_obj* catalogMetadata = nullptr;
 	std::map<CString, fz_document*> openDocs;
 	CString errorMsg;
 
 	fz_try(m_ctx)
 	{
-		// 创建新的PDF文档
-		newPdf = pdf_create_document(m_ctx);
+		// Keep the source document's metadata and surviving outline destinations.
+		std::vector<int> originalPages;
+		for (const auto& page : m_pages)
+		{
+			if (!page.isDeleted && page.sourceFile.CompareNoCase(m_filePath) == 0)
+				originalPages.push_back(page.sourcePageIndex);
+		}
+		CW2A originalPath(m_filePath, CP_UTF8);
+		newPdf = pdf_open_document(m_ctx, originalPath);
+		pdf_obj* oldRoot = pdf_dict_get(m_ctx, pdf_trailer(m_ctx, newPdf), PDF_NAME(Root));
+		catalogMetadata = pdf_keep_obj(m_ctx, pdf_dict_get(m_ctx, oldRoot, PDF_NAME(Metadata)));
+		pdf_rearrange_pages(m_ctx, newPdf, static_cast<int>(originalPages.size()),
+			originalPages.empty() ? nullptr : originalPages.data());
+		if (catalogMetadata)
+		{
+			pdf_obj* newRoot = pdf_dict_get(m_ctx, pdf_trailer(m_ctx, newPdf), PDF_NAME(Root));
+			pdf_dict_put(m_ctx, newRoot, PDF_NAME(Metadata), catalogMetadata);
+		}
 
 		// 复制未删除的页面（按当前顺序）
 		int pageCount = 0;
@@ -1995,7 +2075,10 @@ bool CPDFEditDialog::SaveToNewFile(const CString& newFilePath)
 			if (page.isDeleted)
 				continue;
 
+			const int insertIndex = pageCount;
 			pageCount++;
+			if (page.sourceFile.CompareNoCase(m_filePath) == 0)
+				continue;
 			CString debugMsg;
 			debugMsg.Format(_T("正在处理第 %d 页：%s\n"), pageCount, page.sourceFile);
 			OutputDebugString(debugMsg);
@@ -2046,10 +2129,9 @@ bool CPDFEditDialog::SaveToNewFile(const CString& newFilePath)
 
 					OutputDebugString(_T("  创建PDF页面...\n"));
 					// 创建页面对象，设置旋转属性
-					pdf_obj* page_obj = pdf_add_page(m_ctx, newPdf, mediabox, page.rotationAngle, nullptr, nullptr);
+					pdf_obj* page_obj = pdf_add_page(m_ctx, newPdf, mediabox, 0, nullptr, nullptr);
 
-					// 将页面插入到文档中（在末尾）
-					pdf_insert_page(m_ctx, newPdf, -1, page_obj);
+					pdf_insert_page(m_ctx, newPdf, insertIndex, page_obj);
 
 					// 计算缩放和位置（让图片在页面上居中显示）
 					float pageWidth = mediabox.x1 - mediabox.x0;
@@ -2149,29 +2231,24 @@ bool CPDFEditDialog::SaveToNewFile(const CString& newFilePath)
 					continue;
 
 				// 从源文档复制页面到新文档
-				pdf_graft_page(m_ctx, newPdf, -1, sourcePdf, page.sourcePageIndex);
-
-				// 应用旋转（如果有）
-				if (page.rotationAngle != 0) {
-					int newPageIndex = pdf_count_pages(m_ctx, newPdf) - 1;
-					pdf_obj* pageObj = pdf_lookup_page_obj(m_ctx, newPdf, newPageIndex);
-					if (pageObj) {
-						// 获取原始旋转角度
-						int originalRotate = pdf_to_int(m_ctx, pdf_dict_get(m_ctx, pageObj, PDF_NAME(Rotate)));
-						// 计算新的旋转角度
-						int newRotate = (originalRotate + page.rotationAngle) % 360;
-						// 设置旋转
-						pdf_dict_put_int(m_ctx, pageObj, PDF_NAME(Rotate), newRotate);
-
-						CString rotateMsg;
-						rotateMsg.Format(_T("  应用旋转：%d° (原始: %d°, 新: %d°)\n"),
-							page.rotationAngle, originalRotate, newRotate);
-						OutputDebugString(rotateMsg);
-					}
-				}
+				pdf_graft_page(m_ctx, newPdf, insertIndex, sourcePdf, page.sourcePageIndex);
 
 				OutputDebugString(_T("  PDF页面处理完成\n"));
 			}
+		}
+		int outputIndex = 0;
+		for (const auto& page : m_pages)
+		{
+			if (page.isDeleted)
+				continue;
+			if (page.rotationAngle != 0)
+			{
+				pdf_obj* pageObj = pdf_lookup_page_obj(m_ctx, newPdf, outputIndex);
+				int originalRotate = pdf_dict_get_int(m_ctx, pageObj, PDF_NAME(Rotate));
+				pdf_dict_put_int(m_ctx, pageObj, PDF_NAME(Rotate),
+					(originalRotate + page.rotationAngle) % 360);
+			}
+			++outputIndex;
 		}
 
 		// 验证页面数
@@ -2180,16 +2257,15 @@ bool CPDFEditDialog::SaveToNewFile(const CString& newFilePath)
 		countMsg.Format(_T("新PDF总页数：%d（预期：%d）\n"), finalPageCount, pageCount);
 		OutputDebugString(countMsg);
 
-		// 保存到文件
-		OutputDebugString(_T("正在保存PDF文件...\n"));
-		CW2A filePathA(newFilePath, CP_UTF8);
-		pdf_save_document(m_ctx, newPdf, filePathA, &opts);
-		OutputDebugString(_T("保存成功！\n"));
-
-		success = true;
+		// 缺页时拒绝保存；临时文件验证通过后才替换目标文件。
+		success = SaveValidatedPdf(m_ctx, newPdf, newFilePath, pageCount, opts);
+		if (!success)
+			errorMsg = _T("页面数量不符，或无法完成文件写入与验证。\n");
 	}
 	fz_always(m_ctx)
 	{
+		if (catalogMetadata)
+			pdf_drop_obj(m_ctx, catalogMetadata);
 		// 清理：关闭所有打开的源文档
 		for (auto& pair : openDocs) {
 			if (pair.second) {
@@ -2217,7 +2293,9 @@ bool CPDFEditDialog::SaveToNewFile(const CString& newFilePath)
 	}
 
 	// 如果失败且有错误信息，显示给用户
-	if (!success && !errorMsg.IsEmpty()) {
+	if (!success) {
+		if (errorMsg.IsEmpty())
+			errorMsg = _T("请检查源文件、页面数量及保存位置。\n");
 		CString fullMsg = _T("保存失败！\n\n详细错误：\n") + errorMsg;
 		MessageBox(fullMsg, _T("错误"), MB_OK | MB_ICONERROR);
 	}
@@ -2266,108 +2344,7 @@ bool CPDFEditDialog::ImportPDF(const CString& pdfPath)
 		newPage.sourceFile = pdfPath;       // 设置源文件路径
 		newPage.sourcePageIndex = i;        // 在源文件中的页码
 
-		// 渲染新页面的缩略图
-		fz_page* page = nullptr;
-		fz_pixmap* pixmap = nullptr;
-		HBITMAP hBitmap = nullptr;
-
-		fz_try(m_ctx) {
-			// 加载页面
-			page = fz_load_page(m_ctx, newDoc, i);
-
-			// 获取页面边界
-			fz_rect bounds = fz_bound_page(m_ctx, page);
-
-			// 计算缩放比例（目标宽度150像素）
-			float targetWidth = 150.0f;
-			float scale = targetWidth / (bounds.x1 - bounds.x0);
-
-			// 创建变换矩阵
-			fz_matrix ctm = fz_scale(scale, scale);
-
-			// 渲染为pixmap
-			pixmap = fz_new_pixmap_from_page(m_ctx, page, ctm, fz_device_rgb(m_ctx), 0);
-
-			// 转换为HBITMAP
-			int width = fz_pixmap_width(m_ctx, pixmap);
-			int height = fz_pixmap_height(m_ctx, pixmap);
-			int stride = fz_pixmap_stride(m_ctx, pixmap);
-			unsigned char* samples = fz_pixmap_samples(m_ctx, pixmap);
-
-			// 创建固定尺寸150×190的DIB
-			const int FIXED_WIDTH = 150;
-			const int FIXED_HEIGHT = 190;
-			BITMAPINFO bmi = { 0 };
-			bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-			bmi.bmiHeader.biWidth = FIXED_WIDTH;
-			bmi.bmiHeader.biHeight = -FIXED_HEIGHT;
-			bmi.bmiHeader.biPlanes = 1;
-			bmi.bmiHeader.biBitCount = 24;
-			bmi.bmiHeader.biCompression = BI_RGB;
-
-			HDC hdc = ::GetDC(NULL);
-			void* pBits = nullptr;
-			hBitmap = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &pBits, nullptr, 0);
-			::ReleaseDC(NULL, hdc);
-
-			if (hBitmap && pBits) {
-				unsigned char* dest = (unsigned char*)pBits;
-				int destStride = ((FIXED_WIDTH * 3 + 3) & ~3);
-
-				// 填充浅灰色背景
-				for (int y = 0; y < FIXED_HEIGHT; y++) {
-					for (int x = 0; x < FIXED_WIDTH; x++) {
-						dest[y * destStride + x * 3 + 0] = 248;  // B
-						dest[y * destStride + x * 3 + 1] = 248;  // G
-						dest[y * destStride + x * 3 + 2] = 248;  // R
-					}
-				}
-
-				// 绘制白色卡片背景
-				int cardMargin = 4;
-				for (int y = cardMargin; y < FIXED_HEIGHT - cardMargin; y++) {
-					for (int x = cardMargin; x < FIXED_WIDTH - cardMargin; x++) {
-						dest[y * destStride + x * 3 + 0] = 255;  // B
-						dest[y * destStride + x * 3 + 1] = 255;  // G
-						dest[y * destStride + x * 3 + 2] = 255;  // R
-					}
-				}
-
-				// 计算居中偏移量
-				int contentAreaWidth = FIXED_WIDTH - cardMargin * 2;
-				int contentAreaHeight = FIXED_HEIGHT - cardMargin * 2;
-				int yOffset = cardMargin + (contentAreaHeight - height) / 2;
-				if (yOffset < cardMargin) yOffset = cardMargin;
-				int xOffset = cardMargin + (contentAreaWidth - width) / 2;
-				if (xOffset < cardMargin) xOffset = cardMargin;
-
-				// 复制像素数据
-				for (int y = 0; y < height && (y + yOffset) < (FIXED_HEIGHT - cardMargin); y++) {
-					unsigned char* src = samples + y * stride;
-					unsigned char* destRow = dest + (y + yOffset) * destStride;
-
-					int copyWidth = min(width, contentAreaWidth);
-					for (int x = 0; x < copyWidth; x++) {
-						int destX = x + xOffset;
-						if (destX < FIXED_WIDTH - cardMargin) {
-							destRow[destX * 3 + 0] = src[x * 3 + 2];  // B
-							destRow[destX * 3 + 1] = src[x * 3 + 1];  // G
-							destRow[destX * 3 + 2] = src[x * 3 + 0];  // R
-						}
-					}
-				}
-			}
-
-			fz_drop_pixmap(m_ctx, pixmap);
-			fz_drop_page(m_ctx, page);
-		}
-		fz_catch(m_ctx) {
-			if (pixmap) fz_drop_pixmap(m_ctx, pixmap);
-			if (page) fz_drop_page(m_ctx, page);
-			hBitmap = nullptr;
-		}
-
-		newPage.hThumbnail = hBitmap;
+		newPage.hThumbnail = nullptr;
 		m_pages.push_back(newPage);
 	}
 
@@ -2794,6 +2771,7 @@ void CPDFEditDialog::OnOK()
 
 void CPDFEditDialog::OnCancel()
 {
+	KillTimer(TIMER_VISIBLE_THUMBNAILS);
 	CDialogEx::OnCancel();
 }
 

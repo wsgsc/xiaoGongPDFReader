@@ -96,7 +96,8 @@ private:
 	// 定时器ID
 	enum {
 		TIMER_ANIMATION = 1,        // 动画定时器
-		TIMER_AUTO_SCROLL = 2       // 自动滚动定时器
+		TIMER_AUTO_SCROLL = 2,      // 自动滚动定时器
+		TIMER_VISIBLE_THUMBNAILS = 3
 	};
 
 	// 常量定义
@@ -114,6 +115,8 @@ private:
 	// 初始化和渲染
 	void InitializeThumbnailList();
 	void LoadAllThumbnails();
+	void ResetThumbnailImageList();
+	void RenderVisibleThumbnails();
 	HBITMAP RenderThumbnail(int pageNumber, int currentPos, int originalPos, int rotationAngle = 0);
 	HBITMAP RenderThumbnailFromSource(const CString& sourceFile, int pageIndex, int currentPos, int originalPos, int rotationAngle = 0);
 	HBITMAP RenderPreviewBitmap(const CString& sourceFile, int pageIndex, int rotationAngle = 0);

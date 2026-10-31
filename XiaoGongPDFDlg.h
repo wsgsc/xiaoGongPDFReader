@@ -11,6 +11,7 @@
 #include "ModernTabCtrl.h"     // 包含现代化Tab控件
 #include "CustomButton.h"      // 包含自定义按钮类
 #include <list>
+#include <atomic>
 
 // 应用程序最小尺寸常量
 #define APP_MINWIDTH 800
@@ -30,18 +31,20 @@ class CXiaoGongPDFDlg;
 class CPDFViewCtrl : public CStatic
 {
 public:
-	CPDFViewCtrl() : m_pParentDlg(nullptr), m_oldWndProc(nullptr), m_hDisplayBitmap(nullptr) {}
+	CPDFViewCtrl() : m_pParentDlg(nullptr), m_hDisplayBitmap(nullptr) {}
 	void SetParentDlg(CXiaoGongPDFDlg* pDlg) { m_pParentDlg = pDlg; }
-	void SubclassWindow();
 	void SetDisplayBitmap(HBITMAP hBitmap);  // ★★★ 替代 SetBitmap，避免内部白色背景闪烁
 
 protected:
 	CXiaoGongPDFDlg* m_pParentDlg;
-	WNDPROC m_oldWndProc;
 	HBITMAP m_hDisplayBitmap;  // ★★★ 直接持有位图句柄，不经过 CStatic::SetBitmap
 
-	static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
-
+	void ForwardMouseMessage(UINT message, UINT nFlags, CPoint point);
+	afx_msg void OnLButtonDown(UINT nFlags, CPoint point);
+	afx_msg void OnLButtonUp(UINT nFlags, CPoint point);
+	afx_msg void OnMouseMove(UINT nFlags, CPoint point);
+	afx_msg void OnRButtonUp(UINT nFlags, CPoint point);
+	afx_msg BOOL OnEraseBkgnd(CDC* pDC);
 	afx_msg void OnVScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar);
 	afx_msg void OnHScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar);
 	afx_msg void OnPaint();  // ★★★ 自定义绘制，支持滚动偏移
@@ -65,6 +68,8 @@ public:
 	int m_copies;               // 份数
 	BOOL m_bCollate;            // 自动分页
 	BOOL m_bDuplex;             // 双面打印
+	DEVMODE* GetDevMode() { return m_devMode.empty() ? nullptr :
+		reinterpret_cast<DEVMODE*>(m_devMode.data()); }
 
 protected:
 	virtual void DoDataExchange(CDataExchange* pDX);
@@ -88,6 +93,7 @@ private:
 	CEdit m_copiesEdit;         // 份数编辑框
 	CButton m_collateCheck;     // 自动分页复选框
 	CButton m_duplexCheck;      // 双面打印复选框
+	std::vector<DWORD> m_devMode;
 
 	void EnumeratePrinters();   // 枚举打印机
 	void UpdateControls();      // 更新控件状态
@@ -136,6 +142,7 @@ private:
 	CCustomButton m_btnRotateLeft;    // 向左旋转按钮
 	CCustomButton m_btnRotateRight;   // 向右旋转按钮
 	CCustomButton m_btnEdit;          // 编辑按钮
+	CCustomButton m_btnSelectText;    // 文本选择按钮
 	CButton m_checkThumbnail;         // 缩略图复选框
 	CEdit m_editCurrent;
 	CStatic m_statusBar;        // 状态栏
@@ -164,15 +171,17 @@ private:
 	struct PDFLoadParams {
 		CString filePath;
 		std::vector<char> utf8Path;
-		CXiaoGongPDFDlg* pDlg;
+		HWND notifyWnd;
 		CPDFDocument* pDoc;
 		bool success;
+		std::atomic<bool> cancelled{ false };
 		CString errorMsg;
 	};
 	static UINT PDFLoadThreadProc(LPVOID pParam);  // 后台加载线程函数
 	CWinThread* m_pLoadThread;  // 加载线程指针
 	PDFLoadParams* m_pLoadParams;  // 加载参数
 	CDialog* m_pProgressDlg;  // 进度对话框指针
+	bool m_closePending;  // 等待后台加载结束后再关闭窗口
 
 	// 缩放相关（ZoomMode 定义在 PDFDocument.h 中）
 	ZoomMode m_zoomMode;
@@ -236,6 +245,17 @@ private:
 	HCURSOR m_hHandCursorGrab;  // 抓取光标
 	HBITMAP m_hPanPageBitmap;   // 拖拽时缓存的PDF页面位图（不含偏移）
 	bool m_canDrag;             // ★★★ 缓存：当前页面是否可以拖动（避免频繁计算）
+
+	// 文本选择相关
+	bool m_selectionMode;       // true = 文本选择模式, false = 拖拽模式
+	bool m_isSelecting;         // 鼠标按下正在选择中
+	bool m_hasSelection;        // 是否有有效的选中区域
+	CPoint m_selStartView;      // 选择起始点（PDF视图客户区坐标）
+	CPoint m_selEndView;        // 选择终止点（PDF视图客户区坐标）
+	int m_selPageNumber;        // 选择起始的页码
+	fz_stext_page* m_selectionTextPage;
+	std::vector<fz_quad> m_selectionQuads;
+	CString m_selectedText;
 
 	// 滚动条拖拽相关
 	bool m_isDraggingScrollbar;     // 是否正在拖拽滚动条
@@ -303,19 +323,26 @@ private:
 
 	// 搜索后台线程相关
 	struct SearchParams {
-		CXiaoGongPDFDlg* pDlg;
+		HWND notifyWnd;
 		CPDFDocument* pDoc;
+		UINT_PTR taskId;
 		std::vector<char> utf8Keyword;
+		std::vector<char> utf8Path;
 		bool caseSensitive;
+		bool failed;
 		std::vector<SearchMatch> results;
-		bool cancelled;
-		SearchParams() : pDlg(nullptr), pDoc(nullptr), caseSensitive(false), cancelled(false) {}
+		std::atomic<bool> cancelled;
+		SearchParams() : notifyWnd(nullptr), pDoc(nullptr), taskId(0),
+			caseSensitive(false), failed(false), cancelled(false) {}
 	};
 	CWinThread* m_pSearchThread;
 	SearchParams* m_pSearchParams;
 	bool m_isSearching;
+	UINT_PTR m_searchTaskId;
 	static UINT SearchThreadProc(LPVOID pParam);
+	void StopSearch();
 	afx_msg LRESULT OnSearchComplete(WPARAM wParam, LPARAM lParam);
+	afx_msg LRESULT OnSearchProgress(WPARAM wParam, LPARAM lParam);
 
 	// 防止 static 局部变量跨实例污染，改为成员变量
 	bool m_isThumbnailSubclassed;
@@ -351,6 +378,7 @@ protected:
     afx_msg LRESULT OnOpenInitialFile(WPARAM wParam, LPARAM lParam);  // 延迟打开初始文件
     afx_msg LRESULT OnUpdateThumbnailHighlight(WPARAM wParam, LPARAM lParam);  // 延迟更新缩略图高亮
     afx_msg LRESULT OnPDFLoadComplete(WPARAM wParam, LPARAM lParam);  // PDF后台加载完成
+    afx_msg LRESULT OnPDFLoadCancelled(WPARAM wParam, LPARAM lParam);
     afx_msg void OnTimer(UINT_PTR nIDEvent);  // 定时器消息处理（用于去抖动缩略图高亮更新）
 
     // 工具栏相关函数
@@ -393,13 +421,14 @@ protected:
 
 	void OnOK();
 	void OnCancel();
+	afx_msg void OnClose();
 
 	void OnDestroy();
 
 	void PostNcDestroy();
 
 	// 打印相关
-	void PrintSinglePage(CDC& dcPrint, int pageNum, int horRes, int verRes, BOOL bDuplex);
+	bool PrintSinglePage(CDC& dcPrint, int pageNum, int horRes, int verRes);
 
 	void UIRelease();
 
@@ -408,6 +437,9 @@ protected:
 	void ClearPageCache();
 	void SaveDialogStateToDocument(CPDFDocument* pDoc, bool transferBitmaps = true);
 	void LoadDialogStateFromDocument(CPDFDocument* pDoc);
+	CString ReadingStateKey(const CString& filePath) const;
+	void SaveReadingPosition(CPDFDocument* pDoc);
+	void RestoreReadingPosition(CPDFDocument* pDoc);
 	void CloseProgressDialog();
 	void ReleaseLoadThread();
 	void CleanupPendingLoad();
@@ -456,6 +488,7 @@ protected:
     afx_msg void OnLButtonDown(UINT nFlags, CPoint point);
     afx_msg void OnLButtonUp(UINT nFlags, CPoint point);
     afx_msg void OnMouseMove(UINT nFlags, CPoint point);
+    afx_msg void OnContextMenu(CWnd* pWnd, CPoint point);
     afx_msg BOOL OnSetCursor(CWnd* pWnd, UINT nHitTest, UINT message);
     void ResetPanOffset();  // 重置平移偏移量
 
@@ -473,6 +506,7 @@ protected:
     void GoToPrevMatch();  // 跳转到上一个匹配项
     void ClearSearchResults();  // 清除搜索结果
     void HighlightSearchMatches(CDC* pDC, int pageNumber);  // 高亮显示搜索匹配项
+    void UpdateSelectionHighlight(CDC* pDC, int pageNumber);  // 绘制文本选择高亮
     CRect TransformQuadToScreen(const fz_quad& quad, int pageNumber);  // 将PDF坐标转换为屏幕坐标
 	void RebuildSearchMatchPageIndex();
 	bool TryGetPageBaseBounds(int pageNumber, fz_rect& outBounds) const;
@@ -481,6 +515,17 @@ protected:
     afx_msg void OnBtnFind();  // 查找按钮点击事件
     afx_msg void OnBtnNextMatch();  // 下一个匹配按钮点击事件
     afx_msg void OnBtnPrevMatch();  // 上一个匹配按钮点击事件
+    afx_msg void OnBtnSelectText();  // 文本选择按钮点击事件
+
+    // 文本选择相关函数
+    CString ExtractSelectedText();              // 提取选中的文本
+    void CopySelectionToClipboard();            // 复制选中文本到剪贴板
+    bool ScreenPointToPdfCoords(CPoint viewPt, int pageNumber, float& pdfX, float& pdfY);
+    bool GetSelectionPageTransform(int pageNumber, fz_rect& bounds, float& scale,
+        int& offsetX, int& offsetY);
+    void UpdateSelectedText();
+    void ClearSelection();                       // 清除当前选择
+    void InvalidateSelection();                  // 重绘视图以更新选择高亮
 
 public:
 	bool RenderPage(int pageNumber);  // 新增：渲染指定页面
