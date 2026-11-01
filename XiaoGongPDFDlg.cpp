@@ -159,6 +159,185 @@ namespace
 	}
 }
 
+BEGIN_MESSAGE_MAP(CPDFScrollBar, CWnd)
+	ON_WM_PAINT()
+	ON_WM_ERASEBKGND()
+	ON_WM_LBUTTONDOWN()
+	ON_WM_LBUTTONUP()
+	ON_WM_MOUSEMOVE()
+	ON_WM_MOUSEWHEEL()
+	ON_WM_CAPTURECHANGED()
+END_MESSAGE_MAP()
+
+CPDFScrollBar::CPDFScrollBar(bool vertical)
+	: m_pParentDlg(nullptr), m_vertical(vertical), m_contentLength(0), m_pageLength(0),
+	m_position(0), m_dragOffset(0), m_dragging(false)
+{
+}
+
+void CPDFScrollBar::SetRange(int contentLength, int pageLength, int position)
+{
+	contentLength = max(0, contentLength);
+	pageLength = max(0, pageLength);
+	position = max(0, min(position, max(0, contentLength - pageLength)));
+	if (m_contentLength == contentLength && m_pageLength == pageLength && m_position == position)
+		return;
+	m_contentLength = contentLength;
+	m_pageLength = pageLength;
+	m_position = position;
+	if (GetSafeHwnd())
+		Invalidate(FALSE);
+}
+
+CRect CPDFScrollBar::ThumbRect() const
+{
+	CRect rc;
+	GetClientRect(&rc);
+	const int length = m_vertical ? rc.Height() : rc.Width();
+	const int crossLength = m_vertical ? rc.Width() : rc.Height();
+	const int buttonLength = min(16, length / 2);
+	const int trackLength = max(0, length - buttonLength * 2);
+	if (trackLength == 0)
+		return CRect(0, 0, 0, 0);
+	const int proportionalLength = m_contentLength > 0 ?
+		static_cast<int>(static_cast<double>(trackLength) * m_pageLength / m_contentLength) : trackLength;
+	const int horizontalLimit = max(1, trackLength / 20);
+	const int thumbLength = m_vertical ?
+		min(trackLength, max(24, min(44, proportionalLength))) :
+		min(horizontalLimit, max(1, proportionalLength));
+	const int maxScroll = max(0, m_contentLength - m_pageLength);
+	const int travel = trackLength - thumbLength;
+	const int start = buttonLength + (maxScroll > 0 ?
+		static_cast<int>(static_cast<double>(m_position) * travel / maxScroll) : 0);
+	const int crossSize = min(12, max(0, crossLength - 4));
+	const int crossStart = (crossLength - crossSize) / 2;
+	return m_vertical ?
+		CRect(crossStart, start, crossStart + crossSize, start + thumbLength) :
+		CRect(start, crossStart, start + thumbLength, crossStart + crossSize);
+}
+
+BOOL CPDFScrollBar::OnEraseBkgnd(CDC*)
+{
+	return TRUE;
+}
+
+void CPDFScrollBar::OnPaint()
+{
+	CPaintDC dc(this);
+	CRect rc;
+	GetClientRect(&rc);
+	dc.FillSolidRect(&rc, RGB(250, 250, 250));
+	if ((m_vertical ? rc.Height() : rc.Width()) < 32)
+		return;
+	const COLORREF grey = RGB(133, 133, 133);
+	CPen pen(PS_SOLID, 1, grey);
+	CPen* oldPen = dc.SelectObject(&pen);
+	CBrush arrowBrush(grey);
+	CBrush* oldBrush = dc.SelectObject(&arrowBrush);
+	if (m_vertical)
+	{
+		const int cx = rc.Width() / 2;
+		POINT first[] = { {cx, 6}, {cx - 5, 12}, {cx + 5, 12} };
+		POINT last[] = { {cx - 5, rc.bottom - 12}, {cx + 5, rc.bottom - 12}, {cx, rc.bottom - 6} };
+		dc.Polygon(first, 3);
+		dc.Polygon(last, 3);
+	}
+	else
+	{
+		const int cy = rc.Height() / 2;
+		POINT first[] = { {6, cy}, {12, cy - 5}, {12, cy + 5} };
+		POINT last[] = { {rc.right - 12, cy - 5}, {rc.right - 12, cy + 5}, {rc.right - 6, cy} };
+		dc.Polygon(first, 3);
+		dc.Polygon(last, 3);
+	}
+	if (m_contentLength > m_pageLength)
+	{
+		CRect thumb = ThumbRect();
+		dc.RoundRect(&thumb, CPoint(min(10, thumb.Width()), min(10, thumb.Height())));
+	}
+	dc.SelectObject(oldBrush);
+	dc.SelectObject(oldPen);
+}
+
+void CPDFScrollBar::ScrollTo(int position)
+{
+	if (!m_pParentDlg || !m_pParentDlg->GetSafeHwnd())
+		return;
+	if (m_vertical)
+		m_pParentDlg->ScrollToVerticalPosition(position);
+	else
+		m_pParentDlg->ScrollToHorizontalPosition(position);
+}
+
+void CPDFScrollBar::OnLButtonDown(UINT, CPoint point)
+{
+	CRect rc;
+	GetClientRect(&rc);
+	const int coordinate = m_vertical ? point.y : point.x;
+	const int length = m_vertical ? rc.Height() : rc.Width();
+	if (coordinate < 16)
+		ScrollTo(m_position - 20);
+	else if (coordinate >= length - 16)
+		ScrollTo(m_position + 20);
+	else if (m_contentLength > m_pageLength)
+	{
+		CRect thumb = ThumbRect();
+		if (thumb.PtInRect(point))
+		{
+			m_dragging = true;
+			m_dragOffset = coordinate - (m_vertical ? thumb.top : thumb.left);
+			SetCapture();
+		}
+		else
+			ScrollTo(m_position + (coordinate < (m_vertical ? thumb.top : thumb.left) ?
+				-m_pageLength : m_pageLength));
+	}
+}
+
+void CPDFScrollBar::OnMouseMove(UINT nFlags, CPoint point)
+{
+	if (!m_dragging || !(nFlags & MK_LBUTTON))
+		return;
+	CRect rc;
+	GetClientRect(&rc);
+	const int length = m_vertical ? rc.Height() : rc.Width();
+	const CRect thumb = ThumbRect();
+	const int thumbLength = m_vertical ? thumb.Height() : thumb.Width();
+	const int travel = max(0, length - 32 - thumbLength);
+	const int maxScroll = max(0, m_contentLength - m_pageLength);
+	const int coordinate = m_vertical ? point.y : point.x;
+	if (travel > 0)
+		ScrollTo(static_cast<int>(static_cast<double>(
+			max(0, min(travel, coordinate - m_dragOffset - 16))) * maxScroll / travel));
+}
+
+BOOL CPDFScrollBar::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
+{
+	if (!m_pParentDlg || !m_pParentDlg->GetSafeHwnd())
+		return FALSE;
+	CRect viewRect;
+	m_pParentDlg->m_pdfView.GetWindowRect(&viewRect);
+	if (viewRect.IsRectEmpty())
+		return FALSE;
+	pt.x = max(viewRect.left, min(pt.x, viewRect.right - 1));
+	pt.y = max(viewRect.top, min(pt.y, viewRect.bottom - 1));
+	return m_pParentDlg->OnMouseWheel(nFlags, zDelta, pt);
+}
+
+void CPDFScrollBar::OnLButtonUp(UINT, CPoint)
+{
+	if (m_dragging)
+	{
+		m_dragging = false;
+		ReleaseCapture();
+	}
+}
+
+void CPDFScrollBar::OnCaptureChanged(CWnd*)
+{
+	m_dragging = false;
+}
+
 // ============================================================================
 // CPDFViewCtrl 实现（自定义PDF预览控件，支持滚动条）
 // ============================================================================
@@ -1208,12 +1387,12 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	// 显示PDF 需要设置控件类型如下
 	// 设置 Picture Control 样式
 	DWORD style = m_pdfView.GetStyle();
-	style = (style & ~SS_TYPEMASK) | SS_BITMAP | SS_CENTERIMAGE | SS_NOTIFY |
-		WS_VSCROLL | WS_HSCROLL;
+	style = (style & ~SS_TYPEMASK & ~WS_VSCROLL & ~WS_HSCROLL) |
+		SS_BITMAP | SS_CENTERIMAGE | SS_NOTIFY;
 	::SetWindowLong(m_pdfView.GetSafeHwnd(), GWL_STYLE, style);
 
 	// 更新控件
-	m_pdfView.ModifyStyle(0, SS_NOTIFY | SS_CENTERIMAGE | WS_VSCROLL | WS_HSCROLL);
+	m_pdfView.ModifyStyle(WS_VSCROLL | WS_HSCROLL, SS_NOTIFY | SS_CENTERIMAGE);
 
 	// ★★★ 启用WS_EX_COMPOSITED扩展样式，使用桌面合成来减少高刷新率显示器上的闪烁
 	// 这会让Windows使用双缓冲合成来渲染控件，避免直接绘制时的闪白问题
@@ -1225,6 +1404,16 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 
 	// ★★★ 初始化自定义PDF预览控件，使其能够转发滚动条消息
 	m_pdfView.SetParentDlg(this);
+	m_pdfVerticalScrollBar.SetParentDlg(this);
+	m_pdfVerticalScrollBar.CreateEx(0, AfxRegisterWndClass(CS_DBLCLKS,
+		::LoadCursor(nullptr, IDC_ARROW)), _T("PDF vertical scrollbar"),
+		WS_CHILD, CRect(0, 0, 16, 100), this, 0);
+	m_pdfHorizontalScrollBar.SetParentDlg(this);
+	m_pdfHorizontalScrollBar.CreateEx(0, AfxRegisterWndClass(CS_DBLCLKS,
+		::LoadCursor(nullptr, IDC_ARROW)), _T("PDF horizontal scrollbar"),
+		WS_CHILD, CRect(0, 0, 100, 16), this, 0);
+	m_pdfScrollCorner.Create(_T(""), WS_CHILD | SS_WHITERECT,
+		CRect(0, 0, 16, 16), this, 0);
 
 	// 初始状态隐藏滚动条（未加载PDF时不显示）
 	m_pdfView.ShowScrollBar(SB_VERT, FALSE);
@@ -2982,23 +3171,37 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		}
 
 		// PDF视图，为状态栏留出空间
-		m_pdfView.MoveWindow(pdfX, contentY, pdfWidth, contentHeight);
+		const int scrollBarSize = 16;
+		m_pdfView.MoveWindow(pdfX, contentY, max(1, pdfWidth - scrollBarSize),
+			max(1, contentHeight - scrollBarSize));
+		if (m_pdfVerticalScrollBar.GetSafeHwnd())
+		{
+			m_pdfVerticalScrollBar.MoveWindow(pdfX + pdfWidth - scrollBarSize,
+				contentY, scrollBarSize, max(1, contentHeight - scrollBarSize));
+			if (!m_doc)
+				m_pdfVerticalScrollBar.ShowWindow(SW_HIDE);
+		}
+		if (m_pdfHorizontalScrollBar.GetSafeHwnd())
+		{
+			m_pdfHorizontalScrollBar.MoveWindow(pdfX, contentY + contentHeight - scrollBarSize,
+				max(1, pdfWidth - scrollBarSize), scrollBarSize);
+			if (!m_doc)
+				m_pdfHorizontalScrollBar.ShowWindow(SW_HIDE);
+		}
+		if (m_pdfScrollCorner.GetSafeHwnd())
+		{
+			m_pdfScrollCorner.MoveWindow(pdfX + pdfWidth - scrollBarSize,
+				contentY + contentHeight - scrollBarSize, scrollBarSize, scrollBarSize);
+			if (!m_doc)
+				m_pdfScrollCorner.ShowWindow(SW_HIDE);
+		}
 
 		// ★★★ 不清除旧位图，让旧位图保留到防抖渲染完成后原子替换，避免 150ms 灰屏。
 		// OnPaint 中的裁剪逻辑（drawW/drawH 限制在客户区范围内）保证旧位图不会溢出新边界。
 
 		// ★★★ MoveWindow 会重置控件状态，需要立即根据模式设置滚动条
-		if (m_continuousScrollMode)
-		{
-			// 连续滚动模式：显示滚动条
-			m_pdfView.ShowScrollBar(SB_VERT, TRUE);
-			m_pdfView.EnableScrollBarCtrl(SB_VERT, TRUE);
-		}
-		else
-		{
-			// 分页模式：隐藏滚动条
-			m_pdfView.ShowScrollBar(SB_VERT, FALSE);
-		}
+		m_pdfView.ShowScrollBar(SB_VERT, FALSE);
+		m_pdfView.ShowScrollBar(SB_HORZ, FALSE);
 
 		// 状态栏在最底部
 		m_statusBar.MoveWindow(MARGIN, cy - MARGIN - STATUS_BAR_HEIGHT,
@@ -4093,6 +4296,12 @@ void CXiaoGongPDFDlg::EnterFullscreen()
 	{
 		m_pdfView.MoveWindow(0, 0, screenWidth, screenHeight);
 	}
+	if (m_pdfVerticalScrollBar.GetSafeHwnd())
+		m_pdfVerticalScrollBar.ShowWindow(SW_HIDE);
+	if (m_pdfHorizontalScrollBar.GetSafeHwnd())
+		m_pdfHorizontalScrollBar.ShowWindow(SW_HIDE);
+	if (m_pdfScrollCorner.GetSafeHwnd())
+		m_pdfScrollCorner.ShowWindow(SW_HIDE);
 
 	// ★★★ 重新渲染当前页面以适应新的窗口尺寸
 	if (m_doc && m_currentPage >= 0 && m_currentPage < m_totalPages)
@@ -5453,29 +5662,6 @@ void CXiaoGongPDFDlg::OnLButtonDown(UINT nFlags, CPoint point)
 			point.x, point.y, pdfRect.left, pdfRect.top, pdfRect.right, pdfRect.bottom,
 			pdfViewPoint.x, pdfViewPoint.y);
 #endif
-
-		// 检查是否点击在滚动条区域
-		CRect pdfClientRect;
-		m_pdfView.GetClientRect(&pdfClientRect);
-		int scrollBarWidth = GetSystemMetrics(SM_CXVSCROLL);
-
-		if (pdfViewPoint.x >= pdfClientRect.right - scrollBarWidth)
-		{
-			// 在连续滚动模式下，手动处理滚动条拖拽
-			if (m_continuousScrollMode)
-			{
-				m_isDraggingScrollbar = true;
-				m_scrollbarDragStartY = point.y;
-				m_scrollbarDragStartPos = m_scrollPosition;
-				SetCapture();
-				::SetCursor(::LoadCursor(nullptr, IDC_ARROW));
-				return;
-			}
-			else
-			{
-				return;
-			}
-		}
 
 		// ★★★ 文本选择模式：不启动拖拽，开始文本选择
 		if (m_selectionMode && m_doc != nullptr && m_totalPages > 0)
@@ -7082,7 +7268,8 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 		HBITMAP oldPageBmp = (HBITMAP)pageDC.SelectObject(hBitmap);
 
 		int destY = pageY - visibleTop + m_panOffset.y;
-		int destX = (viewWidth - width) / 2 + m_panOffset.x;
+		int destX = (width < viewWidth ? (viewWidth - width) / 2 :
+			-min(m_scrollPositionH, width - viewWidth)) + m_panOffset.x;
 
 #ifdef _DEBUG
 		TRACE(_T("  Page %d: pageY=%d, size=(%d,%d), dest=(%d,%d)\n"),
@@ -7300,6 +7487,43 @@ void CXiaoGongPDFDlg::OnVScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar)
 	CDialogEx::OnVScroll(nSBCode, nPos, pScrollBar);
 }
 
+void CXiaoGongPDFDlg::ScrollToVerticalPosition(int position)
+{
+	if (!m_doc || m_isFullscreen)
+		return;
+	CRect viewRect;
+	m_pdfView.GetClientRect(&viewRect);
+	position = max(0, min(position, max(0, m_totalScrollHeight - viewRect.Height())));
+	if (position == m_scrollPosition)
+		return;
+	m_scrollPosition = position;
+	UpdateScrollBar();
+	if (m_continuousScrollMode)
+		RenderVisiblePages();
+	else
+		RefreshCurrentView();
+}
+
+void CXiaoGongPDFDlg::ScrollToHorizontalPosition(int position)
+{
+	if (!m_doc || m_isFullscreen)
+		return;
+	CRect viewRect;
+	m_pdfView.GetClientRect(&viewRect);
+	position = max(0, min(position, max(0, m_totalScrollWidth - viewRect.Width())));
+	if (position == m_scrollPositionH)
+		return;
+	m_scrollPositionH = position;
+	UpdateScrollBar();
+	if (m_continuousScrollMode)
+	{
+		RenderVisiblePages();
+		RefreshCurrentView();
+	}
+	else
+		RefreshCurrentView();
+}
+
 // ★★★ 横向滚动条消息处理
 void CXiaoGongPDFDlg::OnHScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar)
 {
@@ -7383,208 +7607,42 @@ void CXiaoGongPDFDlg::UpdateScrollBar()
 	{
 		m_pdfView.ShowScrollBar(SB_VERT, FALSE);
 		m_pdfView.ShowScrollBar(SB_HORZ, FALSE);
+		if (m_pdfVerticalScrollBar.GetSafeHwnd())
+			m_pdfVerticalScrollBar.ShowWindow(SW_HIDE);
+		if (m_pdfHorizontalScrollBar.GetSafeHwnd())
+			m_pdfHorizontalScrollBar.ShowWindow(SW_HIDE);
+		if (m_pdfScrollCorner.GetSafeHwnd())
+			m_pdfScrollCorner.ShowWindow(SW_HIDE);
 		return;
 	}
 
 	CRect viewRect;
 	m_pdfView.GetClientRect(&viewRect);
 
-	// ★★★ 确保滚动位置在有效范围内
-	int maxScrollY = m_totalScrollHeight - viewRect.Height();
-	if (maxScrollY < 0) maxScrollY = 0;
-	if (m_scrollPosition > maxScrollY) m_scrollPosition = maxScrollY;
-	if (m_scrollPosition < 0) m_scrollPosition = 0;
-
-	int maxScrollX = m_totalScrollWidth - viewRect.Width();
-	if (maxScrollX < 0) maxScrollX = 0;
-	if (m_scrollPositionH > maxScrollX) m_scrollPositionH = maxScrollX;
-	if (m_scrollPositionH < 0) m_scrollPositionH = 0;
-
-	// ★★★ 更新垂直滚动条
-	if (m_continuousScrollMode)
+	// The custom bars use document coordinates directly, without the 16-bit scroll message limit.
+	m_pdfView.ShowScrollBar(SB_VERT, FALSE);
+	m_pdfView.ShowScrollBar(SB_HORZ, FALSE);
+	m_pdfView.GetClientRect(&viewRect);
+	m_scrollPosition = max(0, min(m_scrollPosition,
+		max(0, m_totalScrollHeight - viewRect.Height())));
+	m_scrollPositionH = max(0, min(m_scrollPositionH,
+		max(0, m_totalScrollWidth - viewRect.Width())));
+	if (m_pdfVerticalScrollBar.GetSafeHwnd())
 	{
-		// 连续滚动模式：只有当内容超过视图时才显示滚动条
-		if (m_totalScrollHeight > viewRect.Height())
-		{
-			// ★★★ 关键修复：确保滚动条可见（SetScrollInfo不会自动显示）
-			m_pdfView.ShowScrollBar(SB_VERT, TRUE);
-			m_pdfView.EnableScrollBarCtrl(SB_VERT, TRUE);
-
-			SCROLLINFO si = { 0 };
-			si.cbSize = sizeof(SCROLLINFO);
-			si.fMask = SIF_ALL | SIF_DISABLENOSCROLL;
-			si.nMin = 0;
-			// nMax = 总内容高度减1
-			si.nMax = max(0, m_totalScrollHeight - 1);
-			si.nPage = viewRect.Height();
-			
-			// ★★★ 修复：确保滑块不会太大
-			// 计算当前滑块比例
-			int scrollRange = si.nMax - si.nMin + 1;
-			if (scrollRange > 0)
-			{
-				float thumbRatio = (float)si.nPage / scrollRange;
-				
-				// 设置最大滑块比例（对应最小滑块高度）
-				// 我们想要较小的滑块，设置最大比例5%
-				const float MAX_THUMB_RATIO = 0.05f;  // 最大滑块比例5%
-				
-				if (thumbRatio > MAX_THUMB_RATIO)
-				{
-					// 调整nPage，使滑块比例不超过MAX_THUMB_RATIO
-					// 这会使滑块变小
-					si.nPage = (int)(scrollRange * MAX_THUMB_RATIO);
-					// 确保nPage至少为1
-					if (si.nPage < 1) si.nPage = 1;
-				}
-			}
-			
-			// ★★★ 修复：将滚动位置从内容坐标系转换到滚动条坐标系
-			// 内容坐标系：m_scrollPosition ∈ [0, m_totalScrollHeight - viewRect.Height()]
-			// 滚动条坐标系：si.nPos ∈ [0, si.nMax - si.nPage + 1]
-			// 需要线性映射
-			int contentMaxScroll = max(0, m_totalScrollHeight - viewRect.Height());
-			int scrollbarMaxPos = max(0, si.nMax - si.nPage + 1);
-			
-			if (contentMaxScroll > 0 && scrollbarMaxPos > 0)
-			{
-				// 线性映射：将m_scrollPosition映射到滚动条位置
-				si.nPos = (int)((float)m_scrollPosition / contentMaxScroll * scrollbarMaxPos);
-			}
-			else
-			{
-				si.nPos = 0;
-			}
-			
-			::SetScrollInfo(m_pdfView.GetSafeHwnd(), SB_VERT, &si, TRUE);
-		}
-		else
-		{
-			// 内容没有超过视图，禁用垂直滚动条
-			m_pdfView.ShowScrollBar(SB_VERT, FALSE);
-		}
+		m_pdfVerticalScrollBar.SetRange(m_totalScrollHeight, viewRect.Height(), m_scrollPosition);
+		m_pdfVerticalScrollBar.ShowWindow(m_doc && m_totalScrollHeight > viewRect.Height() ?
+			SW_SHOW : SW_HIDE);
 	}
-	else
+	if (m_pdfHorizontalScrollBar.GetSafeHwnd())
 	{
-		// 分页模式：只在内容超过视图时设置垂直滚动条
-		if (m_totalScrollHeight > viewRect.Height())
-		{
-			// ★★★ 关键修复：确保滚动条可见（SetScrollInfo不会自动显示）
-			m_pdfView.ShowScrollBar(SB_VERT, TRUE);
-			m_pdfView.EnableScrollBarCtrl(SB_VERT, TRUE);
-
-			SCROLLINFO si = { 0 };
-			si.cbSize = sizeof(SCROLLINFO);
-			si.fMask = SIF_ALL | SIF_DISABLENOSCROLL;
-			si.nMin = 0;
-			// nMax = 总内容高度减1
-			si.nMax = max(0, m_totalScrollHeight - 1);
-			si.nPage = viewRect.Height();
-			
-			// ★★★ 修复：确保滑块不会太大
-			// 计算当前滑块比例
-			int scrollRange = si.nMax - si.nMin + 1;
-			if (scrollRange > 0)
-			{
-				float thumbRatio = (float)si.nPage / scrollRange;
-				
-				// 分页模式也使用相同的最大滑块比例
-				const float MAX_THUMB_RATIO = 0.05f;  // 最大滑块比例5%
-				
-				if (thumbRatio > MAX_THUMB_RATIO)
-				{
-					// 调整nPage，使滑块比例不超过MAX_THUMB_RATIO
-					si.nPage = (int)(scrollRange * MAX_THUMB_RATIO);
-					// 确保nPage至少为1
-					if (si.nPage < 1) si.nPage = 1;
-				}
-			}
-			
-			// ★★★ 修复：将滚动位置从内容坐标系转换到滚动条坐标系
-			// 内容坐标系：m_scrollPosition ∈ [0, m_totalScrollHeight - viewRect.Height()]
-			// 滚动条坐标系：si.nPos ∈ [0, si.nMax - si.nPage + 1]
-			// 需要线性映射
-			int contentMaxScroll = max(0, m_totalScrollHeight - viewRect.Height());
-			int scrollbarMaxPos = max(0, si.nMax - si.nPage + 1);
-			
-			if (contentMaxScroll > 0 && scrollbarMaxPos > 0)
-			{
-				// 线性映射：将m_scrollPosition映射到滚动条位置
-				si.nPos = (int)((float)m_scrollPosition / contentMaxScroll * scrollbarMaxPos);
-			}
-			else
-			{
-				si.nPos = 0;
-			}
-			
-			::SetScrollInfo(m_pdfView.GetSafeHwnd(), SB_VERT, &si, TRUE);
-		}
-		else
-		{
-			// 内容没有超过视图，禁用垂直滚动条
-			m_pdfView.ShowScrollBar(SB_VERT, FALSE);
-		}
+		m_pdfHorizontalScrollBar.SetRange(m_totalScrollWidth, viewRect.Width(), m_scrollPositionH);
+		m_pdfHorizontalScrollBar.ShowWindow(m_doc && m_totalScrollWidth > viewRect.Width() ?
+			SW_SHOW : SW_HIDE);
 	}
-
-	// ★★★ 更新横向滚动条
-	// 只在内容超过视图宽度时设置横向滚动条
-	if (m_totalScrollWidth > viewRect.Width())
-	{
-		// ★★★ 关键修复：确保横向滚动条可见
-		m_pdfView.ShowScrollBar(SB_HORZ, TRUE);
-		m_pdfView.EnableScrollBarCtrl(SB_HORZ, TRUE);
-
-		SCROLLINFO siH = { 0 };
-		siH.cbSize = sizeof(SCROLLINFO);
-		siH.fMask = SIF_ALL | SIF_DISABLENOSCROLL;
-		siH.nMin = 0;
-		// nMax = 总内容宽度减1
-		siH.nMax = max(0, m_totalScrollWidth - 1);
-		siH.nPage = viewRect.Width();
-		
-		// ★★★ 修复：确保滑块不会太大
-		// 计算当前滑块比例
-		int scrollRangeH = siH.nMax - siH.nMin + 1;
-		if (scrollRangeH > 0)
-		{
-			float thumbRatioH = (float)siH.nPage / scrollRangeH;
-			
-			// 横向滚动条也使用相同的最大滑块比例
-			const float MAX_THUMB_RATIO_H = 0.05f;  // 最大滑块比例5%
-			
-			if (thumbRatioH > MAX_THUMB_RATIO_H)
-			{
-				// 调整nPage，使滑块比例不超过MAX_THUMB_RATIO_H
-				siH.nPage = (int)(scrollRangeH * MAX_THUMB_RATIO_H);
-				// 确保nPage至少为1
-				if (siH.nPage < 1) siH.nPage = 1;
-			}
-		}
-		
-		// ★★★ 修复：将滚动位置从内容坐标系转换到滚动条坐标系
-		// 内容坐标系：m_scrollPositionH ∈ [0, m_totalScrollWidth - viewRect.Width()]
-		// 滚动条坐标系：siH.nPos ∈ [0, siH.nMax - siH.nPage + 1]
-		// 需要线性映射
-		int contentMaxScrollH = max(0, m_totalScrollWidth - viewRect.Width());
-		int scrollbarMaxPosH = max(0, siH.nMax - siH.nPage + 1);
-		
-		if (contentMaxScrollH > 0 && scrollbarMaxPosH > 0)
-		{
-			// 线性映射：将m_scrollPositionH映射到滚动条位置
-			siH.nPos = (int)((float)m_scrollPositionH / contentMaxScrollH * scrollbarMaxPosH);
-		}
-		else
-		{
-			siH.nPos = 0;
-		}
-		
-		::SetScrollInfo(m_pdfView.GetSafeHwnd(), SB_HORZ, &siH, TRUE);
-	}
-	else
-	{
-		// 内容没有超过视图宽度，禁用横向滚动条
-		m_pdfView.ShowScrollBar(SB_HORZ, FALSE);
-	}
+	if (m_pdfScrollCorner.GetSafeHwnd())
+		m_pdfScrollCorner.ShowWindow(m_doc &&
+			(m_totalScrollHeight > viewRect.Height() || m_totalScrollWidth > viewRect.Width()) ?
+			SW_SHOW : SW_HIDE);
 }
 
 // 获取指定位置的页面索引

@@ -24,6 +24,35 @@
 // 前向声明
 class CXiaoGongPDFDlg;
 
+class CPDFScrollBar : public CWnd
+{
+public:
+	explicit CPDFScrollBar(bool vertical = true);
+	void SetParentDlg(CXiaoGongPDFDlg* pDlg) { m_pParentDlg = pDlg; }
+	void SetRange(int contentLength, int pageLength, int position);
+
+protected:
+	afx_msg void OnPaint();
+	afx_msg BOOL OnEraseBkgnd(CDC* pDC);
+	afx_msg void OnLButtonDown(UINT nFlags, CPoint point);
+	afx_msg void OnLButtonUp(UINT nFlags, CPoint point);
+	afx_msg void OnMouseMove(UINT nFlags, CPoint point);
+	afx_msg BOOL OnMouseWheel(UINT nFlags, short zDelta, CPoint pt);
+	afx_msg void OnCaptureChanged(CWnd* pWnd);
+	DECLARE_MESSAGE_MAP()
+
+private:
+	CRect ThumbRect() const;
+	void ScrollTo(int position);
+	CXiaoGongPDFDlg* m_pParentDlg;
+	bool m_vertical;
+	int m_contentLength;
+	int m_pageLength;
+	int m_position;
+	int m_dragOffset;
+	bool m_dragging;
+};
+
 // 搜索匹配项结构（从 SearchTypes.h 包含）
 #include "SearchTypes.h"
 
@@ -104,6 +133,7 @@ class CXiaoGongPDFDlg : public CDialogEx
 {
 	// ★★★ 友元类声明，允许CPDFViewCtrl访问私有成员
 	friend class CPDFViewCtrl;
+	friend class CPDFScrollBar;
 
 // 构造
 public:
@@ -135,6 +165,9 @@ private:
 	CModernTabCtrl m_tabCtrl;   // 现代化标签页控件
 	CListCtrl m_thumbnailList;  // 缩略图列表控件
 	CPDFViewCtrl m_pdfView;     // ★★★ 使用自定义控件支持滚动条消息
+	CPDFScrollBar m_pdfVerticalScrollBar;
+	CPDFScrollBar m_pdfHorizontalScrollBar{ false };
+	CStatic m_pdfScrollCorner;
 	CStatic m_toolbar;
 	CCustomButton m_btnFirst;
 	CCustomButton m_btnLast;
@@ -498,6 +531,8 @@ protected:
     afx_msg void OnVScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar);  // 垂直滚动条消息处理
     afx_msg void OnHScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar);  // 横向滚动条消息处理
     void UpdateScrollBar();  // 更新滚动条
+	void ScrollToVerticalPosition(int position);
+	void ScrollToHorizontalPosition(int position);
     int GetPageAtPosition(int yPos);  // 获取指定位置的页面索引
 
     // 搜索相关函数
