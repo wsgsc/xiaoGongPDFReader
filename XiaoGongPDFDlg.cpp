@@ -21,7 +21,7 @@
 namespace
 {
 	constexpr size_t PAGE_CACHE_BUDGET = 128u * 1024u * 1024u;
-	constexpr COLORREF PDF_VIEW_BACKGROUND = RGB(230, 230, 230);
+	constexpr COLORREF PDF_VIEW_BACKGROUND = RGB(225, 230, 235);
 
 	CString FullPathForComparison(const CString& path)
 	{
@@ -565,9 +565,13 @@ CXiaoGongPDFDlg::CXiaoGongPDFDlg(CWnd* pParent /*=nullptr*/)
 	, m_customZoom(1.0f)
 	, m_documentMaxPageWidth(0.0f)  // ★★★ 初始化文档最大页面宽度
 	, m_documentUniformScale(1.0f)  // ★★★ 初始化文档统一缩放比例
-	, m_thumbnailVisible(false)  // 默认隐藏缩略图面板
+	, m_thumbnailVisible(false)
+	, m_outlineVisible(false)
+	, m_isUpdatingOutline(false)
 	, m_isUpdatingThumbnails(false)  // 初始化缩略图批量更新标记
 	, m_isDragging(false)       // 初始化拖拽状态
+	, m_isWindowDragging(false)
+	, m_windowDragStartScreen(0, 0)
 	, m_panOffset(0, 0)         // 初始化平移偏移量
 	, m_hHandCursor(nullptr)    // 初始化手形光标
 	, m_hHandCursorGrab(nullptr) // 初始化抓取光标
@@ -609,7 +613,7 @@ CXiaoGongPDFDlg::CXiaoGongPDFDlg(CWnd* pParent /*=nullptr*/)
 {
 	m_hIcon = AfxGetApp()->LoadIcon(IDR_MAINFRAME);
 	m_highlightBrush.CreateSolidBrush(RGB(173, 216, 230));  // 浅蓝色
-	m_whiteBrush.CreateSolidBrush(RGB(255, 255, 255));     // 白色（用于标签页背景）
+	m_whiteBrush.CreateSolidBrush(RGB(240, 244, 248));
 	m_toolbarBrush.CreateSolidBrush(RGB(255, 255, 255));   // 白色（Chrome/Edge 风格工具栏背景）
 	LoadRecentFiles();
 
@@ -1022,18 +1026,34 @@ void CXiaoGongPDFDlg::SetControlsVisible(bool visible)
 {
 	int nShow = visible ? SW_SHOW : SW_HIDE;
 	CWnd* controls[] = {
-		&m_toolbar, &m_tabCtrl, &m_btnFirst, &m_btnLast,
+		&m_toolbar, &m_tabCtrl, &m_btnOpen, &m_btnZoomOut, &m_btnFitWidth,
+		&m_btnZoomIn, &m_btnMore, &m_btnMinimize, &m_btnMaximize,
+		&m_btnCloseWindow, &m_btnFirst, &m_btnLast,
 		&m_btnFullscreen, &m_btnRotateLeft, &m_btnRotateRight,
 		&m_btnEdit, &m_btnSelectText, &m_editCurrent, &m_pageTotal,
-		&m_statusBar, &m_checkThumbnail,
-		&m_editSearch, &m_btnFind, &m_btnPrevMatch, &m_btnNextMatch
+		&m_statusBar, &m_btnOutline,
+		&m_editSearch, &m_btnFind, &m_btnPrevMatch, &m_btnNextMatch,
+		&m_outlineTree
 	};
 	for (auto* pCtrl : controls)
 		if (pCtrl->GetSafeHwnd()) pCtrl->ShowWindow(nShow);
+	if (visible)
+	{
+		CRect clientRect;
+		GetClientRect(&clientRect);
+		if (clientRect.Width() < 980)
+		{
+			m_btnZoomOut.ShowWindow(SW_HIDE);
+			m_btnFitWidth.ShowWindow(SW_HIDE);
+			m_btnZoomIn.ShowWindow(SW_HIDE);
+		}
+	}
 	if (m_editFilePath.GetSafeHwnd())
 		m_editFilePath.ShowWindow(visible && GetActiveDocument() ? SW_SHOW : SW_HIDE);
 	if (m_thumbnailList.GetSafeHwnd())
-		m_thumbnailList.ShowWindow(visible ? (m_thumbnailVisible ? SW_SHOW : SW_HIDE) : SW_HIDE);
+		m_thumbnailList.ShowWindow(SW_HIDE);
+	if (m_outlineTree.GetSafeHwnd())
+		m_outlineTree.ShowWindow(visible && m_outlineVisible && m_doc ? SW_SHOW : SW_HIDE);
 }
 
 void CXiaoGongPDFDlg::RefreshCurrentView()
@@ -1099,7 +1119,7 @@ void CXiaoGongPDFDlg::DoDataExchange(CDataExchange* pDX)
 	DDX_Control(pDX, IDC_BTN_ROTATE_RIGHT, m_btnRotateRight);
 	DDX_Control(pDX, IDC_BTN_EDIT, m_btnEdit);
 	DDX_Control(pDX, IDC_BTN_SELECT_TEXT, m_btnSelectText);
-	DDX_Control(pDX, IDC_CHECK_THUMBNAIL, m_checkThumbnail);
+	DDX_Control(pDX, IDC_CHECK_THUMBNAIL, m_btnOutline);
 	DDX_Control(pDX, IDC_EDIT_CURRENT, m_editCurrent);
 	DDX_Control(pDX, IDC_PAGE_TOTAL, m_pageTotal);
 	DDX_Control(pDX, IDC_STATUS_BAR, m_statusBar);
@@ -1126,6 +1146,7 @@ BEGIN_MESSAGE_MAP(CXiaoGongPDFDlg, CDialogEx)
 	ON_COMMAND(ID_MENU_SHORTCUTS, &CXiaoGongPDFDlg::onMenuShortcuts)
 	ON_COMMAND_RANGE(ID_MENU_RECENT_FILE_1, ID_MENU_RECENT_FILE_10, &CXiaoGongPDFDlg::onMenuRecentFile)
 	ON_NOTIFY(LVN_ITEMCHANGED, IDC_THUMBNAIL_LIST, &CXiaoGongPDFDlg::OnThumbnailItemChanged)
+	ON_NOTIFY(TVN_SELCHANGED, IDC_OUTLINE_TREE, &CXiaoGongPDFDlg::OnOutlineSelectionChanged)
 	ON_NOTIFY(TCN_SELCHANGE, IDC_TAB_CONTROL, &CXiaoGongPDFDlg::OnTabSelChange)
 	ON_MESSAGE(WM_APP + 100, &CXiaoGongPDFDlg::OnTabCloseButton)  // 标签页关闭按钮消息
 	ON_WM_SIZE()
@@ -1140,6 +1161,14 @@ BEGIN_MESSAGE_MAP(CXiaoGongPDFDlg, CDialogEx)
 	ON_WM_TIMER()  // 定时器消息处理（用于去抖动缩略图高亮更新）
 	ON_WM_MOUSEWHEEL()
 	ON_BN_CLICKED(IDC_BTN_FIRST, &CXiaoGongPDFDlg::OnBtnFirst)
+	ON_BN_CLICKED(IDC_BTN_OPEN, &CXiaoGongPDFDlg::onMenuOpen)
+	ON_BN_CLICKED(IDC_BTN_ZOOM_OUT, &CXiaoGongPDFDlg::OnBtnZoomOut)
+	ON_BN_CLICKED(IDC_BTN_FIT_WIDTH, &CXiaoGongPDFDlg::OnBtnFitWidth)
+	ON_BN_CLICKED(IDC_BTN_ZOOM_IN, &CXiaoGongPDFDlg::OnBtnZoomIn)
+	ON_BN_CLICKED(IDC_BTN_MORE, &CXiaoGongPDFDlg::OnBtnMore)
+	ON_BN_CLICKED(IDC_BTN_MINIMIZE, &CXiaoGongPDFDlg::OnBtnMinimize)
+	ON_BN_CLICKED(IDC_BTN_MAXIMIZE, &CXiaoGongPDFDlg::OnBtnMaximize)
+	ON_BN_CLICKED(IDC_BTN_CLOSE_WINDOW, &CXiaoGongPDFDlg::OnBtnCloseWindow)
 	ON_BN_CLICKED(IDC_BTN_LAST, &CXiaoGongPDFDlg::OnBtnLast)
 	ON_BN_CLICKED(IDC_BTN_FULLSCREEN, &CXiaoGongPDFDlg::OnBtnFullscreen)
 	ON_BN_CLICKED(IDC_BTN_ROTATE_LEFT, &CXiaoGongPDFDlg::OnBtnRotateLeft)
@@ -1376,8 +1405,9 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 
 	CDialogEx::OnInitDialog();
 
-	// 添加最大化、最小化按钮
+	// 标签栏承担标题区，保留系统窗口的缩放边框。
 	ModifyStyle(0, WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN);
+	ModifyStyle(WS_CAPTION, 0, SWP_FRAMECHANGED);
 
 	// ★★★ 禁用DWM窗口过渡动画，防止最大化→还原时DWM短暂显示旧大尺寸内容导致的边界溢出
 	BOOL fDisableTransitions = TRUE;
@@ -1386,9 +1416,6 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 
 	SetIcon(m_hIcon, TRUE);
 	SetIcon(m_hIcon, FALSE);
-
-	// 增加菜单
-	SetMenu(CMenu::FromHandle(::LoadMenu(AfxGetInstanceHandle(), MAKEINTRESOURCE(IDR_MENU))));
 
 	// 显示PDF 需要设置控件类型如下
 	// 设置 Picture Control 样式
@@ -1429,19 +1456,47 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	m_scrollBarWidth = GetSystemMetrics(SM_CXVSCROLL);
 
 	m_thumbnailList.ModifyStyle(WS_VISIBLE, 0);
+	m_thumbnailList.ModifyStyle(WS_BORDER, 0, SWP_FRAMECHANGED);
 	m_editFilePath.ShowWindow(SW_HIDE);
+	m_editFilePath.ModifyStyle(WS_BORDER, 0, SWP_FRAMECHANGED);
+	m_editFilePath.ModifyStyleEx(WS_EX_CLIENTEDGE, 0, SWP_FRAMECHANGED);
+	m_editFilePath.SetMargins(14, 14);
+	m_outlineTree.Create(WS_CHILD | WS_TABSTOP | TVS_HASBUTTONS | TVS_HASLINES |
+		TVS_LINESATROOT | TVS_SHOWSELALWAYS, CRect(0, 0, 250, 300), this,
+		IDC_OUTLINE_TREE);
 
-	// 初始化状态栏（未加载PDF时隐藏）
-	m_statusBar.SetWindowText(_T(""));
-	m_statusBar.ShowWindow(SW_HIDE);
+	// 初始化状态栏
+	m_statusBar.SetWindowText(_T("  就绪"));
+	m_statusBar.ModifyStyle(SS_TYPEMASK | WS_BORDER, SS_LEFT | SS_CENTERIMAGE, SWP_FRAMECHANGED);
+	m_statusBar.ShowWindow(SW_SHOW);
 
 	// MuPDF context 由每个 CPDFDocument 自己持有，主对话框只引用当前活动文档。
 
 	// 初始化工具栏
+	m_btnOpen.Create(_T("打开"), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+		CRect(0, 0, 72, 34), this, IDC_BTN_OPEN);
+	m_btnZoomOut.Create(_T("-"), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+		CRect(0, 0, 34, 34), this, IDC_BTN_ZOOM_OUT);
+	m_btnFitWidth.Create(_T("适合宽度"), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+		CRect(0, 0, 76, 34), this, IDC_BTN_FIT_WIDTH);
+	m_btnZoomIn.Create(_T("+"), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+		CRect(0, 0, 34, 34), this, IDC_BTN_ZOOM_IN);
+	m_btnMore.Create(_T("更多"), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+		CRect(0, 0, 34, 34), this, IDC_BTN_MORE);
+	m_btnMinimize.Create(_T("最小化"), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+		CRect(0, 0, 46, 42), this, IDC_BTN_MINIMIZE);
+	m_btnMaximize.Create(_T("最大化"), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+		CRect(0, 0, 46, 42), this, IDC_BTN_MAXIMIZE);
+	m_btnCloseWindow.Create(_T("关闭"), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+		CRect(0, 0, 46, 42), this, IDC_BTN_CLOSE_WINDOW);
+	m_btnMinimize.SetWindowControlStyle();
+	m_btnMaximize.SetWindowControlStyle();
+	m_btnCloseWindow.SetWindowControlStyle(true);
 	InitializeToolbar();
+	m_statusBar.SetFont(&m_buttonFont);
+	m_outlineTree.SetFont(&m_buttonFont);
 
-	// 初始化缩略图复选框（默认不勾选）
-	m_checkThumbnail.SetCheck(BST_UNCHECKED);
+	m_btnOutline.SetWindowText(_T(""));
 
 	// 初始化标签页控件
 	InitializeTabControl();
@@ -1451,9 +1506,6 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 
 	// 启用拖放文件功能
 	DragAcceptFiles(TRUE);
-
-	// 更新最近文件菜单
-	UpdateRecentFilesMenu();
 
 	// 如果有从命令行传入的初始文件路径，延迟打开该文件
 	// 使用PostMessage延迟打开，避免阻塞窗口显示
@@ -1466,8 +1518,20 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 
 	// 工具栏图标采用无边框常态，交互时显示浅蓝反馈。
 	const COLORREF normal = RGB(255, 255, 255);
-	const COLORREF hover = RGB(238, 246, 255);
-	const COLORREF pressed = RGB(219, 236, 255);
+	const COLORREF hover = RGB(232, 241, 252);
+	const COLORREF pressed = RGB(211, 229, 250);
+	m_btnOpen.SetColors(normal, hover, pressed);
+	m_btnZoomOut.SetColors(normal, hover, pressed);
+	m_btnFitWidth.SetColors(normal, hover, pressed);
+	m_btnZoomIn.SetColors(normal, hover, pressed);
+	m_btnMore.SetColors(normal, hover, pressed);
+	m_btnOutline.SetColors(normal, hover, pressed);
+	m_btnMinimize.SetColors(RGB(240, 244, 248), RGB(224, 231, 238), RGB(207, 218, 228));
+	m_btnMaximize.SetColors(RGB(240, 244, 248), RGB(224, 231, 238), RGB(207, 218, 228));
+	m_btnCloseWindow.SetColors(RGB(240, 244, 248), RGB(232, 38, 51), RGB(192, 25, 38));
+	m_btnMinimize.SetTextColor(RGB(38, 45, 53));
+	m_btnMaximize.SetTextColor(RGB(38, 45, 53));
+	m_btnCloseWindow.SetTextColor(RGB(38, 45, 53));
 	m_btnFirst.SetColors(normal, hover, pressed);
 	m_btnLast.SetColors(normal, hover, pressed);
 	m_btnFullscreen.SetColors(normal, hover, pressed);
@@ -1481,6 +1545,7 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 
 	// 深色文字保持清晰对比度。
 	m_btnFirst.SetTextColor     (RGB(32, 33, 36));
+	m_btnOpen.SetTextColor(RGB(26, 45, 65));
 	m_btnLast.SetTextColor      (RGB(32, 33, 36));
 	m_btnFullscreen.SetTextColor(RGB(32, 33, 36));
 	m_btnRotateLeft.SetTextColor(RGB(32, 33, 36));
@@ -1536,7 +1601,9 @@ void CXiaoGongPDFDlg::OnPaint()
 			CDC* pDC = GetDC();
 			if (pDC)
 			{
-				CPen pen(PS_SOLID, 1, RGB(218, 220, 224));
+				::DrawIconEx(pDC->GetSafeHdc(), 8, 12, m_hIcon, 18, 18,
+					0, nullptr, DI_NORMAL);
+				CPen pen(PS_SOLID, 1, RGB(212, 220, 228));
 				CPen* pOldPen = pDC->SelectObject(&pen);
 				pDC->MoveTo(toolbarRect.left,  toolbarRect.bottom);
 				pDC->LineTo(toolbarRect.right, toolbarRect.bottom);
@@ -1555,9 +1622,9 @@ BOOL CXiaoGongPDFDlg::OnEraseBkgnd(CDC* pDC)
 	CRect rect;
 	GetClientRect(&rect);
 
-	// 使用系统对话框背景色（通常是灰色）
-	CBrush brush(GetSysColor(COLOR_3DFACE));
+	CBrush brush(PDF_VIEW_BACKGROUND);
 	pDC->FillRect(&rect, &brush);
+	pDC->FillSolidRect(0, 0, rect.Width(), 42, RGB(240, 244, 248));
 
 	return TRUE;  // 返回TRUE表示我们已经处理了背景擦除
 }
@@ -1566,11 +1633,23 @@ HBRUSH CXiaoGongPDFDlg::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor)
 {
 	HBRUSH hbr = CDialogEx::OnCtlColor(pDC, pWnd, nCtlColor);
 
-	// 如果是标签页控件，返回白色背景
+	// 标签区与工具栏分别使用柔和灰色和白色。
 	if (pWnd->GetSafeHwnd() == m_tabCtrl.GetSafeHwnd())
 	{
-		pDC->SetBkColor(RGB(255, 255, 255));
+		pDC->SetBkColor(RGB(240, 244, 248));
 		return m_whiteBrush;
+	}
+	if (pWnd->GetSafeHwnd() == m_statusBar.GetSafeHwnd())
+	{
+		pDC->SetBkColor(RGB(255, 255, 255));
+		pDC->SetTextColor(RGB(75, 88, 102));
+		return m_toolbarBrush;
+	}
+	if (pWnd->GetSafeHwnd() == m_editFilePath.GetSafeHwnd())
+	{
+		pDC->SetBkColor(RGB(255, 255, 255));
+		pDC->SetTextColor(RGB(83, 96, 110));
+		return m_toolbarBrush;
 	}
 
 	// 工具栏背景：白色（Chrome/Edge 风格）
@@ -1590,14 +1669,6 @@ HBRUSH CXiaoGongPDFDlg::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor)
 	if (nCtlColor == CTLCOLOR_EDIT &&
 		(pWnd->GetSafeHwnd() == m_editCurrent.GetSafeHwnd() ||
 		 pWnd->GetSafeHwnd() == m_editSearch.GetSafeHwnd()))
-	{
-		pDC->SetBkColor(RGB(255, 255, 255));
-		pDC->SetTextColor(RGB(32, 33, 36));
-		return m_toolbarBrush;
-	}
-
-	// 缩略图复选框：白色背景，深色文字
-	if (pWnd->GetSafeHwnd() == m_checkThumbnail.GetSafeHwnd())
 	{
 		pDC->SetBkColor(RGB(255, 255, 255));
 		pDC->SetTextColor(RGB(32, 33, 36));
@@ -3104,58 +3175,43 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 	}
 
 	// 检查控件是否有效，以及窗口是否为最小化状态
-	if (m_thumbnailList.GetSafeHwnd() && m_pdfView.GetSafeHwnd() && m_toolbar.GetSafeHwnd() && nType != SIZE_MINIMIZED)
+	if (m_thumbnailList.GetSafeHwnd() && m_pdfView.GetSafeHwnd() &&
+		m_toolbar.GetSafeHwnd() && m_btnOpen.GetSafeHwnd() && nType != SIZE_MINIMIZED)
 	{
 		// ★★★ 禁止重绘，避免布局调整过程中的闪烁（高刷新率显示器优化）
 		SetRedraw(FALSE);
-		// 单行工具栏，固定点击区域；搜索框按剩余空间伸缩。
-		const int TOOLBAR_HEIGHT = 44;
-		const int TAB_HEIGHT = 35;
-		const int PATH_HEIGHT = 28;
+		const int TOOLBAR_HEIGHT = 52;
+		const int TAB_HEIGHT = 42;
 		const int BTN_HEIGHT = 34;
-		const bool compactToolbar = cx < 960;
-		const int ICON_WIDTH = compactToolbar ? 32 : 34;
-		const int GAP = compactToolbar ? 2 : 4;
-		const int GROUP_GAP = compactToolbar ? 2 : 14;
-		const int THUMBNAIL_WIDTH = compactToolbar ? 72 : 86;
-		const int PAGE_GROUP_WIDTH = 120;
-		const int btnY = MARGIN + (TOOLBAR_HEIGHT - BTN_HEIGHT) / 2;
+		const bool compactToolbar = cx < 1080;
+		const int ICON_WIDTH = compactToolbar ? 30 : 34;
+		const int GAP = compactToolbar ? 2 : 5;
+		const int GROUP_GAP = compactToolbar ? 5 : 14;
+		const int OUTLINE_BUTTON_WIDTH = 34;
+		const int btnY = MARGIN + TAB_HEIGHT + (TOOLBAR_HEIGHT - BTN_HEIGHT) / 2;
 
-		m_toolbar.MoveWindow(MARGIN, MARGIN, cx - MARGIN * 2, TOOLBAR_HEIGHT);
 		if (m_tabCtrl.GetSafeHwnd())
-			m_tabCtrl.MoveWindow(MARGIN, MARGIN * 2 + TOOLBAR_HEIGHT,
-				cx - MARGIN * 2, TAB_HEIGHT);
+			m_tabCtrl.MoveWindow(32, 0, max(1, cx - 32 - 138), TAB_HEIGHT);
+		m_btnMinimize.MoveWindow(cx - 138, 0, 46, TAB_HEIGHT);
+		m_btnMaximize.MoveWindow(cx - 92, 0, 46, TAB_HEIGHT);
+		m_btnCloseWindow.MoveWindow(cx - 46, 0, 46, TAB_HEIGHT);
+		m_btnMaximize.SetIconGlyph(IsZoomed() ? 0xE923 : 0xE922);
+		m_btnMaximize.SetToolTipText(IsZoomed() ? _T("还原") : _T("最大化"));
+		m_toolbar.MoveWindow(0, TAB_HEIGHT, cx, TOOLBAR_HEIGHT);
+		const bool showPath = GetActiveDocument() != nullptr;
+		const int PATH_HEIGHT = showPath ? 30 : 0;
 		if (m_editFilePath.GetSafeHwnd())
-			m_editFilePath.MoveWindow(MARGIN, MARGIN * 2 + TOOLBAR_HEIGHT + TAB_HEIGHT + 3,
-				cx - MARGIN * 2, PATH_HEIGHT);
+		{
+			m_editFilePath.MoveWindow(0, TAB_HEIGHT + TOOLBAR_HEIGHT, cx, 30);
+			m_editFilePath.ShowWindow(showPath ? SW_SHOW : SW_HIDE);
+		}
 
-		int x = MARGIN * 2;
-		m_btnFirst.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
-		x += ICON_WIDTH + GAP;
-		m_btnLast.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
-		x += ICON_WIDTH + GROUP_GAP;
-		m_btnRotateLeft.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
-		x += ICON_WIDTH + GAP;
-		m_btnRotateRight.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
-		x += ICON_WIDTH + GAP;
-		m_btnFullscreen.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
-		x += ICON_WIDTH + GROUP_GAP;
-
-		m_checkThumbnail.MoveWindow(x, btnY, THUMBNAIL_WIDTH, BTN_HEIGHT);
-		x += THUMBNAIL_WIDTH + GROUP_GAP;
-		m_btnSelectText.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
-		x += ICON_WIDTH + GAP;
-		m_btnEdit.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
-
-		const int pageX = (cx - PAGE_GROUP_WIDTH) / 2;
-		m_editCurrent.MoveWindow(pageX, btnY, 48, BTN_HEIGHT);
-		m_pageTotal.MoveWindow(pageX + 56, btnY + 5, 64, BTN_HEIGHT - 10);
-
-		x = pageX + PAGE_GROUP_WIDTH + 16;
-		const int SEARCH_BUTTONS_WIDTH = ICON_WIDTH * 3 + GAP * 3;
-		const int searchWidth = max(100, min(260,
-			cx - MARGIN * 2 - x - SEARCH_BUTTONS_WIDTH));
-		x = max(x, cx - MARGIN * 2 - searchWidth - SEARCH_BUTTONS_WIDTH);
+		int x = 14;
+		m_btnOpen.MoveWindow(x, btnY, compactToolbar ? 62 : 76, BTN_HEIGHT);
+		x += (compactToolbar ? 62 : 76) + GROUP_GAP;
+		m_btnOutline.MoveWindow(x, btnY, OUTLINE_BUTTON_WIDTH, BTN_HEIGHT);
+		x += OUTLINE_BUTTON_WIDTH + GROUP_GAP;
+		const int searchWidth = compactToolbar ? 100 : min(210, 100 + (cx - 1080) / 5);
 		m_editSearch.MoveWindow(x, btnY, searchWidth, BTN_HEIGHT);
 		x += searchWidth + GAP;
 		m_btnFind.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
@@ -3163,32 +3219,60 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		m_btnPrevMatch.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
 		x += ICON_WIDTH + GAP;
 		m_btnNextMatch.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
+		x += ICON_WIDTH + GROUP_GAP;
+		m_editCurrent.MoveWindow(x, btnY, 43, BTN_HEIGHT);
+		x += 43 + GAP;
+		m_pageTotal.MoveWindow(x, btnY + 5, 55, BTN_HEIGHT - 10);
+		x += 55 + GROUP_GAP;
+		m_btnFirst.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
+		x += ICON_WIDTH + GAP;
+		m_btnLast.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
+		x += ICON_WIDTH + GROUP_GAP;
+		const bool showZoomControls = cx >= 980;
+		m_btnZoomOut.ShowWindow(showZoomControls ? SW_SHOW : SW_HIDE);
+		m_btnFitWidth.ShowWindow(showZoomControls ? SW_SHOW : SW_HIDE);
+		m_btnZoomIn.ShowWindow(showZoomControls ? SW_SHOW : SW_HIDE);
+		if (showZoomControls)
+		{
+			m_btnZoomOut.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
+			x += ICON_WIDTH + GAP;
+			m_btnFitWidth.MoveWindow(x, btnY, compactToolbar ? 72 : 80, BTN_HEIGHT);
+			x += (compactToolbar ? 72 : 80) + GAP;
+			m_btnZoomIn.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
+			x += ICON_WIDTH + GROUP_GAP;
+		}
+		m_btnRotateLeft.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
+		x += ICON_WIDTH + GAP;
+		m_btnRotateRight.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
+		x += ICON_WIDTH + GROUP_GAP;
+		m_btnSelectText.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
+		x += ICON_WIDTH + GAP;
+		m_btnEdit.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
+		x += ICON_WIDTH + GAP;
+		m_btnFullscreen.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
+		m_btnMore.MoveWindow(cx - 44, btnY, 34, BTN_HEIGHT);
 
 		// 根据缩略图面板可见性调整布局
 		int pdfX, pdfWidth;
 		const int STATUS_BAR_HEIGHT = 25;  // 状态栏高度
 
 		// 计算内容区域的起始Y坐标（工具栏 + 标签页 + 间距）
-		int contentY = MARGIN * 4 + TOOLBAR_HEIGHT + TAB_HEIGHT + PATH_HEIGHT + 4;
-		int contentHeight = cy - contentY - MARGIN - STATUS_BAR_HEIGHT;
+		int contentY = TAB_HEIGHT + TOOLBAR_HEIGHT + PATH_HEIGHT + 1;
+		int contentHeight = max(1, cy - contentY - STATUS_BAR_HEIGHT);
 
-		if (m_thumbnailVisible)
+		m_outlineTree.ShowWindow(m_outlineVisible && m_doc ? SW_SHOW : SW_HIDE);
+		if (m_outlineVisible && m_doc)
 		{
-			// 缩略图可见时，显示在左侧
-			m_thumbnailList.MoveWindow(MARGIN, contentY,
+			m_outlineTree.MoveWindow(0, contentY,
 				LIST_WIDTH + m_scrollBarWidth, contentHeight);
-			// 增加垂直间距以使缩略图之间有更明显的分割
-			m_thumbnailList.SetIconSpacing(CSize(m_thumbnailPicWidth, m_thumbnailPicHeight + 60));
-
-			// PDF 预览占右侧剩余空间
-			pdfX = MARGIN * 2 + LIST_WIDTH + m_scrollBarWidth;
-			pdfWidth = cx - pdfX - MARGIN;
+			pdfX = LIST_WIDTH + m_scrollBarWidth + 1;
+			pdfWidth = cx - pdfX;
 		}
 		else
 		{
 			// 缩略图隐藏时，PDF 预览占满整个宽度
-			pdfX = MARGIN;
-			pdfWidth = cx - MARGIN * 2;
+			pdfX = 0;
+			pdfWidth = cx;
 		}
 
 		// PDF视图，为状态栏留出空间
@@ -3225,8 +3309,7 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		m_pdfView.ShowScrollBar(SB_HORZ, FALSE);
 
 		// 状态栏在最底部
-		m_statusBar.MoveWindow(MARGIN, cy - MARGIN - STATUS_BAR_HEIGHT,
-			cx - MARGIN * 2, STATUS_BAR_HEIGHT);
+		m_statusBar.MoveWindow(0, cy - STATUS_BAR_HEIGHT, cx, STATUS_BAR_HEIGHT);
 
 		// 更新工具栏控件状态 - 仅在文档已加载时更新
 		if (m_doc)
@@ -3444,12 +3527,23 @@ void CXiaoGongPDFDlg::UpdatePageControls()
 
 void CXiaoGongPDFDlg::UpdateStatusBar()
 {
-	m_statusBar.SetWindowText(_T(""));
 	if (!m_doc)
 	{
-		m_statusBar.ShowWindow(SW_HIDE);
+		m_statusBar.SetWindowText(_T("  就绪"));
+		m_statusBar.ShowWindow(m_isFullscreen ? SW_HIDE : SW_SHOW);
 		return;
 	}
+	CString status;
+	CString zoomText;
+	if (m_zoomMode == ZOOM_FIT_WIDTH)
+		zoomText = _T("适合宽度");
+	else if (m_zoomMode == ZOOM_FIT_PAGE)
+		zoomText = _T("适合页面");
+	else
+		zoomText.Format(_T("%d%%"), static_cast<int>(m_customZoom * 100 + 0.5f));
+	status.Format(_T("   第 %d 页，共 %d 页     |     %s"),
+		m_currentPage + 1, m_totalPages, zoomText.GetString());
+	m_statusBar.SetWindowText(status);
 
 	// 全屏模式下不显示状态栏
 	if (!m_isFullscreen)
@@ -3553,39 +3647,19 @@ void CXiaoGongPDFDlg::OnBtnEdit()
 	}
 }
 
-// 缩略图复选框点击事件
+// 目录侧栏开关
 void CXiaoGongPDFDlg::OnCheckThumbnail()
 {
-#ifdef _DEBUG
-	TRACE(_T("OnCheckThumbnail()\n"));
-#endif
-
-	// 获取复选框状态
-	BOOL isChecked = m_checkThumbnail.GetCheck();
-
-	// 根据复选框状态设置缩略图面板的可见性
-	m_thumbnailVisible = (isChecked == BST_CHECKED);
-
-	// 显示/隐藏缩略图列表
-	m_thumbnailList.ShowWindow(m_thumbnailVisible ? SW_SHOW : SW_HIDE);
-
-	// 触发窗口重新布局
+	m_outlineVisible = !m_outlineVisible;
+	m_btnOutline.SetColors(m_outlineVisible ? RGB(221, 235, 252) : RGB(255, 255, 255),
+		RGB(232, 241, 252), RGB(211, 229, 250));
+	m_btnOutline.SetToolTipText(m_outlineVisible ? _T("隐藏目录") : _T("显示目录"));
+	if (m_outlineVisible && m_outlineTree.GetSafeHwnd() && !m_outlineTree.GetRootItem())
+		UpdateOutlineTree();
+	m_outlineTree.ShowWindow(m_outlineVisible && m_doc ? SW_SHOW : SW_HIDE);
 	CRect rect;
 	GetClientRect(&rect);
 	SendMessage(WM_SIZE, SIZE_RESTORED, MAKELPARAM(rect.Width(), rect.Height()));
-
-	// 如果有文档加载，根据当前模式重新渲染
-	if (m_doc && m_currentPage >= 0)
-	{
-		if (m_continuousScrollMode)
-		{
-			RenderVisiblePages();
-		}
-		else
-		{
-			RenderPage(m_currentPage);
-		}
-	}
 }
 
 void CXiaoGongPDFDlg::RotatePage(int degrees)
@@ -3708,7 +3782,7 @@ void CXiaoGongPDFDlg::RotatePage(int degrees)
 	SaveCurrentPageZoomState();
 
 	// 重新渲染当前页的缩略图
-	if (RenderThumbnail(m_currentPage))
+	if (m_thumbnailVisible && RenderThumbnail(m_currentPage))
 	{
 		// 刷新缩略图列表显示
 		// ★★★ 使用FALSE参数避免擦除背景，减少高刷新率显示器上的闪烁
@@ -3961,6 +4035,14 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 
 	// 为所有按钮设置新字体
 	m_btnFirst.SetFont(&m_buttonFont);
+	m_btnOpen.SetFont(&m_buttonFont);
+	m_btnZoomOut.SetFont(&m_buttonFont);
+	m_btnFitWidth.SetFont(&m_buttonFont);
+	m_btnZoomIn.SetFont(&m_buttonFont);
+	m_btnMore.SetFont(&m_buttonFont);
+	m_btnMinimize.SetFont(&m_buttonFont);
+	m_btnMaximize.SetFont(&m_buttonFont);
+	m_btnCloseWindow.SetFont(&m_buttonFont);
 	m_btnLast.SetFont(&m_buttonFont);
 	m_btnFullscreen.SetFont(&m_buttonFont);
 	m_btnRotateLeft.SetFont(&m_buttonFont);
@@ -3979,6 +4061,7 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 
 	// 图标由 Windows 系统字体提供，名称在悬停时显示。
 	m_btnFirst.SetWindowText(_T("首页"));
+	m_btnOpen.SetWindowText(_T("打开"));
 	m_btnLast.SetWindowText(_T("末页"));
 	m_btnFullscreen.SetWindowText(_T("全屏"));
 	m_btnRotateLeft.SetWindowText(_T("左旋"));
@@ -3998,7 +4081,21 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_btnFind.SetIconGlyph(0xE721);
 	m_btnPrevMatch.SetIconGlyph(0xE76B);
 	m_btnNextMatch.SetIconGlyph(0xE76C);
+	m_btnMore.SetIconGlyph(0xE712);
+	m_btnOutline.SetIconGlyph(0xE8FD);
+	m_btnMinimize.SetIconGlyph(0xE921);
+	m_btnMaximize.SetIconGlyph(0xE922);
+	m_btnCloseWindow.SetIconGlyph(0xE8BB);
 	m_btnFirst.SetToolTipText(_T("首页"));
+	m_btnOpen.SetToolTipText(_T("打开 PDF 文件"));
+	m_btnZoomOut.SetToolTipText(_T("缩小"));
+	m_btnFitWidth.SetToolTipText(_T("适合宽度"));
+	m_btnZoomIn.SetToolTipText(_T("放大"));
+	m_btnMore.SetToolTipText(_T("更多操作"));
+	m_btnOutline.SetToolTipText(_T("显示目录"));
+	m_btnMinimize.SetToolTipText(_T("最小化"));
+	m_btnMaximize.SetToolTipText(_T("最大化"));
+	m_btnCloseWindow.SetToolTipText(_T("关闭"));
 	m_btnLast.SetToolTipText(_T("末页"));
 	m_btnFullscreen.SetToolTipText(_T("全屏"));
 	m_btnRotateLeft.SetToolTipText(_T("向左旋转"));
@@ -4026,6 +4123,14 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 
 	// 所有工具栏按钮使用相同圆角。
 	m_btnFirst.SetCornerRadius(6);
+	m_btnOpen.SetCornerRadius(5);
+	m_btnZoomOut.SetCornerRadius(5);
+	m_btnFitWidth.SetCornerRadius(5);
+	m_btnZoomIn.SetCornerRadius(5);
+	m_btnMore.SetCornerRadius(5);
+	m_btnMinimize.SetCornerRadius(4);
+	m_btnMaximize.SetCornerRadius(4);
+	m_btnCloseWindow.SetCornerRadius(4);
 	m_btnLast.SetCornerRadius(6);
 	m_btnFullscreen.SetCornerRadius(6);
 	m_btnRotateLeft.SetCornerRadius(6);
@@ -4087,6 +4192,39 @@ void CXiaoGongPDFDlg::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 
 BOOL CXiaoGongPDFDlg::PreTranslateMessage(MSG* pMsg)
 {
+	if (pMsg->message == WM_LBUTTONDOWN && !m_isFullscreen &&
+		m_tabCtrl.GetSafeHwnd() && m_tabCtrl.IsWindowVisible() &&
+		(pMsg->hwnd == m_tabCtrl.GetSafeHwnd() || pMsg->hwnd == GetSafeHwnd()))
+	{
+		CPoint screenPoint(GET_X_LPARAM(pMsg->lParam), GET_Y_LPARAM(pMsg->lParam));
+		::ClientToScreen(pMsg->hwnd, &screenPoint);
+		CRect tabRect;
+		m_tabCtrl.GetWindowRect(&tabRect);
+		if (tabRect.PtInRect(screenPoint))
+		{
+			int lastTabRight = tabRect.left;
+			bool foundTabOnRow = false;
+			const int tabCount = m_tabCtrl.GetItemCount();
+			for (int i = 0; i < tabCount; ++i)
+			{
+				CRect itemRect;
+				if (m_tabCtrl.GetItemRect(i, &itemRect))
+				{
+					m_tabCtrl.ClientToScreen(&itemRect);
+					if (screenPoint.y >= itemRect.top && screenPoint.y < itemRect.bottom)
+					{
+						lastTabRight = max(lastTabRight, itemRect.right);
+						foundTabOnRow = true;
+					}
+				}
+			}
+			if ((tabCount == 0 || foundTabOnRow) && screenPoint.x >= lastTabRight)
+			{
+				StartWindowDrag();
+				return TRUE;
+			}
+		}
+	}
 	// 如果是键盘消息
 	if (pMsg->message == WM_KEYDOWN)
 	{
@@ -4133,7 +4271,7 @@ BOOL CXiaoGongPDFDlg::PreTranslateMessage(MSG* pMsg)
 			return TRUE;
 		}
 
-		// 处理F9 - 切换缩略图面板
+		// F9 切换目录侧栏
 		if (pMsg->wParam == VK_F9)
 		{
 			ToggleThumbnailPanel();
@@ -4271,11 +4409,26 @@ BOOL CXiaoGongPDFDlg::PreTranslateMessage(MSG* pMsg)
 
 void CXiaoGongPDFDlg::OnGetMinMaxInfo(MINMAXINFO* lpMMI)
 {
+	CDialogEx::OnGetMinMaxInfo(lpMMI);
+
 	// 设置窗口的最小跟踪尺寸（这是用户通过拖动窗口边缘能够调整的最小大小）
 	lpMMI->ptMinTrackSize.x = APP_MINWIDTH;
 	lpMMI->ptMinTrackSize.y = APP_MINHEIGHT;
 
-	CDialogEx::OnGetMinMaxInfo(lpMMI);
+	if (m_isFullscreen || !GetSafeHwnd())
+		return;
+
+	MONITORINFO monitorInfo = { sizeof(MONITORINFO) };
+	HMONITOR hMonitor = ::MonitorFromWindow(GetSafeHwnd(), MONITOR_DEFAULTTONEAREST);
+	if (::GetMonitorInfo(hMonitor, &monitorInfo))
+	{
+		const RECT& monitor = monitorInfo.rcMonitor;
+		const RECT& work = monitorInfo.rcWork;
+		lpMMI->ptMaxPosition.x = work.left - monitor.left;
+		lpMMI->ptMaxPosition.y = work.top - monitor.top;
+		lpMMI->ptMaxSize.x = work.right - work.left;
+		lpMMI->ptMaxSize.y = work.bottom - work.top;
+	}
 }
 
 // 进入全屏模式
@@ -4306,9 +4459,6 @@ void CXiaoGongPDFDlg::EnterFullscreen()
 
 	// 移除窗口边框和标题栏
 	ModifyStyle(WS_CAPTION | WS_THICKFRAME, 0, SWP_FRAMECHANGED);
-
-	// 隐藏菜单
-	SetMenu(NULL);
 
 	// 隐藏工具栏、标签页、缩略图和其他控件
 	SetControlsVisible(false);
@@ -4357,13 +4507,7 @@ void CXiaoGongPDFDlg::ExitFullscreen()
 	#endif
 
 	// 恢复窗口样式
-	ModifyStyle(0, WS_CAPTION | WS_THICKFRAME, SWP_FRAMECHANGED);
-
-	// 恢复菜单
-	SetMenu(CMenu::FromHandle(::LoadMenu(AfxGetInstanceHandle(), MAKEINTRESOURCE(IDR_MENU))));
-
-	// ★★★ 重新填充最近文件列表（因为菜单是重新加载的）
-	UpdateRecentFilesMenu();
+	ModifyStyle(0, WS_THICKFRAME, SWP_FRAMECHANGED);
 
 	// ★★★ 先重设全屏标志，让 ShowWindow/SetWindowPos 触发的 OnSize 能正确布局控件
 	m_isFullscreen = false;
@@ -4486,6 +4630,81 @@ void CXiaoGongPDFDlg::RestorePageZoomState(int pageNumber)
 }
 
 // ============ 缩放功能实现 ============
+
+void CXiaoGongPDFDlg::OnBtnZoomOut()
+{
+	SetZoom(max(0.25f, m_customZoom / 1.1f), ZOOM_CUSTOM);
+}
+
+void CXiaoGongPDFDlg::OnBtnFitWidth()
+{
+	SetZoom(1.0f, ZOOM_FIT_WIDTH);
+}
+
+void CXiaoGongPDFDlg::OnBtnZoomIn()
+{
+	SetZoom(min(4.0f, m_customZoom * 1.1f), ZOOM_CUSTOM);
+}
+
+void CXiaoGongPDFDlg::OnBtnMore()
+{
+	CMenu menu;
+	if (!menu.CreatePopupMenu())
+		return;
+
+	menu.AppendMenu(MF_STRING | (m_doc ? 0 : MF_GRAYED), ID_MENU_PRINT, _T("打印..."));
+	if (!m_recentFiles.empty())
+	{
+		CMenu recent;
+		if (recent.CreatePopupMenu())
+		{
+			const int count = min(static_cast<int>(m_recentFiles.size()), RECENT_FILE_NUMS);
+			for (int i = 0; i < count; ++i)
+			{
+				CString fileName = m_recentFiles[i];
+				const int slash = max(fileName.ReverseFind(_T('\\')), fileName.ReverseFind(_T('/')));
+				if (slash >= 0)
+					fileName = fileName.Mid(slash + 1);
+				fileName.Replace(_T("&"), _T("&&"));
+				CString label;
+				label.Format(_T("%d  %s"), i + 1, fileName.GetString());
+				recent.AppendMenu(MF_STRING, ID_MENU_RECENT_FILE_1 + i, label);
+			}
+			if (menu.AppendMenu(MF_POPUP,
+				reinterpret_cast<UINT_PTR>(recent.GetSafeHmenu()), _T("最近打开")))
+				recent.Detach();
+		}
+	}
+	menu.AppendMenu(MF_SEPARATOR);
+	menu.AppendMenu(MF_STRING, ID_MENU_SHORTCUTS, _T("快捷键"));
+	menu.AppendMenu(MF_STRING, ID_MENU_SET_DEFAULT, _T("设为默认 PDF 阅读器"));
+	menu.AppendMenu(MF_STRING, ID_MENU_ABOUT, _T("关于"));
+	menu.AppendMenu(MF_SEPARATOR);
+	menu.AppendMenu(MF_STRING, ID_MENU_EXIT, _T("退出"));
+
+	CRect buttonRect;
+	m_btnMore.GetWindowRect(&buttonRect);
+	const UINT command = static_cast<UINT>(menu.TrackPopupMenu(
+		TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
+		buttonRect.right, buttonRect.bottom, this));
+	if (command != 0)
+		PostMessage(WM_COMMAND, MAKEWPARAM(command, 0));
+}
+
+void CXiaoGongPDFDlg::OnBtnMinimize()
+{
+	ShowWindow(SW_MINIMIZE);
+}
+
+void CXiaoGongPDFDlg::OnBtnMaximize()
+{
+	ShowWindow(IsZoomed() ? SW_RESTORE : SW_MAXIMIZE);
+}
+
+void CXiaoGongPDFDlg::OnBtnCloseWindow()
+{
+	PostMessage(WM_CLOSE);
+}
 
 void CXiaoGongPDFDlg::SetZoom(float zoom, ZoomMode mode)
 {
@@ -4726,7 +4945,6 @@ void CXiaoGongPDFDlg::onMenuRecentFile(UINT nID)
 			// 从列表中移除
 			m_recentFiles.erase(m_recentFiles.begin() + index);
 			SaveRecentFiles();
-			UpdateRecentFilesMenu();
 			return;
 		}
 
@@ -4828,80 +5046,6 @@ void CXiaoGongPDFDlg::AddRecentFile(const CString& filePath)
 	// 保存到注册表
 	SaveRecentFiles();
 
-	// 更新菜单
-	UpdateRecentFilesMenu();
-}
-
-void CXiaoGongPDFDlg::UpdateRecentFilesMenu()
-{
-#ifdef _DEBUG
-	TRACE(_T("UpdateRecentFilesMenu()\n"));
-#endif
-
-	// 获取菜单
-	CMenu* pMenu = GetMenu();
-	if (!pMenu) return;
-
-	// 获取"文件"菜单（假设是第一个菜单）
-	CMenu* pFileMenu = pMenu->GetSubMenu(0);
-	if (!pFileMenu) return;
-
-	// 查找"打开"和"退出"菜单项的位置
-	int openPos = -1;
-	int exitPos = -1;
-	for (int i = 0; i < (int)pFileMenu->GetMenuItemCount(); i++)
-	{
-		UINT itemID = pFileMenu->GetMenuItemID(i);
-		if (itemID == ID_MENU_OPEN)
-		{
-			openPos = i;
-		}
-		else if (itemID == ID_MENU_EXIT)
-		{
-			exitPos = i;
-			break;  // 找到退出菜单后可以停止
-		}
-	}
-
-	// 删除"打开"和"退出"之间的所有项（包括历史文件菜单项和分隔符）
-	if (openPos >= 0 && exitPos > openPos + 1)
-	{
-		// 从后往前删除，避免索引变化的问题
-		for (int i = exitPos - 1; i > openPos; i--)
-		{
-			pFileMenu->RemoveMenu(i, MF_BYPOSITION);
-		}
-		// 删除后，退出菜单紧跟在打开菜单后面
-		exitPos = openPos + 1;
-	}
-
-	// 添加最近文件菜单项
-	if (!m_recentFiles.empty())
-	{
-		if (exitPos > 0)
-		{
-			// 插入分隔符
-			pFileMenu->InsertMenu(exitPos, MF_BYPOSITION | MF_SEPARATOR);
-
-			// 插入最近文件（数量由 RECENT_FILE_NUMS 定义）
-			int count = min((int)m_recentFiles.size(), RECENT_FILE_NUMS);
-			for (int i = 0; i < count; i++)
-			{
-				CString menuText;
-				// 提取文件名
-				CString fileName = m_recentFiles[i];
-				int pos = fileName.ReverseFind(_T('\\'));
-				if (pos != -1)
-					fileName = fileName.Mid(pos + 1);
-
-				menuText.Format(_T("&%d %s"), i + 1, fileName.GetString());
-				pFileMenu->InsertMenu(exitPos + i + 1, MF_BYPOSITION | MF_STRING,
-					ID_MENU_RECENT_FILE_1 + i, menuText);
-			}
-		}
-	}
-
-	DrawMenuBar();
 }
 
 void CXiaoGongPDFDlg::OnDropFiles(HDROP hDropInfo)
@@ -4975,19 +5119,17 @@ void CXiaoGongPDFDlg::InitializeTabControl()
 		return;
 	}
 
-	// 配置现代化标签页控件
+	// 配置标签页控件
 	m_tabCtrl.EnableCloseButton(TRUE);  // 启用关闭按钮
-	m_tabCtrl.SetTabHeight(36);         // 设置标签页高度
-
-	// 设置颜色方案（可选，使用默认值也很美观）
-	// m_tabCtrl.SetColors(RGB(240, 240, 240), RGB(230, 230, 230), RGB(255, 255, 255));
+	m_tabCtrl.SetTabHeight(42);
+	m_tabCtrl.SetColors(RGB(240, 244, 248), RGB(225, 234, 244), RGB(255, 255, 255));
 
 	// 添加滚动按钮样式和工具提示（ModernTabCtrl也支持这些）
 	// 添加TCS_FIXEDWIDTH样式使所有标签页宽度一致
 	m_tabCtrl.ModifyStyle(0, TCS_SCROLLOPPOSITE | TCS_TOOLTIPS | TCS_FIXEDWIDTH);
 
-	// 设置标签页固定宽度为100像素
-	m_tabCtrl.SendMessage(TCM_SETITEMSIZE, 0, MAKELPARAM(100, 36));
+	// 文件名在较宽的标签中保持可读
+	m_tabCtrl.SendMessage(TCM_SETITEMSIZE, 0, MAKELPARAM(218, 42));
 
 #ifdef _DEBUG
 	TRACE(_T("现代化标签页控件初始化完成\n"));
@@ -5280,9 +5422,10 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 	UpdatePageControls();
 	UpdateStatusBar();
 
-	// ★★★ 更新缩略图列表显示
-	// 切换标签页时需要刷新缩略图列表，使用已恢复的缓存
-	UpdateThumbnails();
+	if (m_outlineVisible)
+		UpdateOutlineTree();
+	else
+		m_outlineTree.DeleteAllItems();
 }
 
 void CXiaoGongPDFDlg::CloseDocument(int index)
@@ -5358,6 +5501,8 @@ void CXiaoGongPDFDlg::CloseDocument(int index)
 				m_editSearch.SetWindowText(_T(""));
 			SetWindowText(_T("小龚PDF阅读器"));
 			UpdateFilePathDisplay();
+			m_outlineTree.DeleteAllItems();
+			m_outlineTree.ShowWindow(SW_HIDE);
 
 			// ★★★ 彻底清理并隐藏标签页控件
 			if (m_tabCtrl.GetSafeHwnd())
@@ -5435,6 +5580,103 @@ void CXiaoGongPDFDlg::UpdateFilePathDisplay()
 	m_editFilePath.SetSel(0, 0);
 	if (!m_isFullscreen)
 		m_editFilePath.ShowWindow(pDoc ? SW_SHOW : SW_HIDE);
+	CRect rect;
+	GetClientRect(&rect);
+	PostMessage(WM_SIZE, SIZE_RESTORED, MAKELPARAM(rect.Width(), rect.Height()));
+}
+
+void CXiaoGongPDFDlg::AppendOutlineItems(const fz_outline* pOutline, HTREEITEM parent)
+{
+	for (const fz_outline* pItem = pOutline; pItem; pItem = pItem->next)
+	{
+		CString title;
+		if (pItem->title && *pItem->title)
+		{
+			const int length = MultiByteToWideChar(CP_UTF8, 0, pItem->title, -1, nullptr, 0);
+			if (length > 1)
+			{
+				LPWSTR pBuffer = title.GetBuffer(length);
+				MultiByteToWideChar(CP_UTF8, 0, pItem->title, -1, pBuffer, length);
+				title.ReleaseBuffer();
+			}
+		}
+		if (title.IsEmpty())
+			title = _T("未命名章节");
+
+		HTREEITEM item = m_outlineTree.InsertItem(title, parent, TVI_LAST);
+		if (!item)
+			continue;
+		if (pItem->page.chapter >= 0 && pItem->page.page >= 0)
+		{
+			int pageNumber = -1;
+			fz_var(pageNumber);
+			fz_try(m_ctx)
+			{
+				pageNumber = fz_page_number_from_location(m_ctx, m_doc, pItem->page);
+			}
+			fz_catch(m_ctx)
+			{
+				pageNumber = -1;
+			}
+			if (pageNumber >= 0 && pageNumber < m_totalPages)
+				m_outlineTree.SetItemData(item, static_cast<DWORD_PTR>(pageNumber + 1));
+		}
+		if (pItem->down)
+		{
+			AppendOutlineItems(pItem->down, item);
+			if (pItem->is_open)
+				m_outlineTree.Expand(item, TVE_EXPAND);
+		}
+	}
+}
+
+void CXiaoGongPDFDlg::UpdateOutlineTree()
+{
+	if (!m_outlineTree.GetSafeHwnd())
+		return;
+	m_isUpdatingOutline = true;
+	m_outlineTree.SetRedraw(FALSE);
+	m_outlineTree.DeleteAllItems();
+	if (m_ctx && m_doc)
+	{
+		fz_outline* pOutline = nullptr;
+		fz_var(pOutline);
+		bool failed = false;
+		fz_try(m_ctx)
+		{
+			pOutline = fz_load_outline(m_ctx, m_doc);
+		}
+		fz_catch(m_ctx)
+		{
+			if (pOutline)
+				fz_drop_outline(m_ctx, pOutline);
+			pOutline = nullptr;
+			failed = true;
+		}
+		if (pOutline)
+		{
+			AppendOutlineItems(pOutline, TVI_ROOT);
+			fz_drop_outline(m_ctx, pOutline);
+		}
+		if (!m_outlineTree.GetRootItem())
+			m_outlineTree.InsertItem(failed ? _T("目录读取失败") : _T("此文档没有目录"));
+	}
+	m_outlineTree.SetRedraw(TRUE);
+	m_outlineTree.Invalidate(FALSE);
+	m_isUpdatingOutline = false;
+}
+
+void CXiaoGongPDFDlg::OnOutlineSelectionChanged(NMHDR* pNMHDR, LRESULT* pResult)
+{
+	*pResult = 0;
+	if (m_isUpdatingOutline || !m_doc)
+		return;
+	const NMTREEVIEW* pChange = reinterpret_cast<NMTREEVIEW*>(pNMHDR);
+	if (!pChange->itemNew.hItem)
+		return;
+	const DWORD_PTR page = m_outlineTree.GetItemData(pChange->itemNew.hItem);
+	if (page > 0 && page <= static_cast<DWORD_PTR>(m_totalPages))
+		GoToPage(static_cast<int>(page - 1));
 }
 
 void CXiaoGongPDFDlg::OnTabSelChange(NMHDR* pNMHDR, LRESULT* pResult)
@@ -5483,7 +5725,7 @@ LRESULT CXiaoGongPDFDlg::OnTabCloseButton(WPARAM wParam, LPARAM lParam)
 	return 0;
 }
 
-// ============ 缩略图面板切换功能 ============
+// ============ 目录侧栏切换 ============
 
 void CXiaoGongPDFDlg::ToggleThumbnailPanel()
 {
@@ -5491,39 +5733,7 @@ void CXiaoGongPDFDlg::ToggleThumbnailPanel()
 	TRACE(_T("ToggleThumbnailPanel()\n"));
 #endif
 
-	// 切换状态
-	m_thumbnailVisible = !m_thumbnailVisible;
-
-	// 显示/隐藏缩略图列表
-	m_thumbnailList.ShowWindow(m_thumbnailVisible ? SW_SHOW : SW_HIDE);
-
-	// 触发窗口重新布局
-	CRect rect;
-	GetClientRect(&rect);
-	SendMessage(WM_SIZE, SIZE_RESTORED, MAKELPARAM(rect.Width(), rect.Height()));
-
-	// 如果有文档加载，根据当前模式重新渲染
-	if (m_doc && m_currentPage >= 0)
-	{
-		if (m_continuousScrollMode)
-		{
-			// 连续滚动模式：重新计算页面位置并渲染可见页面
-			CalculatePagePositions();
-
-			// ★★★ 使用UpdateScrollBar来统一处理滚动条显示逻辑
-			UpdateScrollBar();
-			RenderVisiblePages();
-		}
-		else
-		{
-			// 分页模式：重新渲染当前页
-			// ★★★ 使用UpdateScrollBar来统一处理滚动条显示逻辑
-			UpdateScrollBar();
-
-			CleanupBitmap();
-			RenderPage(m_currentPage);
-		}
-	}
+	OnCheckThumbnail();
 }
 
 void CXiaoGongPDFDlg::OnBtnToggleThumbnail()
@@ -5681,6 +5891,15 @@ void CXiaoGongPDFDlg::ClearPageCache()
 
 void CXiaoGongPDFDlg::OnLButtonDown(UINT nFlags, CPoint point)
 {
+	CRect clientRect;
+	GetClientRect(&clientRect);
+	const int dragRight = m_tabCtrl.GetSafeHwnd() && m_tabCtrl.IsWindowVisible() ?
+		32 : clientRect.Width() - 138;
+	if (point.x >= 0 && point.x < dragRight && point.y >= 0 && point.y < 42)
+	{
+		StartWindowDrag();
+		return;
+	}
 #ifdef _DEBUG
 	TRACE(_T("OnLButtonDown: ENTRY point=(%d,%d) nFlags=0x%x m_doc=%p\n"), point.x, point.y, nFlags, m_doc);
 #endif
@@ -6009,8 +6228,23 @@ void CXiaoGongPDFDlg::OnLButtonDown(UINT nFlags, CPoint point)
 	CDialogEx::OnLButtonDown(nFlags, point);
 }
 
+void CXiaoGongPDFDlg::StartWindowDrag()
+{
+	::GetCursorPos(&m_windowDragStartScreen);
+	GetWindowRect(&m_windowDragStartRect);
+	m_isWindowDragging = true;
+	SetCapture();
+}
+
 void CXiaoGongPDFDlg::OnLButtonUp(UINT nFlags, CPoint point)
 {
+	if (m_isWindowDragging)
+	{
+		m_isWindowDragging = false;
+		if (::GetCapture() == GetSafeHwnd())
+			::ReleaseCapture();
+		return;
+	}
 	// 没有加载PDF时不处理鼠标事件
 	if (m_doc == nullptr)
 	{
@@ -6092,6 +6326,41 @@ void CXiaoGongPDFDlg::OnLButtonUp(UINT nFlags, CPoint point)
 
 void CXiaoGongPDFDlg::OnMouseMove(UINT nFlags, CPoint point)
 {
+	if (m_isWindowDragging)
+	{
+		if (!(nFlags & MK_LBUTTON))
+		{
+			m_isWindowDragging = false;
+			if (::GetCapture() == GetSafeHwnd())
+				::ReleaseCapture();
+		}
+		else
+		{
+			CPoint cursor;
+			::GetCursorPos(&cursor);
+			if (IsZoomed())
+			{
+				const int dx = cursor.x - m_windowDragStartScreen.x;
+				const int dy = cursor.y - m_windowDragStartScreen.y;
+				if (dx * dx + dy * dy < 25)
+					return;
+				const double xRatio = static_cast<double>(m_windowDragStartScreen.x -
+					m_windowDragStartRect.left) / m_windowDragStartRect.Width();
+				ShowWindow(SW_RESTORE);
+				GetWindowRect(&m_windowDragStartRect);
+				m_windowDragStartRect.OffsetRect(
+					cursor.x - m_windowDragStartRect.left -
+					static_cast<int>(xRatio * m_windowDragStartRect.Width()),
+					cursor.y - m_windowDragStartRect.top - 21);
+				m_windowDragStartScreen = cursor;
+			}
+			SetWindowPos(nullptr,
+				m_windowDragStartRect.left + cursor.x - m_windowDragStartScreen.x,
+				m_windowDragStartRect.top + cursor.y - m_windowDragStartScreen.y,
+				0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+			return;
+		}
+	}
 	// 处理滚动条拖拽
 	if (m_isDraggingScrollbar && (nFlags & MK_LBUTTON))
 	{
@@ -7670,8 +7939,44 @@ void CXiaoGongPDFDlg::UpdateScrollBar()
 	m_pdfView.GetClientRect(&viewRect);
 	m_scrollPosition = max(0, min(m_scrollPosition,
 		max(0, m_totalScrollHeight - viewRect.Height())));
+	int horizontalContentWidth = m_totalScrollWidth;
+	if (m_continuousScrollMode && m_doc &&
+		m_pageYPositions.size() == static_cast<size_t>(m_totalPages) &&
+		m_pageHeights.size() == static_cast<size_t>(m_totalPages))
+	{
+		CPDFDocument* pDoc = GetActiveDocument();
+		if (pDoc)
+		{
+			const int visibleTop = m_scrollPosition;
+			const int visibleBottom = visibleTop + viewRect.Height();
+			auto first = std::lower_bound(m_pageYPositions.begin(),
+				m_pageYPositions.end(), visibleTop);
+			int firstIndex = static_cast<int>(first - m_pageYPositions.begin());
+			if (firstIndex > 0)
+				--firstIndex;
+			int visibleWidth = 0;
+			bool boundsMissing = false;
+			for (int i = firstIndex; i < m_totalPages &&
+				m_pageYPositions[i] <= visibleBottom; ++i)
+			{
+				if (m_pageYPositions[i] + m_pageHeights[i] < visibleTop)
+					continue;
+				float pageWidth = 0.0f;
+				float pageHeight = 0.0f;
+				if (!pDoc->GetPageBounds(i, pageWidth, pageHeight))
+				{
+					boundsMissing = true;
+					break;
+				}
+				visibleWidth = max(visibleWidth,
+					ClampRenderDimension(pageWidth * m_uniformScale));
+			}
+			if (!boundsMissing)
+				horizontalContentWidth = visibleWidth;
+		}
+	}
 	m_scrollPositionH = max(0, min(m_scrollPositionH,
-		max(0, m_totalScrollWidth - viewRect.Width())));
+		max(0, horizontalContentWidth - viewRect.Width())));
 	if (m_pdfVerticalScrollBar.GetSafeHwnd())
 	{
 		m_pdfVerticalScrollBar.SetRange(m_totalScrollHeight, viewRect.Height(), m_scrollPosition);
@@ -7680,13 +7985,13 @@ void CXiaoGongPDFDlg::UpdateScrollBar()
 	}
 	if (m_pdfHorizontalScrollBar.GetSafeHwnd())
 	{
-		m_pdfHorizontalScrollBar.SetRange(m_totalScrollWidth, viewRect.Width(), m_scrollPositionH);
-		m_pdfHorizontalScrollBar.ShowWindow(m_doc && m_totalScrollWidth > viewRect.Width() ?
+		m_pdfHorizontalScrollBar.SetRange(horizontalContentWidth, viewRect.Width(), m_scrollPositionH);
+		m_pdfHorizontalScrollBar.ShowWindow(m_doc && horizontalContentWidth > viewRect.Width() ?
 			SW_SHOW : SW_HIDE);
 	}
 	if (m_pdfScrollCorner.GetSafeHwnd())
 		m_pdfScrollCorner.ShowWindow(m_doc &&
-			(m_totalScrollHeight > viewRect.Height() || m_totalScrollWidth > viewRect.Width()) ?
+			(m_totalScrollHeight > viewRect.Height() || horizontalContentWidth > viewRect.Width()) ?
 			SW_SHOW : SW_HIDE);
 }
 

@@ -16,6 +16,7 @@ public:
 	void SetTextColor(COLORREF textColor);
 	void SetCornerRadius(int radius);
 	void SetIconGlyph(WCHAR glyph);
+	void SetWindowControlStyle(bool closeButton = false);
 	void SetToolTipText(LPCTSTR text);
 	virtual BOOL PreTranslateMessage(MSG* pMsg);
 
@@ -31,8 +32,11 @@ protected:
 
 private:
 	CFont m_iconFont;
+	CFont m_windowIconFont;
 	CToolTipCtrl m_toolTip;
 	WCHAR m_iconGlyph;
+	bool m_windowControlStyle;
+	bool m_closeWindowControl;
 	COLORREF m_normalColor;      // 正常状态颜色
 	COLORREF m_hoverColor;       // 鼠标悬停颜色
 	COLORREF m_pressedColor;     // 按下状态颜色

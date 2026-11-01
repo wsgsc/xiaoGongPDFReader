@@ -28,6 +28,8 @@ protected:
 	afx_msg void OnMouseMove(UINT nFlags, CPoint point);
 	afx_msg void OnMouseLeave();
 	afx_msg void OnLButtonDown(UINT nFlags, CPoint point);
+	afx_msg void OnLButtonUp(UINT nFlags, CPoint point);
+	afx_msg void OnLButtonDblClk(UINT nFlags, CPoint point);
 	afx_msg BOOL OnEraseBkgnd(CDC* pDC);
 	afx_msg void OnDestroy();
 
@@ -43,6 +45,11 @@ private:
 	int m_closeHoverIndex;     // 当前悬停的关闭按钮索引
 	BOOL m_bCloseButtonEnabled; // 是否启用关闭按钮
 	BOOL m_bTracking;          // 是否正在跟踪鼠标
+	BOOL m_tabDragArmed;
+	BOOL m_tabDragging;
+	int m_tabPressedIndex;
+	CPoint m_tabDragStartScreen;
+	CRect m_tabDragStartWindow;
 
 	// 外观配置
 	int m_tabHeight;           // 标签页高度

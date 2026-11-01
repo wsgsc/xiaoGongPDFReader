@@ -165,11 +165,20 @@ private:
 	CModernTabCtrl m_tabCtrl;   // 现代化标签页控件
 	CEdit m_editFilePath;       // 当前标签对应的完整文件路径
 	CListCtrl m_thumbnailList;  // 缩略图列表控件
+	CTreeCtrl m_outlineTree;
 	CPDFViewCtrl m_pdfView;     // ★★★ 使用自定义控件支持滚动条消息
 	CPDFScrollBar m_pdfVerticalScrollBar;
 	CPDFScrollBar m_pdfHorizontalScrollBar{ false };
 	CStatic m_pdfScrollCorner;
 	CStatic m_toolbar;
+	CCustomButton m_btnOpen;
+	CCustomButton m_btnZoomOut;
+	CCustomButton m_btnFitWidth;
+	CCustomButton m_btnZoomIn;
+	CCustomButton m_btnMore;
+	CCustomButton m_btnMinimize;
+	CCustomButton m_btnMaximize;
+	CCustomButton m_btnCloseWindow;
 	CCustomButton m_btnFirst;
 	CCustomButton m_btnLast;
 	CCustomButton m_btnFullscreen;    // 全屏按钮
@@ -177,7 +186,7 @@ private:
 	CCustomButton m_btnRotateRight;   // 向右旋转按钮
 	CCustomButton m_btnEdit;          // 编辑按钮
 	CCustomButton m_btnSelectText;    // 文本选择按钮
-	CButton m_checkThumbnail;         // 缩略图复选框
+	CCustomButton m_btnOutline;       // 目录侧栏按钮
 	CEdit m_editCurrent;
 	CStatic m_pageTotal;
 	CStatic m_statusBar;        // 状态栏
@@ -265,6 +274,8 @@ private:
 	ULONGLONG m_lastResizeRenderTick;  // 上次窗口拉伸时完成重渲染的时间
 
 	bool m_thumbnailVisible;    // 缩略图面板是否可见
+	bool m_outlineVisible;
+	bool m_isUpdatingOutline;
 	bool m_isUpdatingThumbnails;  // 缩略图列表是否处于批量更新中
 
 	CShortcutsDialog m_shortcutsDialog;  // 快捷键对话框
@@ -274,6 +285,9 @@ private:
 
 	// 拖拽平移相关
 	bool m_isDragging;          // 是否正在拖拽
+	bool m_isWindowDragging;
+	CPoint m_windowDragStartScreen;
+	CRect m_windowDragStartRect;
 	CPoint m_lastMousePos;      // 上次鼠标位置
 	CPoint m_panOffset;         // 当前平移偏移量
 	HCURSOR m_hHandCursor;      // 手形光标
@@ -395,6 +409,7 @@ protected:
 	afx_msg void OnPaint();
 	afx_msg HCURSOR OnQueryDragIcon();
 	afx_msg HBRUSH OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor);
+	void StartWindowDrag();
 	afx_msg void OnGetMinMaxInfo(MINMAXINFO* lpMMI);
 	afx_msg BOOL OnEraseBkgnd(CDC* pDC);  // ★★★ 拦截背景擦除消息，防止闪烁
 	DECLARE_MESSAGE_MAP()
@@ -407,6 +422,9 @@ protected:
     void HighlightCurrentThumbnail();
 	void RenderVisibleThumbnails();  // 渲染可见区域的缩略图（按需加载）
     afx_msg void OnThumbnailItemChanged(NMHDR* pNMHDR, LRESULT* pResult);
+	void UpdateOutlineTree();
+	void AppendOutlineItems(const fz_outline* pOutline, HTREEITEM parent);
+	afx_msg void OnOutlineSelectionChanged(NMHDR* pNMHDR, LRESULT* pResult);
 	afx_msg LRESULT OnThumbnailScroll(WPARAM wParam, LPARAM lParam);  // 缩略图滚动事件
     afx_msg void OnSize(UINT nType, int cx, int cy);
     afx_msg LRESULT OnRenderThumbnailsAsync(WPARAM wParam, LPARAM lParam);  // 异步渲染缩略图
@@ -437,7 +455,7 @@ protected:
     afx_msg void OnBtnEdit();         // 编辑按钮点击事件
 
     // 缩略图复选框相关
-    afx_msg void OnCheckThumbnail();  // 缩略图复选框点击事件
+    afx_msg void OnCheckThumbnail();  // 目录按钮点击事件
     int GetPageRotation(int pageNumber);  // 获取指定页面的旋转角度
     HBITMAP RotateBitmap(HBITMAP hSrcBitmap, int rotation);  // 安全地旋转位图
 
@@ -493,6 +511,13 @@ protected:
 
     // 缩放相关函数
     void SetZoom(float zoom, ZoomMode mode = ZOOM_CUSTOM);
+	void OnBtnZoomOut();
+	void OnBtnFitWidth();
+	void OnBtnZoomIn();
+	void OnBtnMore();
+	void OnBtnMinimize();
+	void OnBtnMaximize();
+	void OnBtnCloseWindow();
 
 
 
@@ -500,7 +525,6 @@ protected:
     void LoadRecentFiles();
     void SaveRecentFiles();
     void AddRecentFile(const CString& filePath);
-    void UpdateRecentFilesMenu();
 
     // 拖拽相关
     afx_msg void OnDropFiles(HDROP hDropInfo);

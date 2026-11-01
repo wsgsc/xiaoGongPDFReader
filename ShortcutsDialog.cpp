@@ -84,7 +84,7 @@ void CShortcutsDialog::InitializeShortcutsList()
 	AddShortcut(_T("Ctrl + R"), _T("向右旋转（顺时针90度）"));
 	AddShortcut(_T(""), _T(""));
 
-	AddShortcut(_T("F9"), _T("切换缩略图面板"));
+	AddShortcut(_T("F9"), _T("切换目录面板"));
 	AddShortcut(_T("F11"), _T("全屏模式"));
 	AddShortcut(_T("ESC"), _T("退出全屏"));
 	AddShortcut(_T(""), _T(""));

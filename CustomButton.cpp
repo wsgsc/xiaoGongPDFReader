@@ -5,6 +5,8 @@ IMPLEMENT_DYNAMIC(CCustomButton, CButton)
 
 CCustomButton::CCustomButton()
 	: m_iconGlyph(0)
+	, m_windowControlStyle(false)
+	, m_closeWindowControl(false)
 	, m_normalColor(RGB(255, 255, 255))
 	, m_hoverColor(RGB(235, 243, 255))
 	, m_pressedColor(RGB(219, 234, 255))
@@ -21,6 +23,8 @@ CCustomButton::~CCustomButton()
 		m_buttonFont.DeleteObject();
 	if (m_iconFont.GetSafeHandle())
 		m_iconFont.DeleteObject();
+	if (m_windowIconFont.GetSafeHandle())
+		m_windowIconFont.DeleteObject();
 }
 
 BEGIN_MESSAGE_MAP(CCustomButton, CButton)
@@ -55,6 +59,14 @@ void CCustomButton::SetCornerRadius(int radius)
 void CCustomButton::SetIconGlyph(WCHAR glyph)
 {
 	m_iconGlyph = glyph;
+	if (GetSafeHwnd())
+		Invalidate(FALSE);
+}
+
+void CCustomButton::SetWindowControlStyle(bool closeButton)
+{
+	m_windowControlStyle = true;
+	m_closeWindowControl = closeButton;
 	if (GetSafeHwnd())
 		Invalidate(FALSE);
 }
@@ -110,11 +122,17 @@ void CCustomButton::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 	CBitmap* pOldBitmap = bufferDC.SelectObject(&bufferBitmap);
 	CRect localRect(0, 0, rect.Width(), rect.Height());
 	bufferDC.FillSolidRect(localRect, RGB(255, 255, 255));
+	if (!m_buttonFont.GetSafeHandle())
+		m_buttonFont.CreatePointFont(90, _T("Microsoft YaHei UI"));
+	if (!m_iconFont.GetSafeHandle())
+		m_iconFont.CreatePointFont(140, _T("Segoe MDL2 Assets"));
+	if (m_windowControlStyle && !m_windowIconFont.GetSafeHandle())
+		m_windowIconFont.CreatePointFont(105, _T("Segoe MDL2 Assets"));
 
 	const bool bDisabled = (state & ODS_DISABLED) != 0;
 	const bool bPressed = (state & ODS_SELECTED) != 0;
 	COLORREF fillColor = m_normalColor;
-	COLORREF borderColor = RGB(224, 230, 238);
+	COLORREF borderColor = m_normalColor;
 	if (bDisabled)
 	{
 		fillColor = RGB(250, 251, 253);
@@ -135,17 +153,23 @@ void CCustomButton::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 		borderColor = RGB(255, 255, 255);
 	}
 
-	CRect buttonRect = localRect;
-	buttonRect.DeflateRect(1, 1);
-	DrawRoundRect(&bufferDC, buttonRect, m_cornerRadius, fillColor, borderColor);
+	if (m_windowControlStyle)
+		bufferDC.FillSolidRect(localRect, fillColor);
+	else
+	{
+		CRect buttonRect = localRect;
+		buttonRect.DeflateRect(1, 1);
+		DrawRoundRect(&bufferDC, buttonRect, m_cornerRadius, fillColor, borderColor);
+	}
 
 	CString strText;
 	GetWindowText(strText);
 
-	bool useIcon = m_iconGlyph && m_iconFont.GetSafeHandle();
+	CFont* pIconFont = m_windowControlStyle ? &m_windowIconFont : &m_iconFont;
+	bool useIcon = m_iconGlyph && pIconFont->GetSafeHandle();
 	if (useIcon)
 	{
-		CFont* pOldFont = bufferDC.SelectObject(&m_iconFont);
+		CFont* pOldFont = bufferDC.SelectObject(pIconFont);
 		CString face;
 		bufferDC.GetTextFace(face);
 		useIcon = face.CompareNoCase(_T("Segoe MDL2 Assets")) == 0;
@@ -153,8 +177,13 @@ void CCustomButton::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 		{
 			TCHAR glyph[] = { static_cast<TCHAR>(m_iconGlyph), 0 };
 			bufferDC.SetBkMode(TRANSPARENT);
-			bufferDC.SetTextColor(bDisabled ? RGB(163, 173, 185) :
-				(m_bHover || bPressed ? RGB(32, 100, 185) : m_textColor));
+			COLORREF iconColor = bDisabled ? RGB(163, 173, 185) : m_textColor;
+			if (!bDisabled && m_windowControlStyle && m_closeWindowControl &&
+				(m_bHover || bPressed))
+				iconColor = RGB(255, 255, 255);
+			else if (!bDisabled && !m_windowControlStyle && (m_bHover || bPressed))
+				iconColor = RGB(32, 100, 185);
+			bufferDC.SetTextColor(iconColor);
 			bufferDC.DrawText(glyph, localRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 		}
 		bufferDC.SelectObject(pOldFont);
@@ -164,13 +193,17 @@ void CCustomButton::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 		CFont* pFont = m_iconGlyph ? &m_buttonFont : GetFont();
 		CFont* pOldFont = bufferDC.SelectObject(pFont ? pFont : &m_buttonFont);
 		bufferDC.SetBkMode(TRANSPARENT);
-		bufferDC.SetTextColor(bDisabled ? RGB(163, 173, 185) :
-			(bPressed ? RGB(35, 84, 155) : m_textColor));
+		COLORREF textColor = bDisabled ? RGB(163, 173, 185) :
+			(bPressed && !m_windowControlStyle ? RGB(35, 84, 155) : m_textColor);
+		if (!bDisabled && m_windowControlStyle && m_closeWindowControl &&
+			(m_bHover || bPressed))
+			textColor = RGB(255, 255, 255);
+		bufferDC.SetTextColor(textColor);
 		bufferDC.DrawText(strText, localRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 		bufferDC.SelectObject(pOldFont);
 	}
 
-	if ((state & ODS_FOCUS) && !bDisabled)
+	if ((state & ODS_FOCUS) && !bDisabled && !m_windowControlStyle)
 	{
 		CRect focusRect = localRect;
 		focusRect.DeflateRect(4, 4);

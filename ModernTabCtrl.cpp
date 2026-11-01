@@ -8,6 +8,8 @@ BEGIN_MESSAGE_MAP(CModernTabCtrl, CTabCtrl)
 	ON_WM_MOUSEMOVE()
 	ON_WM_MOUSELEAVE()
 	ON_WM_LBUTTONDOWN()
+	ON_WM_LBUTTONUP()
+	ON_WM_LBUTTONDBLCLK()
 	ON_WM_ERASEBKGND()
 	ON_WM_DESTROY()
 END_MESSAGE_MAP()
@@ -17,6 +19,10 @@ CModernTabCtrl::CModernTabCtrl()
 	, m_closeHoverIndex(-1)
 	, m_bCloseButtonEnabled(TRUE)
 	, m_bTracking(FALSE)
+	, m_tabDragArmed(FALSE)
+	, m_tabDragging(FALSE)
+	, m_tabPressedIndex(-1)
+	, m_tabDragStartScreen(0, 0)
 	, m_tabHeight(36)
 	, m_normalColor(RGB(240, 240, 240))      // 浅灰色背景
 	, m_hoverColor(RGB(230, 230, 230))       // 稍深的灰色（悬停）
@@ -151,7 +157,7 @@ void CModernTabCtrl::OnPaint()
 	}
 
 	// 绘制背景
-	memDC.FillSolidRect(clientRect, RGB(245, 245, 245));
+	memDC.FillSolidRect(clientRect, m_normalColor);
 
 	// 获取标签数量
 	int tabCount = GetItemCount();
@@ -197,7 +203,7 @@ void CModernTabCtrl::DrawTab(CDC* pDC, int index, CRect rect, BOOL isSelected, B
 
 	// 绘制圆角矩形背景
 	CPen pen;
-	pen.CreatePen(PS_SOLID, 1, RGB(200, 200, 200));
+	pen.CreatePen(PS_SOLID, 1, isSelected ? RGB(216, 224, 233) : bgColor);
 	CPen* pOldPen = pDC->SelectObject(&pen);
 
 	CBrush brush;
@@ -205,10 +211,10 @@ void CModernTabCtrl::DrawTab(CDC* pDC, int index, CRect rect, BOOL isSelected, B
 	CBrush* pOldBrush = pDC->SelectObject(&brush);
 
 	// 调整矩形以创建间隔
-	rect.DeflateRect(2, 2, 2, 0);
+	rect.DeflateRect(3, 3, 3, 0);
 
 	// 绘制圆角矩形（上方圆角）
-	pDC->RoundRect(rect, CPoint(6, 6));
+	pDC->RoundRect(rect, CPoint(9, 9));
 
 	// 恢复原来的GDI对象（让MFC自动清理pen和brush）
 	pDC->SelectObject(pOldBrush);
@@ -236,14 +242,21 @@ void CModernTabCtrl::DrawTab(CDC* pDC, int index, CRect rect, BOOL isSelected, B
 
 	// 计算关闭按钮区域（如果启用）
 	CRect textRect = rect;
+	textRect.left += 38;
 	if (m_bCloseButtonEnabled)
 	{
 		textRect.right -= 20; // 为关闭按钮留出空间
 	}
 
 	// 绘制文本
+	CRect iconRect(rect.left + 14, rect.top + (rect.Height() - 16) / 2,
+		rect.left + 29, rect.top + (rect.Height() - 16) / 2 + 16);
+	pDC->FillSolidRect(iconRect, RGB(218, 48, 54));
 	CFont* pOldFont = pDC->SelectObject(isSelected ? &m_boldFont : &m_font);
-	pDC->SetTextColor(RGB(50, 50, 50));
+	pDC->SetBkMode(TRANSPARENT);
+	pDC->SetTextColor(RGB(255, 255, 255));
+	pDC->DrawText(_T("P"), iconRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+	pDC->SetTextColor(RGB(35, 45, 57));
 	pDC->SetBkMode(TRANSPARENT);
 
 	// 截断过长的文本
@@ -260,7 +273,7 @@ void CModernTabCtrl::DrawTab(CDC* pDC, int index, CRect rect, BOOL isSelected, B
 		displayText = displayText.Left(len) + _T("...");
 	}
 
-	pDC->DrawText(displayText, textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+	pDC->DrawText(displayText, textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 	pDC->SelectObject(pOldFont);
 
 	// 绘制关闭按钮
@@ -321,6 +334,45 @@ CRect CModernTabCtrl::GetTabRect(int index)
 
 void CModernTabCtrl::OnMouseMove(UINT nFlags, CPoint point)
 {
+	if (m_tabDragArmed)
+	{
+		if (!(nFlags & MK_LBUTTON))
+		{
+			m_tabDragArmed = FALSE;
+			m_tabDragging = FALSE;
+			m_tabPressedIndex = -1;
+			if (::GetCapture() == GetSafeHwnd())
+				::ReleaseCapture();
+		}
+		else
+		{
+			CPoint cursor;
+			::GetCursorPos(&cursor);
+			const int dx = cursor.x - m_tabDragStartScreen.x;
+			const int dy = cursor.y - m_tabDragStartScreen.y;
+			if (m_tabDragging || dx * dx + dy * dy >= 25)
+			{
+				m_tabDragging = TRUE;
+				if (GetParent()->IsZoomed())
+				{
+					const double xRatio = static_cast<double>(m_tabDragStartScreen.x -
+						m_tabDragStartWindow.left) / m_tabDragStartWindow.Width();
+					GetParent()->ShowWindow(SW_RESTORE);
+					GetParent()->GetWindowRect(&m_tabDragStartWindow);
+					m_tabDragStartWindow.OffsetRect(
+						cursor.x - m_tabDragStartWindow.left -
+						static_cast<int>(xRatio * m_tabDragStartWindow.Width()),
+						cursor.y - m_tabDragStartWindow.top - 21);
+					m_tabDragStartScreen = cursor;
+				}
+				GetParent()->SetWindowPos(nullptr,
+					m_tabDragStartWindow.left + cursor.x - m_tabDragStartScreen.x,
+					m_tabDragStartWindow.top + cursor.y - m_tabDragStartScreen.y,
+					0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+				return;
+			}
+		}
+	}
 	// 开始跟踪鼠标离开事件
 	if (!m_bTracking)
 	{
@@ -385,14 +437,74 @@ void CModernTabCtrl::OnMouseLeave()
 
 void CModernTabCtrl::OnLButtonDown(UINT nFlags, CPoint point)
 {
+	m_tabDragArmed = FALSE;
+	m_tabDragging = FALSE;
+	m_tabPressedIndex = -1;
 	// 检查是否点击了关闭按钮
-	if (m_bCloseButtonEnabled && m_closeHoverIndex != -1)
+	int closeIndex = -1;
+	if (m_bCloseButtonEnabled)
+	{
+		for (int i = 0; i < GetItemCount(); ++i)
+		{
+			if (GetCloseButtonRect(i).PtInRect(point))
+			{
+				closeIndex = i;
+				break;
+			}
+		}
+	}
+	if (closeIndex != -1)
 	{
 		// 发送自定义消息通知父窗口关闭标签页
 		// 使用WM_APP + 自定义偏移
-		GetParent()->SendMessage(WM_APP + 100, m_closeHoverIndex, 0);
+		GetParent()->SendMessage(WM_APP + 100, closeIndex, 0);
 		return;
 	}
+	TCHITTESTINFO hitInfo = {};
+	hitInfo.pt = point;
+	m_tabPressedIndex = HitTest(&hitInfo);
+	::GetCursorPos(&m_tabDragStartScreen);
+	GetParent()->GetWindowRect(&m_tabDragStartWindow);
+	m_tabDragArmed = TRUE;
+	SetCapture();
+}
 
-	CTabCtrl::OnLButtonDown(nFlags, point);
+void CModernTabCtrl::OnLButtonUp(UINT nFlags, CPoint point)
+{
+	const BOOL wasDragging = m_tabDragging;
+	const int pressedIndex = m_tabPressedIndex;
+	m_tabDragArmed = FALSE;
+	m_tabDragging = FALSE;
+	m_tabPressedIndex = -1;
+	if (::GetCapture() == GetSafeHwnd())
+		::ReleaseCapture();
+	if (!wasDragging && pressedIndex >= 0)
+	{
+		TCHITTESTINFO hitInfo = {};
+		hitInfo.pt = point;
+		if (HitTest(&hitInfo) == pressedIndex)
+		{
+			SetCurSel(pressedIndex);
+			Invalidate(FALSE);
+			NMHDR notification = {};
+			notification.hwndFrom = GetSafeHwnd();
+			notification.idFrom = GetDlgCtrlID();
+			notification.code = TCN_SELCHANGE;
+			GetParent()->SendMessage(WM_NOTIFY, notification.idFrom,
+				reinterpret_cast<LPARAM>(&notification));
+		}
+	}
+}
+
+void CModernTabCtrl::OnLButtonDblClk(UINT nFlags, CPoint point)
+{
+	TCHITTESTINFO hitInfo = {};
+	hitInfo.pt = point;
+	if (HitTest(&hitInfo) < 0)
+	{
+		GetParent()->SendMessage(WM_SYSCOMMAND,
+			GetParent()->IsZoomed() ? SC_RESTORE : SC_MAXIMIZE);
+		return;
+	}
+	CTabCtrl::OnLButtonDblClk(nFlags, point);
 }
