@@ -163,6 +163,7 @@ protected:
 
 private:
 	CModernTabCtrl m_tabCtrl;   // 现代化标签页控件
+	CEdit m_editFilePath;       // 当前标签对应的完整文件路径
 	CListCtrl m_thumbnailList;  // 缩略图列表控件
 	CPDFViewCtrl m_pdfView;     // ★★★ 使用自定义控件支持滚动条消息
 	CPDFScrollBar m_pdfVerticalScrollBar;
@@ -178,6 +179,7 @@ private:
 	CCustomButton m_btnSelectText;    // 文本选择按钮
 	CButton m_checkThumbnail;         // 缩略图复选框
 	CEdit m_editCurrent;
+	CStatic m_pageTotal;
 	CStatic m_statusBar;        // 状态栏
 
 	// 搜索相关控件
@@ -513,6 +515,7 @@ protected:
     void CloseDocument(int index);  // 关闭指定文档
     void CloseCurrentDocument();  // 关闭当前文档
     void UpdateTabControl();  // 更新标签页显示
+    void UpdateFilePathDisplay();  // 更新当前标签的完整路径
     CPDFDocument* GetActiveDocument();  // 获取当前活动文档
     afx_msg void OnTabSelChange(NMHDR* pNMHDR, LRESULT* pResult);  // 标签页切换事件
     afx_msg LRESULT OnTabCloseButton(WPARAM wParam, LPARAM lParam);  // 标签页关闭按钮事件

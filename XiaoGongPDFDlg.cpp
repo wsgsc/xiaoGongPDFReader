@@ -21,6 +21,7 @@
 namespace
 {
 	constexpr size_t PAGE_CACHE_BUDGET = 128u * 1024u * 1024u;
+	constexpr COLORREF PDF_VIEW_BACKGROUND = RGB(230, 230, 230);
 
 	CString FullPathForComparison(const CString& path)
 	{
@@ -438,7 +439,7 @@ void CPDFViewCtrl::OnPaint()
 	if (!hBitmap)
 	{
 		// 没有位图，填充背景色
-		dc.FillSolidRect(&clientRect, RGB(240, 240, 240));
+		dc.FillSolidRect(&clientRect, PDF_VIEW_BACKGROUND);
 		return;
 	}
 
@@ -469,7 +470,7 @@ void CPDFViewCtrl::OnPaint()
 	if (isContinuousMode)
 	{
 		// ★★★ 连续滚动模式：位图已经是可见区域，填灰色背景后居中贴图
-		backDC.FillSolidRect(&clientRect, RGB(128, 128, 128));
+		backDC.FillSolidRect(&clientRect, PDF_VIEW_BACKGROUND);
 
 		int destX = 0;
 		int destY = 0;
@@ -500,7 +501,7 @@ void CPDFViewCtrl::OnPaint()
 			scrollY = m_pParentDlg->m_scrollPosition;
 		}
 
-		backDC.FillSolidRect(&clientRect, RGB(240, 240, 240));
+		backDC.FillSolidRect(&clientRect, PDF_VIEW_BACKGROUND);
 
 		int destX = 0;
 		int destY = 0;
@@ -1023,11 +1024,14 @@ void CXiaoGongPDFDlg::SetControlsVisible(bool visible)
 	CWnd* controls[] = {
 		&m_toolbar, &m_tabCtrl, &m_btnFirst, &m_btnLast,
 		&m_btnFullscreen, &m_btnRotateLeft, &m_btnRotateRight,
-		&m_btnEdit, &m_btnSelectText, &m_editCurrent, &m_statusBar, &m_checkThumbnail,
+		&m_btnEdit, &m_btnSelectText, &m_editCurrent, &m_pageTotal,
+		&m_statusBar, &m_checkThumbnail,
 		&m_editSearch, &m_btnFind, &m_btnPrevMatch, &m_btnNextMatch
 	};
 	for (auto* pCtrl : controls)
 		if (pCtrl->GetSafeHwnd()) pCtrl->ShowWindow(nShow);
+	if (m_editFilePath.GetSafeHwnd())
+		m_editFilePath.ShowWindow(visible && GetActiveDocument() ? SW_SHOW : SW_HIDE);
 	if (m_thumbnailList.GetSafeHwnd())
 		m_thumbnailList.ShowWindow(visible ? (m_thumbnailVisible ? SW_SHOW : SW_HIDE) : SW_HIDE);
 }
@@ -1084,6 +1088,7 @@ void CXiaoGongPDFDlg::DoDataExchange(CDataExchange* pDX)
 {
 	CDialogEx::DoDataExchange(pDX);
 	DDX_Control(pDX, IDC_TAB_CONTROL, m_tabCtrl);
+	DDX_Control(pDX, IDC_EDIT_FILE_PATH, m_editFilePath);
 	DDX_Control(pDX, IDC_PDF_VIEW, m_pdfView);
 	DDX_Control(pDX, IDC_THUMBNAIL_LIST, m_thumbnailList);
 	DDX_Control(pDX, IDC_TOOLBAR, m_toolbar);
@@ -1096,6 +1101,7 @@ void CXiaoGongPDFDlg::DoDataExchange(CDataExchange* pDX)
 	DDX_Control(pDX, IDC_BTN_SELECT_TEXT, m_btnSelectText);
 	DDX_Control(pDX, IDC_CHECK_THUMBNAIL, m_checkThumbnail);
 	DDX_Control(pDX, IDC_EDIT_CURRENT, m_editCurrent);
+	DDX_Control(pDX, IDC_PAGE_TOTAL, m_pageTotal);
 	DDX_Control(pDX, IDC_STATUS_BAR, m_statusBar);
 
 	// 搜索控件绑定
@@ -1423,6 +1429,7 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	m_scrollBarWidth = GetSystemMetrics(SM_CXVSCROLL);
 
 	m_thumbnailList.ModifyStyle(WS_VISIBLE, 0);
+	m_editFilePath.ShowWindow(SW_HIDE);
 
 	// 初始化状态栏（未加载PDF时隐藏）
 	m_statusBar.SetWindowText(_T(""));
@@ -1570,6 +1577,12 @@ HBRUSH CXiaoGongPDFDlg::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor)
 	if (pWnd->GetSafeHwnd() == m_toolbar.GetSafeHwnd())
 	{
 		pDC->SetBkColor(RGB(255, 255, 255));
+		return m_toolbarBrush;
+	}
+	if (pWnd->GetSafeHwnd() == m_pageTotal.GetSafeHwnd())
+	{
+		pDC->SetBkColor(RGB(255, 255, 255));
+		pDC->SetTextColor(RGB(32, 33, 36));
 		return m_toolbarBrush;
 	}
 
@@ -1930,7 +1943,7 @@ bool CXiaoGongPDFDlg::RenderPage(int pageNumber)
 					HBITMAP hOldBmp2 = (HBITMAP)targetDC.SelectObject(hNewBitmap);
 
 					// 填充浅灰色背景（让白色PDF页面更明显）
-					targetDC.FillSolidRect(0, 0, viewWidth, viewHeight, RGB(240, 240, 240));
+					targetDC.FillSolidRect(0, 0, viewWidth, viewHeight, PDF_VIEW_BACKGROUND);
 
 					// ★★★ 使用实际位图尺寸计算居中位置（带偏移）
 					int xPos = (viewWidth - actualWidth) / 2 + m_panOffset.x;
@@ -3098,25 +3111,29 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		// 单行工具栏，固定点击区域；搜索框按剩余空间伸缩。
 		const int TOOLBAR_HEIGHT = 44;
 		const int TAB_HEIGHT = 35;
+		const int PATH_HEIGHT = 28;
 		const int BTN_HEIGHT = 34;
-		const int ICON_WIDTH = 34;
-		const int GAP = 4;
-		const int GROUP_GAP = 14;
+		const bool compactToolbar = cx < 960;
+		const int ICON_WIDTH = compactToolbar ? 32 : 34;
+		const int GAP = compactToolbar ? 2 : 4;
+		const int GROUP_GAP = compactToolbar ? 2 : 14;
+		const int THUMBNAIL_WIDTH = compactToolbar ? 72 : 86;
+		const int PAGE_GROUP_WIDTH = 120;
 		const int btnY = MARGIN + (TOOLBAR_HEIGHT - BTN_HEIGHT) / 2;
 
 		m_toolbar.MoveWindow(MARGIN, MARGIN, cx - MARGIN * 2, TOOLBAR_HEIGHT);
 		if (m_tabCtrl.GetSafeHwnd())
 			m_tabCtrl.MoveWindow(MARGIN, MARGIN * 2 + TOOLBAR_HEIGHT,
 				cx - MARGIN * 2, TAB_HEIGHT);
+		if (m_editFilePath.GetSafeHwnd())
+			m_editFilePath.MoveWindow(MARGIN, MARGIN * 2 + TOOLBAR_HEIGHT + TAB_HEIGHT + 3,
+				cx - MARGIN * 2, PATH_HEIGHT);
 
 		int x = MARGIN * 2;
 		m_btnFirst.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
 		x += ICON_WIDTH + GAP;
 		m_btnLast.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
 		x += ICON_WIDTH + GROUP_GAP;
-		m_editCurrent.MoveWindow(x, btnY, 52, BTN_HEIGHT);
-		x += 52 + GROUP_GAP;
-
 		m_btnRotateLeft.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
 		x += ICON_WIDTH + GAP;
 		m_btnRotateRight.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
@@ -3124,13 +3141,17 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		m_btnFullscreen.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
 		x += ICON_WIDTH + GROUP_GAP;
 
-		m_checkThumbnail.MoveWindow(x, btnY, 86, BTN_HEIGHT);
-		x += 86 + GROUP_GAP;
+		m_checkThumbnail.MoveWindow(x, btnY, THUMBNAIL_WIDTH, BTN_HEIGHT);
+		x += THUMBNAIL_WIDTH + GROUP_GAP;
 		m_btnSelectText.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
 		x += ICON_WIDTH + GAP;
 		m_btnEdit.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
-		x += ICON_WIDTH + GROUP_GAP;
 
+		const int pageX = (cx - PAGE_GROUP_WIDTH) / 2;
+		m_editCurrent.MoveWindow(pageX, btnY, 48, BTN_HEIGHT);
+		m_pageTotal.MoveWindow(pageX + 56, btnY + 5, 64, BTN_HEIGHT - 10);
+
+		x = pageX + PAGE_GROUP_WIDTH + 16;
 		const int SEARCH_BUTTONS_WIDTH = ICON_WIDTH * 3 + GAP * 3;
 		const int searchWidth = max(100, min(260,
 			cx - MARGIN * 2 - x - SEARCH_BUTTONS_WIDTH));
@@ -3148,7 +3169,7 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		const int STATUS_BAR_HEIGHT = 25;  // 状态栏高度
 
 		// 计算内容区域的起始Y坐标（工具栏 + 标签页 + 间距）
-		int contentY = MARGIN * 4 + TOOLBAR_HEIGHT + TAB_HEIGHT;
+		int contentY = MARGIN * 4 + TOOLBAR_HEIGHT + TAB_HEIGHT + PATH_HEIGHT + 4;
 		int contentHeight = cy - contentY - MARGIN - STATUS_BAR_HEIGHT;
 
 		if (m_thumbnailVisible)
@@ -3395,13 +3416,21 @@ BOOL CXiaoGongPDFDlg::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
 // 工具栏功能实现
 void CXiaoGongPDFDlg::UpdatePageControls()
 {
-	if (!m_doc) return;
+	if (!m_doc)
+	{
+		m_editCurrent.SetWindowText(_T("0"));
+		m_pageTotal.SetWindowText(_T("/ 0"));
+		return;
+	}
 
 	// 更新当前页码显示
 	CString currentPage;
 	currentPage.Format(_T("%d"), m_currentPage + 1);
 	m_editCurrent.SetWindowText(currentPage);
 	m_editCurrent.UpdateWindow();  // 强制立即重绘，确保快速滚动时也能实时显示
+	CString totalPages;
+	totalPages.Format(_T("/ %d"), m_totalPages);
+	m_pageTotal.SetWindowText(totalPages);
 
 	// 更新状态栏
 	UpdateStatusBar();
@@ -3415,17 +3444,13 @@ void CXiaoGongPDFDlg::UpdatePageControls()
 
 void CXiaoGongPDFDlg::UpdateStatusBar()
 {
+	m_statusBar.SetWindowText(_T(""));
 	if (!m_doc)
 	{
-		m_statusBar.SetWindowText(_T(""));
 		m_statusBar.ShowWindow(SW_HIDE);
 		return;
 	}
 
-	CString title;
-	title.Format(_T("第 %d/%d 页"),
-		m_currentPage + 1, m_totalPages);
-	m_statusBar.SetWindowText(title);
 	// 全屏模式下不显示状态栏
 	if (!m_isFullscreen)
 		m_statusBar.ShowWindow(SW_SHOW);
@@ -3930,6 +3955,9 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 
 	// 创建新的字体对象
 	m_buttonFont.CreateFontIndirect(&lf);
+	lf.lfHeight = -18;
+	lf.lfWeight = FW_NORMAL;
+	m_labelFont.CreateFontIndirect(&lf);
 
 	// 为所有按钮设置新字体
 	m_btnFirst.SetFont(&m_buttonFont);
@@ -3945,7 +3973,9 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 
 	// 设置编辑框的字体和外观
 	m_editCurrent.SetFont(&m_buttonFont);
+	m_pageTotal.SetFont(&m_buttonFont);
 	m_editSearch.SetFont(&m_buttonFont);
+	m_editFilePath.SetFont(&m_labelFont);
 
 	// 图标由 Windows 系统字体提供，名称在悬停时显示。
 	m_btnFirst.SetWindowText(_T("首页"));
@@ -3982,6 +4012,7 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 
 	// 设置初始文本
 	m_editCurrent.SetWindowText(_T("0"));
+	m_pageTotal.SetWindowText(_T("/ 0"));
 
 	// 确保所有按钮默认启用
 	m_btnFirst.EnableWindow(TRUE);
@@ -5025,7 +5056,7 @@ bool CXiaoGongPDFDlg::OpenPDFInNewTab(const CString& filePath)
 	}
 
 	// 转换为UTF-8 mupdf需要转换成 UTF-8形式
-	CStringW wPath(filePath);
+	CStringW wPath(normalizedNewPath);
 #ifdef _DEBUG
 	TRACE(_T("原始文件路径: %s\n"), (LPCTSTR)filePath);
 	TRACE(_T("宽字符路径: %s\n"), (LPCWSTR)wPath);
@@ -5082,7 +5113,7 @@ bool CXiaoGongPDFDlg::OpenPDFInNewTab(const CString& filePath)
 
 	// 创建加载参数
 	m_pLoadParams = new PDFLoadParams();
-	m_pLoadParams->filePath = filePath;
+	m_pLoadParams->filePath = normalizedNewPath;
 	m_pLoadParams->utf8Path = utf8Path;
 	m_pLoadParams->notifyWnd = GetSafeHwnd();
 	m_pLoadParams->pDoc = newDoc;
@@ -5159,6 +5190,7 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 	// 切换到新文档
 	m_activeDocIndex = index;
 	CPDFDocument* newDoc = m_documents[index];
+	UpdateFilePathDisplay();
 
 #ifdef _DEBUG
 	TRACE(_T("切换到新文档 %d\n"), index);
@@ -5325,6 +5357,7 @@ void CXiaoGongPDFDlg::CloseDocument(int index)
 			if (m_editSearch.GetSafeHwnd())
 				m_editSearch.SetWindowText(_T(""));
 			SetWindowText(_T("小龚PDF阅读器"));
+			UpdateFilePathDisplay();
 
 			// ★★★ 彻底清理并隐藏标签页控件
 			if (m_tabCtrl.GetSafeHwnd())
@@ -5390,6 +5423,18 @@ void CXiaoGongPDFDlg::UpdateTabControl()
 		tci.pszText = (LPTSTR)(LPCTSTR)tabTitle;
 		m_tabCtrl.SetItem(i, &tci);
 	}
+}
+
+void CXiaoGongPDFDlg::UpdateFilePathDisplay()
+{
+	if (!m_editFilePath.GetSafeHwnd())
+		return;
+
+	CPDFDocument* pDoc = GetActiveDocument();
+	m_editFilePath.SetWindowText(pDoc ? pDoc->GetFilePath() : _T(""));
+	m_editFilePath.SetSel(0, 0);
+	if (!m_isFullscreen)
+		m_editFilePath.ShowWindow(pDoc ? SW_SHOW : SW_HIDE);
 }
 
 void CXiaoGongPDFDlg::OnTabSelChange(NMHDR* pNMHDR, LRESULT* pResult)
@@ -6295,7 +6340,7 @@ void CXiaoGongPDFDlg::OnMouseMove(UINT nFlags, CPoint point)
 				HBITMAP hOldBmp2 = (HBITMAP)targetDC.SelectObject(hNewBitmap);
 
 				// 填充浅灰色背景（让白色PDF页面更明显）
-				targetDC.FillSolidRect(0, 0, viewWidth, viewHeight, RGB(240, 240, 240));
+				targetDC.FillSolidRect(0, 0, viewWidth, viewHeight, PDF_VIEW_BACKGROUND);
 
 				// 计算居中位置（带偏移）
 				int xPos = (viewWidth - bm.bmWidth) / 2 + m_panOffset.x;
@@ -7066,7 +7111,7 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 	CBitmap* pOldBmp = memDC.SelectObject(&bmp);
 
 	// 填充背景色（灰色）
-	memDC.FillSolidRect(0, 0, viewWidth, viewHeight, RGB(128, 128, 128));
+	memDC.FillSolidRect(0, 0, viewWidth, viewHeight, PDF_VIEW_BACKGROUND);
 
 	auto firstVisibleIt = std::lower_bound(m_pageYPositions.begin(), m_pageYPositions.end(), visibleTop);
 	int firstVisibleIndex = (int)(firstVisibleIt - m_pageYPositions.begin());
@@ -8572,7 +8617,8 @@ LRESULT CXiaoGongPDFDlg::OnPDFLoadComplete(WPARAM wParam, LPARAM lParam)
 		}
 
 		TCITEM tci = {0};
-		tci.mask = TCIF_TEXT;
+		tci.mask = TCIF_TEXT | TCIF_PARAM;
+		tci.lParam = reinterpret_cast<LPARAM>(pParams->pDoc);
 		CString fullFileName = pParams->pDoc->GetFileName();
 		CString tabTitle = fullFileName;
 
