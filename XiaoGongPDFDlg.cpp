@@ -9,6 +9,7 @@
 #include <mupdf/fitz.h>
 #include <algorithm>
 #include <cmath>
+#include <string>
 #include <vector>
 #include <WinUser.h>  // 添加这个头文件来获取 HTSCROLLBAR 定义
 #include <dwmapi.h>
@@ -20,8 +21,61 @@
 
 namespace
 {
+	class CPasswordDialog : public CDialogEx
+	{
+	public:
+		CPasswordDialog(const CString& fileName, bool invalidPassword, CWnd* pParent)
+			: CDialogEx(IDD_PASSWORD_DIALOG, pParent)
+			, m_fileName(fileName)
+			, m_invalidPassword(invalidPassword)
+		{
+		}
+
+		~CPasswordDialog()
+		{
+			const int length = m_password.GetLength();
+			if (length > 0)
+			{
+				SecureZeroMemory(m_password.GetBuffer(), length * sizeof(TCHAR));
+				m_password.ReleaseBuffer(0);
+			}
+		}
+
+		const CString& GetPassword() const { return m_password; }
+
+	protected:
+		BOOL OnInitDialog() override
+		{
+			CDialogEx::OnInitDialog();
+			SetDlgItemText(IDC_PASSWORD_FILE, m_fileName);
+			if (m_invalidPassword)
+				SetDlgItemText(IDC_PASSWORD_PROMPT, _T("密码错误，请重新输入"));
+			GetDlgItem(IDC_EDIT_PASSWORD)->SetFocus();
+			return FALSE;
+		}
+
+		void OnOK() override
+		{
+			GetDlgItemText(IDC_EDIT_PASSWORD, m_password);
+			CDialogEx::OnOK();
+		}
+
+	private:
+		CString m_fileName;
+		CString m_password;
+		bool m_invalidPassword;
+	};
+
 	constexpr size_t PAGE_CACHE_BUDGET = 128u * 1024u * 1024u;
 	constexpr COLORREF PDF_VIEW_BACKGROUND = RGB(225, 230, 235);
+	constexpr int FIT_WIDTH_SIDE_PADDING = 12;
+	constexpr float FIT_WIDTH_FACTOR = 0.99f;
+
+	float FitWidthScale(int viewWidth, float pageWidth)
+	{
+		return pageWidth > 0.0f ?
+			max(1, viewWidth - 2 * FIT_WIDTH_SIDE_PADDING) / pageWidth * FIT_WIDTH_FACTOR : 1.0f;
+	}
 
 	CString FullPathForComparison(const CString& path)
 	{
@@ -90,6 +144,54 @@ namespace
 		match.quad = fz_quad_from_rect(bounds);
 		collector->results->push_back(match);
 		return 0;
+	}
+
+	CString BuildSearchContext(fz_stext_page* textPage, const fz_quad& quad)
+	{
+		const fz_rect hit = fz_rect_from_quad(quad);
+		for (fz_stext_block* block = textPage->first_block; block; block = block->next)
+		{
+			if (block->type != FZ_STEXT_BLOCK_TEXT)
+				continue;
+			for (fz_stext_line* line = block->u.t.first_line; line; line = line->next)
+			{
+				if (line->bbox.x1 < hit.x0 || line->bbox.x0 > hit.x1 ||
+					line->bbox.y1 < hit.y0 || line->bbox.y0 > hit.y1)
+					continue;
+				std::vector<int> runes;
+				int hitIndex = -1;
+				for (fz_stext_char* ch = line->first_char; ch; ch = ch->next)
+				{
+					const fz_rect charRect = fz_rect_from_quad(ch->quad);
+					if (hitIndex < 0 && charRect.x1 >= hit.x0 && charRect.x0 <= hit.x1 &&
+						charRect.y1 >= hit.y0 && charRect.y0 <= hit.y1)
+						hitIndex = static_cast<int>(runes.size());
+					runes.push_back(ch->c);
+				}
+				if (runes.empty())
+					continue;
+				const int start = max(0, (hitIndex < 0 ? 0 : hitIndex) - 24);
+				const int end = min(static_cast<int>(runes.size()),
+					(hitIndex < 0 ? 0 : hitIndex) + 56);
+				std::string utf8;
+				if (start > 0)
+					utf8 = "...";
+				for (int i = start; i < end; ++i)
+				{
+				char encoded[8] = {};
+				const int length = fz_runetochar(encoded, runes[i]);
+				if (length > 0)
+					utf8.append(encoded, length);
+				}
+				if (end < static_cast<int>(runes.size()))
+					utf8 += "...";
+				CString context(CA2W(utf8.c_str(), CP_UTF8));
+				context.Replace(_T("\t"), _T(" "));
+				context.Trim();
+				return context;
+			}
+		}
+		return CString();
 	}
 
 	void FindCaseSensitiveHits(fz_stext_page* textPage, const std::vector<int>& needle,
@@ -567,6 +669,8 @@ CXiaoGongPDFDlg::CXiaoGongPDFDlg(CWnd* pParent /*=nullptr*/)
 	, m_documentUniformScale(1.0f)  // ★★★ 初始化文档统一缩放比例
 	, m_thumbnailVisible(false)
 	, m_outlineVisible(false)
+	, m_searchResultsVisible(false)
+	, m_updatingSearchResultsList(false)
 	, m_isUpdatingOutline(false)
 	, m_isUpdatingThumbnails(false)  // 初始化缩略图批量更新标记
 	, m_isDragging(false)       // 初始化拖拽状态
@@ -702,8 +806,6 @@ CXiaoGongPDFDlg::~CXiaoGongPDFDlg()
 	// 在清理其他资源前先释放字体和画刷对象
 	if (m_buttonFont.GetSafeHandle())
 		m_buttonFont.DeleteObject();
-	if (m_labelFont.GetSafeHandle())
-		m_labelFont.DeleteObject();
 	if (m_highlightBrush.GetSafeHandle())
 		m_highlightBrush.DeleteObject();
 	if (m_whiteBrush.GetSafeHandle())
@@ -1026,14 +1128,15 @@ void CXiaoGongPDFDlg::SetControlsVisible(bool visible)
 {
 	int nShow = visible ? SW_SHOW : SW_HIDE;
 	CWnd* controls[] = {
-		&m_toolbar, &m_tabCtrl, &m_btnOpen, &m_btnZoomOut, &m_btnFitWidth,
+		&m_toolbar, &m_tabCtrl, &m_btnOpen, &m_btnZoomOut, &m_btnFitWidth, &m_btnFitPage,
 		&m_btnZoomIn, &m_btnMore, &m_btnMinimize, &m_btnMaximize,
 		&m_btnCloseWindow, &m_btnFirst, &m_btnLast,
 		&m_btnFullscreen, &m_btnRotateLeft, &m_btnRotateRight,
 		&m_btnEdit, &m_btnSelectText, &m_editCurrent, &m_pageTotal,
 		&m_statusBar, &m_btnOutline,
 		&m_editSearch, &m_btnFind, &m_btnPrevMatch, &m_btnNextMatch,
-		&m_outlineTree
+		&m_outlineTree, &m_searchResultsList, &m_searchResultsHeader,
+		&m_btnCloseSearchResults
 	};
 	for (auto* pCtrl : controls)
 		if (pCtrl->GetSafeHwnd()) pCtrl->ShowWindow(nShow);
@@ -1045,15 +1148,20 @@ void CXiaoGongPDFDlg::SetControlsVisible(bool visible)
 		{
 			m_btnZoomOut.ShowWindow(SW_HIDE);
 			m_btnFitWidth.ShowWindow(SW_HIDE);
+			m_btnFitPage.ShowWindow(SW_HIDE);
 			m_btnZoomIn.ShowWindow(SW_HIDE);
 		}
 	}
-	if (m_editFilePath.GetSafeHwnd())
-		m_editFilePath.ShowWindow(visible && GetActiveDocument() ? SW_SHOW : SW_HIDE);
 	if (m_thumbnailList.GetSafeHwnd())
 		m_thumbnailList.ShowWindow(SW_HIDE);
 	if (m_outlineTree.GetSafeHwnd())
 		m_outlineTree.ShowWindow(visible && m_outlineVisible && m_doc ? SW_SHOW : SW_HIDE);
+	if (m_searchResultsList.GetSafeHwnd())
+		m_searchResultsList.ShowWindow(visible && m_searchResultsVisible && m_doc ? SW_SHOW : SW_HIDE);
+	if (m_searchResultsHeader.GetSafeHwnd())
+		m_searchResultsHeader.ShowWindow(visible && m_searchResultsVisible && m_doc ? SW_SHOW : SW_HIDE);
+	if (m_btnCloseSearchResults.GetSafeHwnd())
+		m_btnCloseSearchResults.ShowWindow(visible && m_searchResultsVisible && m_doc ? SW_SHOW : SW_HIDE);
 }
 
 void CXiaoGongPDFDlg::RefreshCurrentView()
@@ -1064,7 +1172,26 @@ void CXiaoGongPDFDlg::RefreshCurrentView()
 
 void CXiaoGongPDFDlg::ScrollToMatchVisible(int pageNum, fz_quad quad)
 {
-	if (!m_continuousScrollMode) return;
+	if (!m_continuousScrollMode)
+	{
+		fz_rect bounds;
+		float scale = 0.0f;
+		int offsetX = 0;
+		int offsetY = 0;
+		if (!GetSelectionPageTransform(pageNum, bounds, scale, offsetX, offsetY))
+			return;
+		const CRect matchRect = TransformQuadToBitmapRect(quad, bounds,
+			GetPageRotation(pageNum), scale);
+		CRect viewRect;
+		m_pdfView.GetClientRect(&viewRect);
+		const int matchY = matchRect.top + offsetY;
+		if (matchY < 0 || matchY >= viewRect.Height())
+			ScrollToVerticalPosition(m_scrollPosition + matchY - viewRect.Height() / 3);
+		const int matchX = matchRect.left + offsetX;
+		if (matchX < 0 || matchX >= viewRect.Width())
+			ScrollToHorizontalPosition(m_scrollPositionH + matchX - viewRect.Width() / 3);
+		return;
+	}
 	if (pageNum < 0 || pageNum >= (int)m_pageYPositions.size() || pageNum >= (int)m_pageHeights.size())
 		return;
 
@@ -1108,7 +1235,6 @@ void CXiaoGongPDFDlg::DoDataExchange(CDataExchange* pDX)
 {
 	CDialogEx::DoDataExchange(pDX);
 	DDX_Control(pDX, IDC_TAB_CONTROL, m_tabCtrl);
-	DDX_Control(pDX, IDC_EDIT_FILE_PATH, m_editFilePath);
 	DDX_Control(pDX, IDC_PDF_VIEW, m_pdfView);
 	DDX_Control(pDX, IDC_THUMBNAIL_LIST, m_thumbnailList);
 	DDX_Control(pDX, IDC_TOOLBAR, m_toolbar);
@@ -1144,9 +1270,13 @@ BEGIN_MESSAGE_MAP(CXiaoGongPDFDlg, CDialogEx)
 	ON_COMMAND(ID_MENU_PRINT, &CXiaoGongPDFDlg::onMenuPrint)
 	ON_COMMAND(ID_MENU_SET_DEFAULT, &CXiaoGongPDFDlg::onMenuSetDefault)
 	ON_COMMAND(ID_MENU_SHORTCUTS, &CXiaoGongPDFDlg::onMenuShortcuts)
+	ON_COMMAND(ID_MENU_FIT_WIDTH, &CXiaoGongPDFDlg::OnBtnFitWidth)
+	ON_COMMAND(ID_MENU_FIT_PAGE, &CXiaoGongPDFDlg::OnBtnFitPage)
+	ON_COMMAND(ID_MENU_SEARCH_RESULTS, &CXiaoGongPDFDlg::OnMenuSearchResults)
 	ON_COMMAND_RANGE(ID_MENU_RECENT_FILE_1, ID_MENU_RECENT_FILE_10, &CXiaoGongPDFDlg::onMenuRecentFile)
 	ON_NOTIFY(LVN_ITEMCHANGED, IDC_THUMBNAIL_LIST, &CXiaoGongPDFDlg::OnThumbnailItemChanged)
 	ON_NOTIFY(TVN_SELCHANGED, IDC_OUTLINE_TREE, &CXiaoGongPDFDlg::OnOutlineSelectionChanged)
+	ON_NOTIFY(LVN_ITEMCHANGED, IDC_SEARCH_RESULTS_LIST, &CXiaoGongPDFDlg::OnSearchResultSelected)
 	ON_NOTIFY(TCN_SELCHANGE, IDC_TAB_CONTROL, &CXiaoGongPDFDlg::OnTabSelChange)
 	ON_MESSAGE(WM_APP + 100, &CXiaoGongPDFDlg::OnTabCloseButton)  // 标签页关闭按钮消息
 	ON_WM_SIZE()
@@ -1164,8 +1294,10 @@ BEGIN_MESSAGE_MAP(CXiaoGongPDFDlg, CDialogEx)
 	ON_BN_CLICKED(IDC_BTN_OPEN, &CXiaoGongPDFDlg::onMenuOpen)
 	ON_BN_CLICKED(IDC_BTN_ZOOM_OUT, &CXiaoGongPDFDlg::OnBtnZoomOut)
 	ON_BN_CLICKED(IDC_BTN_FIT_WIDTH, &CXiaoGongPDFDlg::OnBtnFitWidth)
+	ON_BN_CLICKED(IDC_BTN_FIT_PAGE, &CXiaoGongPDFDlg::OnBtnFitPage)
 	ON_BN_CLICKED(IDC_BTN_ZOOM_IN, &CXiaoGongPDFDlg::OnBtnZoomIn)
 	ON_BN_CLICKED(IDC_BTN_MORE, &CXiaoGongPDFDlg::OnBtnMore)
+	ON_BN_CLICKED(IDC_BTN_CLOSE_SEARCH_RESULTS, &CXiaoGongPDFDlg::OnCloseSearchResults)
 	ON_BN_CLICKED(IDC_BTN_MINIMIZE, &CXiaoGongPDFDlg::OnBtnMinimize)
 	ON_BN_CLICKED(IDC_BTN_MAXIMIZE, &CXiaoGongPDFDlg::OnBtnMaximize)
 	ON_BN_CLICKED(IDC_BTN_CLOSE_WINDOW, &CXiaoGongPDFDlg::OnBtnCloseWindow)
@@ -1457,13 +1589,21 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 
 	m_thumbnailList.ModifyStyle(WS_VISIBLE, 0);
 	m_thumbnailList.ModifyStyle(WS_BORDER, 0, SWP_FRAMECHANGED);
-	m_editFilePath.ShowWindow(SW_HIDE);
-	m_editFilePath.ModifyStyle(WS_BORDER, 0, SWP_FRAMECHANGED);
-	m_editFilePath.ModifyStyleEx(WS_EX_CLIENTEDGE, 0, SWP_FRAMECHANGED);
-	m_editFilePath.SetMargins(14, 14);
+	if (CWnd* pPathStrip = GetDlgItem(IDC_EDIT_FILE_PATH))
+		pPathStrip->ShowWindow(SW_HIDE);
 	m_outlineTree.Create(WS_CHILD | WS_TABSTOP | TVS_HASBUTTONS | TVS_HASLINES |
 		TVS_LINESATROOT | TVS_SHOWSELALWAYS, CRect(0, 0, 250, 300), this,
 		IDC_OUTLINE_TREE);
+	m_searchResultsHeader.Create(_T("搜索结果"), WS_CHILD | SS_LEFT | SS_CENTERIMAGE,
+		CRect(0, 0, 280, 34), this, IDC_SEARCH_RESULTS_HEADER);
+	m_btnCloseSearchResults.Create(_T("关闭"), WS_CHILD | BS_OWNERDRAW,
+		CRect(0, 0, 34, 34), this, IDC_BTN_CLOSE_SEARCH_RESULTS);
+	m_searchResultsList.Create(WS_CHILD | WS_TABSTOP | WS_BORDER | LVS_REPORT |
+		LVS_SINGLESEL | LVS_SHOWSELALWAYS, CRect(0, 0, 300, 300), this,
+		IDC_SEARCH_RESULTS_LIST);
+	m_searchResultsList.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+	m_searchResultsList.InsertColumn(0, _T("页码"), LVCFMT_LEFT, 58);
+	m_searchResultsList.InsertColumn(1, _T("上下文"), LVCFMT_LEFT, 230);
 
 	// 初始化状态栏
 	m_statusBar.SetWindowText(_T("  就绪"));
@@ -1479,6 +1619,8 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 		CRect(0, 0, 34, 34), this, IDC_BTN_ZOOM_OUT);
 	m_btnFitWidth.Create(_T("适合宽度"), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
 		CRect(0, 0, 76, 34), this, IDC_BTN_FIT_WIDTH);
+	m_btnFitPage.Create(_T("适合页面"), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+		CRect(0, 0, 76, 34), this, IDC_BTN_FIT_PAGE);
 	m_btnZoomIn.Create(_T("+"), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
 		CRect(0, 0, 34, 34), this, IDC_BTN_ZOOM_IN);
 	m_btnMore.Create(_T("更多"), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
@@ -1495,6 +1637,11 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	InitializeToolbar();
 	m_statusBar.SetFont(&m_buttonFont);
 	m_outlineTree.SetFont(&m_buttonFont);
+	m_searchResultsHeader.SetFont(&m_buttonFont);
+	m_searchResultsList.SetFont(&m_buttonFont);
+	m_btnCloseSearchResults.SetIconGlyph(0xE8BB);
+	m_btnCloseSearchResults.SetToolTipText(_T("关闭搜索结果"));
+	m_btnCloseSearchResults.SetColors(RGB(255, 255, 255), RGB(232, 241, 252), RGB(211, 229, 250));
 
 	m_btnOutline.SetWindowText(_T(""));
 
@@ -1523,8 +1670,9 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	m_btnOpen.SetColors(normal, hover, pressed);
 	m_btnZoomOut.SetColors(normal, hover, pressed);
 	m_btnFitWidth.SetColors(normal, hover, pressed);
+	m_btnFitPage.SetColors(normal, hover, pressed);
 	m_btnZoomIn.SetColors(normal, hover, pressed);
-	m_btnMore.SetColors(normal, hover, pressed);
+	m_btnMore.SetColors(RGB(240, 244, 248), RGB(224, 231, 238), RGB(207, 218, 228));
 	m_btnOutline.SetColors(normal, hover, pressed);
 	m_btnMinimize.SetColors(RGB(240, 244, 248), RGB(224, 231, 238), RGB(207, 218, 228));
 	m_btnMaximize.SetColors(RGB(240, 244, 248), RGB(224, 231, 238), RGB(207, 218, 228));
@@ -1601,8 +1749,6 @@ void CXiaoGongPDFDlg::OnPaint()
 			CDC* pDC = GetDC();
 			if (pDC)
 			{
-				::DrawIconEx(pDC->GetSafeHdc(), 8, 12, m_hIcon, 18, 18,
-					0, nullptr, DI_NORMAL);
 				CPen pen(PS_SOLID, 1, RGB(212, 220, 228));
 				CPen* pOldPen = pDC->SelectObject(&pen);
 				pDC->MoveTo(toolbarRect.left,  toolbarRect.bottom);
@@ -1645,13 +1791,12 @@ HBRUSH CXiaoGongPDFDlg::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor)
 		pDC->SetTextColor(RGB(75, 88, 102));
 		return m_toolbarBrush;
 	}
-	if (pWnd->GetSafeHwnd() == m_editFilePath.GetSafeHwnd())
+	if (pWnd->GetSafeHwnd() == m_searchResultsHeader.GetSafeHwnd())
 	{
 		pDC->SetBkColor(RGB(255, 255, 255));
-		pDC->SetTextColor(RGB(83, 96, 110));
+		pDC->SetTextColor(RGB(38, 45, 53));
 		return m_toolbarBrush;
 	}
-
 	// 工具栏背景：白色（Chrome/Edge 风格）
 	if (pWnd->GetSafeHwnd() == m_toolbar.GetSafeHwnd())
 	{
@@ -1892,7 +2037,7 @@ bool CXiaoGongPDFDlg::RenderPage(int pageNumber)
 		switch (m_zoomMode)
 		{
 		case ZOOM_FIT_WIDTH:
-			scale = viewWidth / effectivePageWidth * 0.95f;
+			scale = FitWidthScale(viewWidth, effectivePageWidth);
 			break;
 		case ZOOM_FIT_PAGE:
 			{
@@ -2975,7 +3120,7 @@ void CXiaoGongPDFDlg::PerformResizeRender()
 
 	if (m_continuousScrollMode)
 	{
-		CalculatePagePositions(false);
+		CalculatePagePositions(m_zoomMode == ZOOM_FIT_WIDTH || m_zoomMode == ZOOM_FIT_PAGE);
 		UpdateScrollBar();
 		RenderVisiblePages();
 	}
@@ -3190,22 +3335,15 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		const int OUTLINE_BUTTON_WIDTH = 34;
 		const int btnY = MARGIN + TAB_HEIGHT + (TOOLBAR_HEIGHT - BTN_HEIGHT) / 2;
 
+		m_btnMore.MoveWindow(0, 0, 46, TAB_HEIGHT);
 		if (m_tabCtrl.GetSafeHwnd())
-			m_tabCtrl.MoveWindow(32, 0, max(1, cx - 32 - 138), TAB_HEIGHT);
+			m_tabCtrl.MoveWindow(46, 0, max(1, cx - 46 - 138), TAB_HEIGHT);
 		m_btnMinimize.MoveWindow(cx - 138, 0, 46, TAB_HEIGHT);
 		m_btnMaximize.MoveWindow(cx - 92, 0, 46, TAB_HEIGHT);
 		m_btnCloseWindow.MoveWindow(cx - 46, 0, 46, TAB_HEIGHT);
 		m_btnMaximize.SetIconGlyph(IsZoomed() ? 0xE923 : 0xE922);
 		m_btnMaximize.SetToolTipText(IsZoomed() ? _T("还原") : _T("最大化"));
 		m_toolbar.MoveWindow(0, TAB_HEIGHT, cx, TOOLBAR_HEIGHT);
-		const bool showPath = GetActiveDocument() != nullptr;
-		const int PATH_HEIGHT = showPath ? 30 : 0;
-		if (m_editFilePath.GetSafeHwnd())
-		{
-			m_editFilePath.MoveWindow(0, TAB_HEIGHT + TOOLBAR_HEIGHT, cx, 30);
-			m_editFilePath.ShowWindow(showPath ? SW_SHOW : SW_HIDE);
-		}
-
 		int x = 14;
 		m_btnOpen.MoveWindow(x, btnY, compactToolbar ? 62 : 76, BTN_HEIGHT);
 		x += (compactToolbar ? 62 : 76) + GROUP_GAP;
@@ -3231,12 +3369,15 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		const bool showZoomControls = cx >= 980;
 		m_btnZoomOut.ShowWindow(showZoomControls ? SW_SHOW : SW_HIDE);
 		m_btnFitWidth.ShowWindow(showZoomControls ? SW_SHOW : SW_HIDE);
+		m_btnFitPage.ShowWindow(showZoomControls ? SW_SHOW : SW_HIDE);
 		m_btnZoomIn.ShowWindow(showZoomControls ? SW_SHOW : SW_HIDE);
 		if (showZoomControls)
 		{
 			m_btnZoomOut.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
 			x += ICON_WIDTH + GAP;
 			m_btnFitWidth.MoveWindow(x, btnY, compactToolbar ? 72 : 80, BTN_HEIGHT);
+			x += (compactToolbar ? 72 : 80) + GAP;
+			m_btnFitPage.MoveWindow(x, btnY, compactToolbar ? 72 : 80, BTN_HEIGHT);
 			x += (compactToolbar ? 72 : 80) + GAP;
 			m_btnZoomIn.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
 			x += ICON_WIDTH + GROUP_GAP;
@@ -3250,18 +3391,32 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		m_btnEdit.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
 		x += ICON_WIDTH + GAP;
 		m_btnFullscreen.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
-		m_btnMore.MoveWindow(cx - 44, btnY, 34, BTN_HEIGHT);
 
 		// 根据缩略图面板可见性调整布局
 		int pdfX, pdfWidth;
 		const int STATUS_BAR_HEIGHT = 25;  // 状态栏高度
 
 		// 计算内容区域的起始Y坐标（工具栏 + 标签页 + 间距）
-		int contentY = TAB_HEIGHT + TOOLBAR_HEIGHT + PATH_HEIGHT + 1;
+		int contentY = TAB_HEIGHT + TOOLBAR_HEIGHT + 1;
 		int contentHeight = max(1, cy - contentY - STATUS_BAR_HEIGHT);
 
-		m_outlineTree.ShowWindow(m_outlineVisible && m_doc ? SW_SHOW : SW_HIDE);
-		if (m_outlineVisible && m_doc)
+		const bool showSearchResults = m_searchResultsVisible && m_doc;
+		m_searchResultsHeader.ShowWindow(showSearchResults ? SW_SHOW : SW_HIDE);
+		m_btnCloseSearchResults.ShowWindow(showSearchResults ? SW_SHOW : SW_HIDE);
+		m_searchResultsList.ShowWindow(showSearchResults ? SW_SHOW : SW_HIDE);
+		m_outlineTree.ShowWindow(m_outlineVisible && m_doc && !showSearchResults ? SW_SHOW : SW_HIDE);
+		if (showSearchResults)
+		{
+			const int panelWidth = min(320, max(220, cx / 3));
+			m_searchResultsHeader.MoveWindow(12, contentY, panelWidth - 50, 36);
+			m_btnCloseSearchResults.MoveWindow(panelWidth - 38, contentY + 2, 34, 32);
+			m_searchResultsList.MoveWindow(0, contentY + 36, panelWidth,
+				max(1, contentHeight - 36));
+			m_searchResultsList.SetColumnWidth(1, max(80, panelWidth - 82));
+			pdfX = panelWidth + 1;
+			pdfWidth = cx - pdfX;
+		}
+		else if (m_outlineVisible && m_doc)
 		{
 			m_outlineTree.MoveWindow(0, contentY,
 				LIST_WIDTH + m_scrollBarWidth, contentHeight);
@@ -3527,28 +3682,24 @@ void CXiaoGongPDFDlg::UpdatePageControls()
 
 void CXiaoGongPDFDlg::UpdateStatusBar()
 {
-	if (!m_doc)
-	{
-		m_statusBar.SetWindowText(_T("  就绪"));
-		m_statusBar.ShowWindow(m_isFullscreen ? SW_HIDE : SW_SHOW);
-		return;
-	}
-	CString status;
-	CString zoomText;
-	if (m_zoomMode == ZOOM_FIT_WIDTH)
-		zoomText = _T("适合宽度");
-	else if (m_zoomMode == ZOOM_FIT_PAGE)
-		zoomText = _T("适合页面");
+	SetStatusBarMessage(nullptr);
+	m_statusBar.ShowWindow(m_isFullscreen ? SW_HIDE : SW_SHOW);
+}
+
+void CXiaoGongPDFDlg::SetStatusBarMessage(LPCTSTR message)
+{
+	CPDFDocument* pDoc = GetActiveDocument();
+	CString status(_T("  "));
+	if (pDoc)
+		status += pDoc->GetFilePath();
 	else
-		zoomText.Format(_T("%d%%"), static_cast<int>(m_customZoom * 100 + 0.5f));
-	status.Format(_T("   第 %d 页，共 %d 页     |     %s"),
-		m_currentPage + 1, m_totalPages, zoomText.GetString());
+		status += _T("就绪");
+	if (message && *message)
+	{
+		status += _T("    |    ");
+		status += message;
+	}
 	m_statusBar.SetWindowText(status);
-
-	// 全屏模式下不显示状态栏
-	if (!m_isFullscreen)
-		m_statusBar.ShowWindow(SW_SHOW);
-
 }
 
 void CXiaoGongPDFDlg::OnBtnFirst()
@@ -3651,6 +3802,8 @@ void CXiaoGongPDFDlg::OnBtnEdit()
 void CXiaoGongPDFDlg::OnCheckThumbnail()
 {
 	m_outlineVisible = !m_outlineVisible;
+	if (m_outlineVisible)
+		m_searchResultsVisible = false;
 	m_btnOutline.SetColors(m_outlineVisible ? RGB(221, 235, 252) : RGB(255, 255, 255),
 		RGB(232, 241, 252), RGB(211, 229, 250));
 	m_btnOutline.SetToolTipText(m_outlineVisible ? _T("隐藏目录") : _T("显示目录"));
@@ -3947,13 +4100,19 @@ void CXiaoGongPDFDlg::OnEnChangeEditSearch()
 	// 如果搜索框为空，清除搜索结果和标记
 	if (searchText.IsEmpty())
 	{
+		if (m_isSearching)
+			StopSearch();
 		// 清除搜索结果
 		m_searchMatches.clear();
 		m_searchMatchesByPage.clear();
 		m_currentMatchIndex = -1;
-
-		// 清除状态栏显示
-		m_statusBar.SetWindowText(_T(""));
+		m_searchKeyword.Empty();
+		m_searchResultsVisible = false;
+		RefreshSearchResultsList();
+		if (m_searchResultsList.GetSafeHwnd())
+			RefreshDocumentLayout();
+		// 清除搜索提示并恢复文件路径
+		UpdateStatusBar();
 
 		// 重新渲染页面以移除高亮标记
 		if (m_continuousScrollMode)
@@ -4025,19 +4184,16 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 
 	// 确保先删除可能存在的字体对象
 	m_buttonFont.DeleteObject();
-	m_labelFont.DeleteObject();
 
 	// 创建新的字体对象
 	m_buttonFont.CreateFontIndirect(&lf);
-	lf.lfHeight = -18;
-	lf.lfWeight = FW_NORMAL;
-	m_labelFont.CreateFontIndirect(&lf);
 
 	// 为所有按钮设置新字体
 	m_btnFirst.SetFont(&m_buttonFont);
 	m_btnOpen.SetFont(&m_buttonFont);
 	m_btnZoomOut.SetFont(&m_buttonFont);
 	m_btnFitWidth.SetFont(&m_buttonFont);
+	m_btnFitPage.SetFont(&m_buttonFont);
 	m_btnZoomIn.SetFont(&m_buttonFont);
 	m_btnMore.SetFont(&m_buttonFont);
 	m_btnMinimize.SetFont(&m_buttonFont);
@@ -4057,7 +4213,6 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_editCurrent.SetFont(&m_buttonFont);
 	m_pageTotal.SetFont(&m_buttonFont);
 	m_editSearch.SetFont(&m_buttonFont);
-	m_editFilePath.SetFont(&m_labelFont);
 
 	// 图标由 Windows 系统字体提供，名称在悬停时显示。
 	m_btnFirst.SetWindowText(_T("首页"));
@@ -4090,6 +4245,7 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_btnOpen.SetToolTipText(_T("打开 PDF 文件"));
 	m_btnZoomOut.SetToolTipText(_T("缩小"));
 	m_btnFitWidth.SetToolTipText(_T("适合宽度"));
+	m_btnFitPage.SetToolTipText(_T("适合页面"));
 	m_btnZoomIn.SetToolTipText(_T("放大"));
 	m_btnMore.SetToolTipText(_T("更多操作"));
 	m_btnOutline.SetToolTipText(_T("显示目录"));
@@ -4126,6 +4282,7 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_btnOpen.SetCornerRadius(5);
 	m_btnZoomOut.SetCornerRadius(5);
 	m_btnFitWidth.SetCornerRadius(5);
+	m_btnFitPage.SetCornerRadius(5);
 	m_btnZoomIn.SetCornerRadius(5);
 	m_btnMore.SetCornerRadius(5);
 	m_btnMinimize.SetCornerRadius(4);
@@ -4234,7 +4391,8 @@ BOOL CXiaoGongPDFDlg::PreTranslateMessage(MSG* pMsg)
 			if (m_isSearching)
 			{
 				StopSearch();
-				m_statusBar.SetWindowText(_T("搜索已取消"));
+				RefreshSearchResultsList();
+				SetStatusBarMessage(_T("搜索已取消"));
 			}
 			else if (m_isFullscreen)
 				ExitFullscreen();
@@ -4283,7 +4441,7 @@ BOOL CXiaoGongPDFDlg::PreTranslateMessage(MSG* pMsg)
 			(GetKeyState(VK_SHIFT) & 0x8000) && pMsg->wParam == 'F')
 		{
 			m_searchCaseSensitive = !m_searchCaseSensitive;
-			m_statusBar.SetWindowText(m_searchCaseSensitive ?
+			SetStatusBarMessage(m_searchCaseSensitive ?
 				_T("搜索：区分大小写") : _T("搜索：忽略大小写"));
 			return TRUE;
 		}
@@ -4641,6 +4799,11 @@ void CXiaoGongPDFDlg::OnBtnFitWidth()
 	SetZoom(1.0f, ZOOM_FIT_WIDTH);
 }
 
+void CXiaoGongPDFDlg::OnBtnFitPage()
+{
+	SetZoom(1.0f, ZOOM_FIT_PAGE);
+}
+
 void CXiaoGongPDFDlg::OnBtnZoomIn()
 {
 	SetZoom(min(4.0f, m_customZoom * 1.1f), ZOOM_CUSTOM);
@@ -4652,7 +4815,6 @@ void CXiaoGongPDFDlg::OnBtnMore()
 	if (!menu.CreatePopupMenu())
 		return;
 
-	menu.AppendMenu(MF_STRING | (m_doc ? 0 : MF_GRAYED), ID_MENU_PRINT, _T("打印..."));
 	if (!m_recentFiles.empty())
 	{
 		CMenu recent;
@@ -4672,11 +4834,26 @@ void CXiaoGongPDFDlg::OnBtnMore()
 			}
 			if (menu.AppendMenu(MF_POPUP,
 				reinterpret_cast<UINT_PTR>(recent.GetSafeHmenu()), _T("最近打开")))
+			{
 				recent.Detach();
+				menu.AppendMenu(MF_SEPARATOR);
+			}
 		}
 	}
-	menu.AppendMenu(MF_SEPARATOR);
+	menu.AppendMenu(MF_STRING | (m_doc ? 0 : MF_GRAYED), ID_MENU_PRINT, _T("打印..."));
 	menu.AppendMenu(MF_STRING, ID_MENU_SHORTCUTS, _T("快捷键"));
+	CMenu zoomMenu;
+	if (zoomMenu.CreatePopupMenu())
+	{
+		zoomMenu.AppendMenu(MF_STRING | (m_doc ? 0 : MF_GRAYED) |
+			(m_zoomMode == ZOOM_FIT_WIDTH ? MF_CHECKED : 0), ID_MENU_FIT_WIDTH, _T("适合宽度"));
+		zoomMenu.AppendMenu(MF_STRING | (m_doc ? 0 : MF_GRAYED) |
+			(m_zoomMode == ZOOM_FIT_PAGE ? MF_CHECKED : 0), ID_MENU_FIT_PAGE, _T("适合页面"));
+		if (menu.AppendMenu(MF_POPUP, reinterpret_cast<UINT_PTR>(zoomMenu.GetSafeHmenu()), _T("缩放")))
+			zoomMenu.Detach();
+	}
+	menu.AppendMenu(MF_STRING | (m_searchMatches.empty() ? MF_GRAYED : 0),
+		ID_MENU_SEARCH_RESULTS, _T("搜索结果"));
 	menu.AppendMenu(MF_STRING, ID_MENU_SET_DEFAULT, _T("设为默认 PDF 阅读器"));
 	menu.AppendMenu(MF_STRING, ID_MENU_ABOUT, _T("关于"));
 	menu.AppendMenu(MF_SEPARATOR);
@@ -4685,8 +4862,8 @@ void CXiaoGongPDFDlg::OnBtnMore()
 	CRect buttonRect;
 	m_btnMore.GetWindowRect(&buttonRect);
 	const UINT command = static_cast<UINT>(menu.TrackPopupMenu(
-		TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
-		buttonRect.right, buttonRect.bottom, this));
+		TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
+		buttonRect.left, buttonRect.bottom, this));
 	if (command != 0)
 		PostMessage(WM_COMMAND, MAKEWPARAM(command, 0));
 }
@@ -4782,7 +4959,9 @@ void CXiaoGongPDFDlg::SetZoom(float zoom, ZoomMode mode)
 		// m_uniformScale 的基准是适应宽度的缩放，m_customZoom 是在此基础上的倍数
 		if (m_documentMaxPageWidth > 0)
 		{
-			float baseScale = (float)viewWidth / m_documentMaxPageWidth * 0.95f;
+			float baseScale = m_zoomMode == ZOOM_FIT_WIDTH ?
+				FitWidthScale(viewRect.Width(), m_documentMaxPageWidth) :
+				(float)viewWidth / m_documentMaxPageWidth * 0.95f;
 			m_uniformScale = baseScale * m_customZoom;
 		}
 
@@ -5332,7 +5511,7 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 	// 切换到新文档
 	m_activeDocIndex = index;
 	CPDFDocument* newDoc = m_documents[index];
-	UpdateFilePathDisplay();
+	RefreshDocumentLayout();
 
 #ifdef _DEBUG
 	TRACE(_T("切换到新文档 %d\n"), index);
@@ -5386,6 +5565,14 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 
 	// ★★★ 恢复搜索信息（每个文档的搜索结果应该独立）
 	m_editSearch.SetWindowText(m_searchKeyword);
+	m_searchResultsVisible = !m_searchMatches.empty();
+	if (m_searchResultsVisible)
+	{
+		m_outlineVisible = false;
+		m_btnOutline.SetColors(RGB(255, 255, 255), RGB(232, 241, 252), RGB(211, 229, 250));
+		m_btnOutline.SetToolTipText(_T("显示目录"));
+	}
+	RefreshSearchResultsList();
 
 #ifdef _DEBUG
 	TRACE(_T("已恢复搜索信息: %d 个匹配项, 当前索引=%d\n"),
@@ -5398,7 +5585,7 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 	{
 		// 已打开过：直接恢复上次的缩放，不重算
 		m_uniformScale = savedUniformScale;
-		CalculatePagePositions(false);
+		CalculatePagePositions(m_zoomMode == ZOOM_FIT_WIDTH || m_zoomMode == ZOOM_FIT_PAGE);
 	}
 	else
 	{
@@ -5472,6 +5659,8 @@ void CXiaoGongPDFDlg::CloseDocument(int index)
 		m_searchMatchesByPage.clear();
 		m_currentMatchIndex = -1;
 		m_searchKeyword.Empty();
+		m_searchResultsVisible = false;
+		RefreshSearchResultsList();
 	}
 
 	// 删除文档对象
@@ -5500,7 +5689,7 @@ void CXiaoGongPDFDlg::CloseDocument(int index)
 			if (m_editSearch.GetSafeHwnd())
 				m_editSearch.SetWindowText(_T(""));
 			SetWindowText(_T("小龚PDF阅读器"));
-			UpdateFilePathDisplay();
+			RefreshDocumentLayout();
 			m_outlineTree.DeleteAllItems();
 			m_outlineTree.ShowWindow(SW_HIDE);
 
@@ -5570,16 +5759,8 @@ void CXiaoGongPDFDlg::UpdateTabControl()
 	}
 }
 
-void CXiaoGongPDFDlg::UpdateFilePathDisplay()
+void CXiaoGongPDFDlg::RefreshDocumentLayout()
 {
-	if (!m_editFilePath.GetSafeHwnd())
-		return;
-
-	CPDFDocument* pDoc = GetActiveDocument();
-	m_editFilePath.SetWindowText(pDoc ? pDoc->GetFilePath() : _T(""));
-	m_editFilePath.SetSel(0, 0);
-	if (!m_isFullscreen)
-		m_editFilePath.ShowWindow(pDoc ? SW_SHOW : SW_HIDE);
 	CRect rect;
 	GetClientRect(&rect);
 	PostMessage(WM_SIZE, SIZE_RESTORED, MAKELPARAM(rect.Width(), rect.Height()));
@@ -5717,8 +5898,8 @@ LRESULT CXiaoGongPDFDlg::OnTabCloseButton(WPARAM wParam, LPARAM lParam)
 #endif
 
 	// 关闭指定索引的文档
-	if (index >= 0 && index < (int)m_documents.size())
-	{
+	if (index >= 0 && index < (int)m_documents.size()) 
+	{ 
 		CloseDocument(index);
 	}
 
@@ -5894,7 +6075,7 @@ void CXiaoGongPDFDlg::OnLButtonDown(UINT nFlags, CPoint point)
 	CRect clientRect;
 	GetClientRect(&clientRect);
 	const int dragRight = m_tabCtrl.GetSafeHwnd() && m_tabCtrl.IsWindowVisible() ?
-		32 : clientRect.Width() - 138;
+		46 : clientRect.Width() - 138;
 	if (point.x >= 0 && point.x < dragRight && point.y >= 0 && point.y < 42)
 	{
 		StartWindowDrag();
@@ -6069,7 +6250,7 @@ void CXiaoGongPDFDlg::OnLButtonDown(UINT nFlags, CPoint point)
 				switch (m_zoomMode)
 				{
 				case ZOOM_FIT_WIDTH:
-					scale = viewRect.Width() / pageWidth * 0.95f;
+					scale = FitWidthScale(viewRect.Width(), pageWidth);
 					break;
 				case ZOOM_FIT_PAGE:
 				{
@@ -6727,7 +6908,7 @@ BOOL CXiaoGongPDFDlg::OnSetCursor(CWnd* pWnd, UINT nHitTest, UINT message)
 				{
 					float scale = m_customZoom;
 					if (m_zoomMode == ZOOM_FIT_WIDTH)
-						scale = viewRect.Width() / pageWidth * 0.95f;
+						scale = FitWidthScale(viewRect.Width(), pageWidth);
 					else if (m_zoomMode == ZOOM_FIT_PAGE)
 						scale = min(viewRect.Width() / pageWidth,
 						viewRect.Height() / pageHeight) * 0.95f;
@@ -7249,6 +7430,27 @@ void CXiaoGongPDFDlg::CalculatePagePositions(bool recalcScale)
 	{
 		float baseScale = (maxPageWidth > 0) ? ((float)viewWidth / maxPageWidth * 0.95f) : 1.0f;
 		m_uniformScale = baseScale * m_customZoom;
+		if (m_zoomMode == ZOOM_FIT_WIDTH)
+			m_uniformScale = FitWidthScale(viewRect.Width(), maxPageWidth);
+		if (m_zoomMode == ZOOM_FIT_PAGE && pDoc && pDoc->HasPageBoundsCache())
+		{
+			const int viewHeight = max(1, viewRect.Height() - 40);
+			float fitScale = 0.0f;
+			for (int i = 0; i < m_totalPages; ++i)
+			{
+				float pageWidth = 0.0f;
+				float pageHeight = 0.0f;
+				if (!pDoc->GetPageBounds(i, pageWidth, pageHeight) ||
+					pageWidth <= 0.0f || pageHeight <= 0.0f)
+					continue;
+				const float pageScale = min((float)viewWidth / pageWidth,
+					(float)viewHeight / pageHeight);
+				if (fitScale == 0.0f || pageScale < fitScale)
+					fitScale = pageScale;
+			}
+			if (fitScale > 0.0f)
+				m_uniformScale = fitScale * 0.95f;
+		}
 #ifdef _DEBUG
 		TRACE(_T("连续滚动模式: 最大页面宽度=%.2f, 基准缩放=%.4f, customZoom=%.2f, 统一缩放比例=%.4f\n"),
 			maxPageWidth, baseScale, m_customZoom, m_uniformScale);
@@ -8031,6 +8233,91 @@ void CXiaoGongPDFDlg::StopSearch()
 	m_isSearching = false;
 }
 
+void CXiaoGongPDFDlg::RefreshSearchResultsList()
+{
+	if (!m_searchResultsList.GetSafeHwnd())
+		return;
+	CString title;
+	if (m_isSearching)
+		title = _T("正在搜索");
+	else
+		title.Format(_T("搜索结果 (%d)"), static_cast<int>(m_searchMatches.size()));
+	m_searchResultsHeader.SetWindowText(title);
+	m_updatingSearchResultsList = true;
+	m_searchResultsList.SetRedraw(FALSE);
+	m_searchResultsList.DeleteAllItems();
+	for (size_t i = 0; i < m_searchMatches.size(); ++i)
+	{
+		CString page;
+		page.Format(_T("%d"), m_searchMatches[i].pageNumber + 1);
+		const int row = m_searchResultsList.InsertItem(static_cast<int>(i), page);
+		if (row >= 0)
+			m_searchResultsList.SetItemText(row, 1,
+				m_searchMatches[i].context.IsEmpty() ? _T("匹配内容") :
+				m_searchMatches[i].context.GetString());
+	}
+	if (m_currentMatchIndex >= 0 && m_currentMatchIndex < m_searchResultsList.GetItemCount())
+	{
+		m_searchResultsList.SetItemState(m_currentMatchIndex,
+			LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+		m_searchResultsList.EnsureVisible(m_currentMatchIndex, FALSE);
+	}
+	m_searchResultsList.SetRedraw(TRUE);
+	m_searchResultsList.Invalidate(FALSE);
+	m_updatingSearchResultsList = false;
+}
+
+void CXiaoGongPDFDlg::NavigateToSearchMatch(int index)
+{
+	if (m_isSearching || !m_doc || index < 0 || index >= static_cast<int>(m_searchMatches.size()))
+		return;
+	m_currentMatchIndex = index;
+	if (m_searchResultsList.GetSafeHwnd() && index < m_searchResultsList.GetItemCount())
+	{
+		m_updatingSearchResultsList = true;
+		m_searchResultsList.SetItemState(-1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+		m_searchResultsList.SetItemState(index,
+			LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+		m_searchResultsList.EnsureVisible(index, FALSE);
+		m_updatingSearchResultsList = false;
+	}
+	GoToPage(m_searchMatches[index].pageNumber);
+	ScrollToMatchVisible(m_searchMatches[index].pageNumber, m_searchMatches[index].quad);
+	CString status;
+	status.Format(_T("匹配项 %d / %d"), index + 1, static_cast<int>(m_searchMatches.size()));
+	SetStatusBarMessage(status);
+}
+
+void CXiaoGongPDFDlg::OnSearchResultSelected(NMHDR* pNMHDR, LRESULT* pResult)
+{
+	NMLISTVIEW* pChange = reinterpret_cast<NMLISTVIEW*>(pNMHDR);
+	if (!m_updatingSearchResultsList && pChange->iItem >= 0 &&
+		(pChange->uNewState & LVIS_SELECTED) && !(pChange->uOldState & LVIS_SELECTED))
+		NavigateToSearchMatch(pChange->iItem);
+	*pResult = 0;
+}
+
+void CXiaoGongPDFDlg::OnCloseSearchResults()
+{
+	m_searchResultsVisible = false;
+	CRect rect;
+	GetClientRect(&rect);
+	SendMessage(WM_SIZE, SIZE_RESTORED, MAKELPARAM(rect.Width(), rect.Height()));
+}
+
+void CXiaoGongPDFDlg::OnMenuSearchResults()
+{
+	if (m_searchMatches.empty())
+		return;
+	m_searchResultsVisible = true;
+	m_outlineVisible = false;
+	m_btnOutline.SetColors(RGB(255, 255, 255), RGB(232, 241, 252), RGB(211, 229, 250));
+	m_btnOutline.SetToolTipText(_T("显示目录"));
+	CRect rect;
+	GetClientRect(&rect);
+	SendMessage(WM_SIZE, SIZE_RESTORED, MAKELPARAM(rect.Width(), rect.Height()));
+}
+
 UINT CXiaoGongPDFDlg::SearchThreadProc(LPVOID pParam)
 {
 	SearchParams* pParams = (SearchParams*)pParam;
@@ -8040,6 +8327,7 @@ UINT CXiaoGongPDFDlg::SearchThreadProc(LPVOID pParam)
 	if (!ctx)
 		pParams->failed = true;
 	fz_document* doc = nullptr;
+	fz_var(doc);
 	const char* keyword = pParams->utf8Keyword.data();
 	std::vector<int> exactNeedle;
 	if (pParams->caseSensitive)
@@ -8058,16 +8346,19 @@ UINT CXiaoGongPDFDlg::SearchThreadProc(LPVOID pParam)
 			fz_register_document_handlers(ctx);
 			if (!pParams->cancelled.load())
 				doc = fz_open_document(ctx, pParams->utf8Path.data());
+			if (doc && fz_needs_password(ctx, doc) &&
+				(pParams->utf8Password.empty() ||
+				 !fz_authenticate_password(ctx, doc, pParams->utf8Password.data())))
+				pParams->failed = true;
 		}
 		fz_catch(ctx)
 		{
-			doc = nullptr;
 			pParams->failed = true;
 		}
 	}
 	if (!doc && !pParams->cancelled.load())
 		pParams->failed = true;
-	if (doc)
+	if (doc && !pParams->failed)
 	{
 		int totalPages = 0;
 		fz_try(ctx)
@@ -8083,6 +8374,7 @@ UINT CXiaoGongPDFDlg::SearchThreadProc(LPVOID pParam)
 		{
 			fz_page* page = nullptr;
 			fz_stext_page* stext = nullptr;
+			const size_t firstResult = pParams->results.size();
 			fz_try(ctx)
 			{
 				page = fz_load_page(ctx, doc, i);
@@ -8094,6 +8386,9 @@ UINT CXiaoGongPDFDlg::SearchThreadProc(LPVOID pParam)
 					SearchHitCollector collector{ i, &pParams->results };
 					fz_search_stext_page_cb(ctx, stext, keyword, CollectSearchHit, &collector);
 				}
+				for (size_t resultIndex = firstResult; resultIndex < pParams->results.size(); ++resultIndex)
+					pParams->results[resultIndex].context =
+						BuildSearchContext(stext, pParams->results[resultIndex].quad);
 			}
 			fz_catch(ctx)
 			{
@@ -8105,8 +8400,9 @@ UINT CXiaoGongPDFDlg::SearchThreadProc(LPVOID pParam)
 				::PostMessage(pParams->notifyWnd, WM_SEARCH_PROGRESS,
 					pParams->taskId, static_cast<LPARAM>(i + 1));
 		}
-		fz_drop_document(ctx, doc);
 	}
+	if (doc)
+		fz_drop_document(ctx, doc);
 	if (ctx)
 		fz_drop_context(ctx);
 
@@ -8124,7 +8420,7 @@ LRESULT CXiaoGongPDFDlg::OnSearchProgress(WPARAM wParam, LPARAM lParam)
 	{
 		CString status;
 		status.Format(_T("正在搜索：%d / %d 页"), static_cast<int>(lParam), m_totalPages);
-		m_statusBar.SetWindowText(status);
+		SetStatusBarMessage(status);
 	}
 	return 0;
 }
@@ -8158,10 +8454,12 @@ LRESULT CXiaoGongPDFDlg::OnSearchComplete(WPARAM wParam, LPARAM lParam)
 	m_searchMatches = std::move(pParams->results);
 
 	RebuildSearchMatchPageIndex();
+	m_currentMatchIndex = m_searchMatches.empty() ? -1 : 0;
+	RefreshSearchResultsList();
 
 	if (pParams->failed)
 	{
-		m_statusBar.SetWindowText(_T("搜索失败"));
+		SetStatusBarMessage(_T("搜索失败"));
 		MessageBox(_T("无法读取文档文本，请检查文件是否仍可访问。"),
 			_T("搜索失败"), MB_OK | MB_ICONERROR);
 	}
@@ -8169,16 +8467,13 @@ LRESULT CXiaoGongPDFDlg::OnSearchComplete(WPARAM wParam, LPARAM lParam)
 	{
 		CString msg;
 		msg.Format(_T("找到 %d 个匹配项"), (int)m_searchMatches.size());
-		m_statusBar.SetWindowText(msg);
+		SetStatusBarMessage(msg);
 
-		m_currentMatchIndex = 0;
-		GoToPage(m_searchMatches[0].pageNumber);
-		ScrollToMatchVisible(m_searchMatches[0].pageNumber, m_searchMatches[0].quad);
+		NavigateToSearchMatch(0);
 	}
 	else
 	{
-		MessageBox(_T("未找到匹配项"), _T("搜索结果"), MB_OK | MB_ICONINFORMATION);
-		m_statusBar.SetWindowText(_T("未找到匹配项"));
+		SetStatusBarMessage(_T("未找到匹配项"));
 	}
 
 	// 清理
@@ -8198,6 +8493,10 @@ void CXiaoGongPDFDlg::ClearSearchResults()
 	m_searchMatchesByPage.clear();
 	m_currentMatchIndex = -1;
 	m_searchKeyword.Empty();
+	m_searchResultsVisible = false;
+	RefreshSearchResultsList();
+	if (m_searchResultsList.GetSafeHwnd())
+		RefreshDocumentLayout();
 
 	if (m_doc && m_currentPage >= 0)
 	{
@@ -8320,12 +8619,19 @@ void CXiaoGongPDFDlg::SearchPDF(const CString& keyword, bool caseSensitive)
 	pParams->taskId = ++m_searchTaskId;
 	pParams->utf8Keyword = std::move(utf8Keyword);
 	pParams->utf8Path = std::move(utf8Path);
+	pParams->utf8Password = pActiveDoc->GetPassword();
 	pParams->caseSensitive = caseSensitive;
 
 	m_pSearchParams = pParams;
 	m_isSearching = true;
+	m_searchResultsVisible = true;
+	m_outlineVisible = false;
+	m_btnOutline.SetColors(RGB(255, 255, 255), RGB(232, 241, 252), RGB(211, 229, 250));
+	m_btnOutline.SetToolTipText(_T("显示目录"));
+	RefreshSearchResultsList();
+	RefreshDocumentLayout();
 
-	m_statusBar.SetWindowText(_T("正在搜索..."));
+	SetStatusBarMessage(_T("正在搜索..."));
 
 	m_pSearchThread = AfxBeginThread(SearchThreadProc, pParams,
 		THREAD_PRIORITY_BELOW_NORMAL, 0, CREATE_SUSPENDED);
@@ -8339,6 +8645,8 @@ void CXiaoGongPDFDlg::SearchPDF(const CString& keyword, bool caseSensitive)
 		m_isSearching = false;
 		delete pParams;
 		m_pSearchParams = nullptr;
+		RefreshSearchResultsList();
+		SetStatusBarMessage(_T("搜索启动失败"));
 		MessageBox(_T("无法启动搜索线程"), _T("错误"), MB_OK | MB_ICONERROR);
 	}
 }
@@ -8352,20 +8660,7 @@ void CXiaoGongPDFDlg::GoToNextMatch()
 		return;
 	}
 
-	m_currentMatchIndex = (m_currentMatchIndex + 1) % m_searchMatches.size();
-	int pageNum = m_searchMatches[m_currentMatchIndex].pageNumber;
-	fz_quad quad = m_searchMatches[m_currentMatchIndex].quad;
-
-	// 跳转到对应页面
-	GoToPage(pageNum);
-
-	// 如果是连续滚动模式，滚动到匹配项位置
-	ScrollToMatchVisible(pageNum, quad);
-
-	// 更新状态栏
-	CString msg;
-	msg.Format(_T("匹配项 %d / %d"), m_currentMatchIndex + 1, (int)m_searchMatches.size());
-	m_statusBar.SetWindowText(msg);
+	NavigateToSearchMatch((m_currentMatchIndex + 1) % static_cast<int>(m_searchMatches.size()));
 }
 
 // 跳转到上一个匹配项
@@ -8378,20 +8673,8 @@ void CXiaoGongPDFDlg::GoToPrevMatch()
 		return;
 	}
 
-	m_currentMatchIndex = (m_currentMatchIndex - 1 + m_searchMatches.size()) % m_searchMatches.size();
-	int pageNum = m_searchMatches[m_currentMatchIndex].pageNumber;
-	fz_quad quad = m_searchMatches[m_currentMatchIndex].quad;
-
-	// 跳转到对应页面
-	GoToPage(pageNum);
-
-	// 如果是连续滚动模式，滚动到匹配项位置
-	ScrollToMatchVisible(pageNum, quad);
-
-	// 更新状态栏
-	CString msg;
-	msg.Format(_T("匹配项 %d / %d"), m_currentMatchIndex + 1, (int)m_searchMatches.size());
-	m_statusBar.SetWindowText(msg);
+	NavigateToSearchMatch((m_currentMatchIndex - 1 + static_cast<int>(m_searchMatches.size())) %
+		static_cast<int>(m_searchMatches.size()));
 }
 
 // 查找按钮点击事件
@@ -8450,7 +8733,7 @@ CRect CXiaoGongPDFDlg::TransformQuadToScreen(const fz_quad& quad, int pageNumber
 	switch (m_zoomMode)
 	{
 	case ZOOM_FIT_WIDTH:
-		scale = effectivePageWidth > 0.0f ? viewWidth / effectivePageWidth * 0.95f : 1.0f;
+		scale = FitWidthScale(viewWidth, effectivePageWidth);
 		break;
 	case ZOOM_FIT_PAGE:
 	{
@@ -8679,7 +8962,7 @@ bool CXiaoGongPDFDlg::GetSelectionPageTransform(int pageNumber, fz_rect& bounds,
 		switch (m_zoomMode)
 		{
 		case ZOOM_FIT_WIDTH:
-			scale = effectiveWidth > 0 ? viewWidth / effectiveWidth * 0.95f : 1.0f;
+			scale = FitWidthScale(viewWidth, effectiveWidth);
 			break;
 		case ZOOM_FIT_PAGE:
 			scale = min(viewWidth / effectiveWidth, viewHeight / effectiveHeight) * 0.95f;
@@ -8842,8 +9125,11 @@ UINT CXiaoGongPDFDlg::PDFLoadThreadProc(LPVOID pParam)
 
 	// 执行PDF加载
 	if (!pParams->cancelled.load())
-		pParams->success = pParams->pDoc->OpenDocument(
-			pParams->utf8Path.data(), &pParams->cancelled);
+		pParams->openResult = pParams->pDoc->OpenDocument(
+			pParams->utf8Path.data(),
+			pParams->utf8Password.empty() ? nullptr : pParams->utf8Password.data(),
+			&pParams->cancelled);
+	pParams->success = pParams->openResult == PDFOpenResult::Success;
 	if (!pParams->success)
 	{
 		pParams->errorMsg = _T("无法打开PDF文件");
@@ -8893,6 +9179,72 @@ LRESULT CXiaoGongPDFDlg::OnPDFLoadComplete(WPARAM wParam, LPARAM lParam)
 	// 检查加载结果
 	if (!pParams->success)
 	{
+		if (pParams->openResult == PDFOpenResult::PasswordRequired ||
+			pParams->openResult == PDFOpenResult::InvalidPassword)
+		{
+			const bool invalidPassword = pParams->openResult == PDFOpenResult::InvalidPassword;
+			ReleaseLoadThread();
+			CloseProgressDialog();
+			if (!pParams->utf8Password.empty())
+			{
+				SecureZeroMemory(pParams->utf8Password.data(), pParams->utf8Password.size());
+				pParams->utf8Password.clear();
+			}
+
+			CString fileName = pParams->filePath.Mid(
+				max(pParams->filePath.ReverseFind(_T('\\')),
+					pParams->filePath.ReverseFind(_T('/'))) + 1);
+			CPasswordDialog passwordDlg(fileName, invalidPassword, this);
+			if (passwordDlg.DoModal() != IDOK)
+			{
+				CleanupPendingLoad();
+				UpdateStatusBar();
+				return 0;
+			}
+
+			const CString& password = passwordDlg.GetPassword();
+			const int length = WideCharToMultiByte(CP_UTF8, 0, password, -1,
+				nullptr, 0, nullptr, nullptr);
+			if (length <= 0)
+			{
+				CleanupPendingLoad();
+				MessageBox(_T("无法读取密码"), _T("错误"), MB_OK | MB_ICONERROR);
+				return 0;
+			}
+			pParams->utf8Password.resize(length);
+			if (!WideCharToMultiByte(CP_UTF8, 0, password, -1,
+				pParams->utf8Password.data(), length, nullptr, nullptr))
+			{
+				CleanupPendingLoad();
+				MessageBox(_T("无法读取密码"), _T("错误"), MB_OK | MB_ICONERROR);
+				return 0;
+			}
+
+			CProgressDlg* pProgressDlg = new CProgressDlg(this);
+			if (!pProgressDlg->Create(IDD_PROGRESS_DIALOG, this))
+			{
+				delete pProgressDlg;
+				CleanupPendingLoad();
+				MessageBox(_T("无法创建加载窗口"), _T("错误"), MB_OK | MB_ICONERROR);
+				return 0;
+			}
+			m_pProgressDlg = pProgressDlg;
+			pProgressDlg->ShowWindow(SW_SHOW);
+			pProgressDlg->UpdateWindow();
+			pParams->openResult = PDFOpenResult::Failed;
+			pParams->success = false;
+			m_pLoadThread = AfxBeginThread(PDFLoadThreadProc, pParams,
+				THREAD_PRIORITY_NORMAL, 0, CREATE_SUSPENDED);
+			if (!m_pLoadThread)
+			{
+				CleanupPendingLoad();
+				MessageBox(_T("无法启动加载线程"), _T("错误"), MB_OK | MB_ICONERROR);
+				return 0;
+			}
+			m_pLoadThread->m_bAutoDelete = FALSE;
+			m_pLoadThread->ResumeThread();
+			return 0;
+		}
 		CString errMsg = pParams->errorMsg;
 		delete pParams->pDoc;
 		delete pParams;

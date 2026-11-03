@@ -51,14 +51,22 @@
 #define IDC_BTN_OPEN                    1060
 #define IDC_BTN_ZOOM_OUT                1061
 #define IDC_BTN_FIT_WIDTH               1062
+#define IDC_BTN_FIT_PAGE                1069
 #define IDC_BTN_ZOOM_IN                 1063
 #define IDC_BTN_MORE                    1064
 #define IDC_BTN_MINIMIZE                1065
 #define IDC_BTN_MAXIMIZE                1066
 #define IDC_BTN_CLOSE_WINDOW            1067
 #define IDC_OUTLINE_TREE                1068
+#define IDC_SEARCH_RESULTS_LIST         1070
+#define IDC_SEARCH_RESULTS_HEADER       1071
+#define IDC_BTN_CLOSE_SEARCH_RESULTS    1072
 #define IDD_PDF_EDIT_DIALOG             105
 #define IDD_PROGRESS_DIALOG             106
+#define IDD_PASSWORD_DIALOG             107
+#define IDC_PASSWORD_FILE               1073
+#define IDC_PASSWORD_PROMPT             1074
+#define IDC_EDIT_PASSWORD               1075
 #define IDC_EDIT_THUMBNAIL_LIST         1046
 #define IDC_PROGRESS_BAR                1054
 #define IDC_PROGRESS_STATUS             1055
@@ -87,6 +95,9 @@
 #define ID_MENU_RECENT_FILE_8           32786
 #define ID_MENU_RECENT_FILE_9           32787
 #define ID_MENU_RECENT_FILE_10          32788
+#define ID_MENU_FIT_WIDTH               32789
+#define ID_MENU_FIT_PAGE                32790
+#define ID_MENU_SEARCH_RESULTS          32791
 
 #define WM_PDF_LOAD_COMPLETE   (WM_USER + 104)
 #define WM_PDF_LOAD_CANCELLED  (WM_USER + 105)
@@ -98,8 +109,8 @@
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        133
-#define _APS_NEXT_COMMAND_VALUE         32791
-#define _APS_NEXT_CONTROL_VALUE         1069
+#define _APS_NEXT_COMMAND_VALUE         32792
+#define _APS_NEXT_CONTROL_VALUE         1076
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

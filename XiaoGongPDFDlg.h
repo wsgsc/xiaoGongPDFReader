@@ -163,9 +163,11 @@ protected:
 
 private:
 	CModernTabCtrl m_tabCtrl;   // 现代化标签页控件
-	CEdit m_editFilePath;       // 当前标签对应的完整文件路径
 	CListCtrl m_thumbnailList;  // 缩略图列表控件
 	CTreeCtrl m_outlineTree;
+	CListCtrl m_searchResultsList;
+	CStatic m_searchResultsHeader;
+	CCustomButton m_btnCloseSearchResults;
 	CPDFViewCtrl m_pdfView;     // ★★★ 使用自定义控件支持滚动条消息
 	CPDFScrollBar m_pdfVerticalScrollBar;
 	CPDFScrollBar m_pdfHorizontalScrollBar{ false };
@@ -174,6 +176,7 @@ private:
 	CCustomButton m_btnOpen;
 	CCustomButton m_btnZoomOut;
 	CCustomButton m_btnFitWidth;
+	CCustomButton m_btnFitPage;
 	CCustomButton m_btnZoomIn;
 	CCustomButton m_btnMore;
 	CCustomButton m_btnMinimize;
@@ -197,7 +200,6 @@ private:
 	CCustomButton m_btnPrevMatch;    // 上一个匹配按钮
 	CCustomButton m_btnNextMatch;    // 下一个匹配按钮
 	CFont m_buttonFont;      // 按钮字体
-	CFont m_labelFont;       // 标签字体
 	
 	fz_context* m_ctx;
 	fz_document* m_doc;
@@ -215,11 +217,18 @@ private:
 	struct PDFLoadParams {
 		CString filePath;
 		std::vector<char> utf8Path;
+		std::vector<char> utf8Password;
 		HWND notifyWnd;
 		CPDFDocument* pDoc;
 		bool success;
+		PDFOpenResult openResult = PDFOpenResult::Failed;
 		std::atomic<bool> cancelled{ false };
 		CString errorMsg;
+		~PDFLoadParams()
+		{
+			if (!utf8Password.empty())
+				SecureZeroMemory(utf8Password.data(), utf8Password.size());
+		}
 	};
 	static UINT PDFLoadThreadProc(LPVOID pParam);  // 后台加载线程函数
 	CWinThread* m_pLoadThread;  // 加载线程指针
@@ -275,6 +284,8 @@ private:
 
 	bool m_thumbnailVisible;    // 缩略图面板是否可见
 	bool m_outlineVisible;
+	bool m_searchResultsVisible;
+	bool m_updatingSearchResultsList;
 	bool m_isUpdatingOutline;
 	bool m_isUpdatingThumbnails;  // 缩略图列表是否处于批量更新中
 
@@ -377,12 +388,18 @@ private:
 		UINT_PTR taskId;
 		std::vector<char> utf8Keyword;
 		std::vector<char> utf8Path;
+		std::vector<char> utf8Password;
 		bool caseSensitive;
 		bool failed;
 		std::vector<SearchMatch> results;
 		std::atomic<bool> cancelled;
 		SearchParams() : notifyWnd(nullptr), pDoc(nullptr), taskId(0),
 			caseSensitive(false), failed(false), cancelled(false) {}
+		~SearchParams()
+		{
+			if (!utf8Password.empty())
+				SecureZeroMemory(utf8Password.data(), utf8Password.size());
+		}
 	};
 	CWinThread* m_pSearchThread;
 	SearchParams* m_pSearchParams;
@@ -390,6 +407,11 @@ private:
 	UINT_PTR m_searchTaskId;
 	static UINT SearchThreadProc(LPVOID pParam);
 	void StopSearch();
+	void RefreshSearchResultsList();
+	void NavigateToSearchMatch(int index);
+	afx_msg void OnSearchResultSelected(NMHDR* pNMHDR, LRESULT* pResult);
+	afx_msg void OnCloseSearchResults();
+	afx_msg void OnMenuSearchResults();
 	afx_msg LRESULT OnSearchComplete(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnSearchProgress(WPARAM wParam, LPARAM lParam);
 
@@ -438,6 +460,7 @@ protected:
     void InitializeToolbar();  // 新增初始化工具栏函数
     void UpdatePageControls();
     void UpdateStatusBar();    // 更新状态栏
+    void SetStatusBarMessage(LPCTSTR message);
     afx_msg void OnBtnFirst();
     afx_msg void OnBtnLast();
     afx_msg void OnEnChangeEditCurrent();
@@ -513,6 +536,7 @@ protected:
     void SetZoom(float zoom, ZoomMode mode = ZOOM_CUSTOM);
 	void OnBtnZoomOut();
 	void OnBtnFitWidth();
+	void OnBtnFitPage();
 	void OnBtnZoomIn();
 	void OnBtnMore();
 	void OnBtnMinimize();
@@ -539,7 +563,7 @@ protected:
     void CloseDocument(int index);  // 关闭指定文档
     void CloseCurrentDocument();  // 关闭当前文档
     void UpdateTabControl();  // 更新标签页显示
-    void UpdateFilePathDisplay();  // 更新当前标签的完整路径
+    void RefreshDocumentLayout();  // 文档切换后刷新布局
     CPDFDocument* GetActiveDocument();  // 获取当前活动文档
     afx_msg void OnTabSelChange(NMHDR* pNMHDR, LRESULT* pResult);  // 标签页切换事件
     afx_msg LRESULT OnTabCloseButton(WPARAM wParam, LPARAM lParam);  // 标签页关闭按钮事件

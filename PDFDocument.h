@@ -18,6 +18,8 @@ struct ThumbnailInfo {
 
 enum ZoomMode { ZOOM_CUSTOM, ZOOM_FIT_WIDTH, ZOOM_FIT_PAGE };
 
+enum class PDFOpenResult { Success, PasswordRequired, InvalidPassword, Failed };
+
 struct PageZoomState {
 	ZoomMode zoomMode;
 	float customZoom;
@@ -84,9 +86,11 @@ public:
 	CPDFDocument();
 	~CPDFDocument();
 
-	bool OpenDocument(const char* filename, const std::atomic<bool>* cancelled = nullptr);
+	PDFOpenResult OpenDocument(const char* filename, const char* password = nullptr,
+		const std::atomic<bool>* cancelled = nullptr);
 	void CloseDocument();
 	bool IsOpen() const { return m_doc != nullptr; }
+	const std::vector<char>& GetPassword() const { return m_password; }
 
 	CString GetFilePath() const { return m_filePath; }
 	CString GetFileName() const;
@@ -172,6 +176,7 @@ private:
 	fz_page* m_currentPageObj;
 
 	CString m_filePath;
+	std::vector<char> m_password;
 	int m_totalPages;
 
 	int m_currentPage;

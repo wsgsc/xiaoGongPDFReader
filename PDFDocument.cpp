@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "PDFDocument.h"
+#include <cstring>
 
 namespace
 {
@@ -52,33 +53,44 @@ CPDFDocument::~CPDFDocument()
 	}
 }
 
-bool CPDFDocument::OpenDocument(const char* filename, const std::atomic<bool>* cancelled)
+PDFOpenResult CPDFDocument::OpenDocument(const char* filename, const char* password,
+	const std::atomic<bool>* cancelled)
 {
 	if (!m_ctx || !filename)
 	{
-		return false;
+		return PDFOpenResult::Failed;
 	}
 
 	CloseDocument();
+	volatile PDFOpenResult result = PDFOpenResult::Success;
 
 	fz_try(m_ctx)
 	{
 		m_doc = fz_open_document(m_ctx, filename);
-		m_totalPages = fz_count_pages(m_ctx, m_doc);
+		if (fz_needs_password(m_ctx, m_doc))
+		{
+			if (!password)
+				result = PDFOpenResult::PasswordRequired;
+			else if (!fz_authenticate_password(m_ctx, m_doc, password))
+				result = PDFOpenResult::InvalidPassword;
+		}
+		if (result == PDFOpenResult::Success)
+			m_totalPages = fz_count_pages(m_ctx, m_doc);
 	}
 	fz_catch(m_ctx)
 	{
-		if (m_doc)
-			fz_drop_document(m_ctx, m_doc);
-		m_doc = nullptr;
-		m_totalPages = 0;
-		return false;
+		result = PDFOpenResult::Failed;
+	}
+	if (result != PDFOpenResult::Success)
+	{
+		CloseDocument();
+		return result;
 	}
 
 	if (!m_doc || m_totalPages <= 0 || (cancelled && cancelled->load()))
 	{
 		CloseDocument();
-		return false;
+		return PDFOpenResult::Failed;
 	}
 
 	int wideLength = MultiByteToWideChar(CP_UTF8, 0, filename, -1, NULL, 0);
@@ -101,9 +113,11 @@ bool CPDFDocument::OpenDocument(const char* filename, const std::atomic<bool>* c
 	if (!CachePageseBounds(cancelled))
 	{
 		CloseDocument();
-		return false;
+		return PDFOpenResult::Failed;
 	}
-	return true;
+	if (password)
+		m_password.assign(password, password + std::strlen(password) + 1);
+	return PDFOpenResult::Success;
 }
 
 void CPDFDocument::CloseDocument()
@@ -121,6 +135,11 @@ void CPDFDocument::CloseDocument()
 	m_doc = nullptr;
 
 	m_filePath.Empty();
+	if (!m_password.empty())
+	{
+		SecureZeroMemory(m_password.data(), m_password.size());
+		m_password.clear();
+	}
 	m_totalPages = 0;
 	m_currentPage = 0;
 	m_zoom = 1.0f;
