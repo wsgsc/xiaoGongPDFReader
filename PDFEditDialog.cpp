@@ -214,6 +214,9 @@ HBITMAP CPDFEditDialog::RenderThumbnail(int pageNumber, int currentPos, int orig
 	fz_page* page = nullptr;
 	fz_pixmap* pixmap = nullptr;
 	HBITMAP hBitmap = nullptr;
+	CClientDC dc(this);
+	if (!dc.GetSafeHdc())
+		return nullptr;
 
 	fz_try(m_ctx)
 	{
@@ -255,9 +258,8 @@ HBITMAP CPDFEditDialog::RenderThumbnail(int pageNumber, int currentPos, int orig
 		bmi.bmiHeader.biBitCount = 24;
 		bmi.bmiHeader.biCompression = BI_RGB;
 
-		HDC hdc = GetDC()->GetSafeHdc();
 		void* pBits = nullptr;
-		hBitmap = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &pBits, nullptr, 0);
+		hBitmap = CreateDIBSection(dc.GetSafeHdc(), &bmi, DIB_RGB_COLORS, &pBits, nullptr, 0);
 
 		if (hBitmap && pBits)
 		{
@@ -324,7 +326,7 @@ HBITMAP CPDFEditDialog::RenderThumbnail(int pageNumber, int currentPos, int orig
 
 			// ★★★ 第5步：使用GDI+绘制装饰元素
 			CDC memDC;
-			memDC.CreateCompatibleDC(GetDC());
+			memDC.CreateCompatibleDC(&dc);
 			HBITMAP hOldBitmap = (HBITMAP)memDC.SelectObject(hBitmap);
 
 			Gdiplus::Graphics graphics(memDC.GetSafeHdc());

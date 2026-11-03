@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <mupdf/pdf.h>
 #include "PDFDocument.h"
 #include <cstring>
 
@@ -476,6 +477,16 @@ bool CPDFDocument::CachePageseBounds(const std::atomic<bool>* cancelled)
 	m_pageBoundsCache.clear();
 	m_pageBoundsCached = false;
 	m_pageBoundsCache.resize(m_totalPages);
+	pdf_document* pdfDoc = nullptr;
+	fz_var(pdfDoc);
+	fz_try(m_ctx)
+	{
+		pdfDoc = pdf_document_from_fz_document(m_ctx, m_doc);
+	}
+	fz_catch(m_ctx)
+	{
+		pdfDoc = nullptr;
+	}
 
 	for (int i = 0; i < m_totalPages; ++i)
 	{
@@ -484,35 +495,52 @@ bool CPDFDocument::CachePageseBounds(const std::atomic<bool>* cancelled)
 			m_pageBoundsCache.clear();
 			return false;
 		}
-		fz_page* page = nullptr;
-		fz_try(m_ctx)
+		fz_rect bounds = { 0, 0, 595, 842 };
+		bool gotBounds = false;
+		fz_var(bounds);
+		fz_var(gotBounds);
+		if (pdfDoc)
 		{
-			page = fz_load_page(m_ctx, m_doc, i);
-			if (page)
+			fz_try(m_ctx)
 			{
-				fz_rect bounds = fz_bound_page(m_ctx, page);
-				m_pageBoundsCache[i].x0 = bounds.x0;
-				m_pageBoundsCache[i].y0 = bounds.y0;
-				m_pageBoundsCache[i].width = bounds.x1 - bounds.x0;
-				m_pageBoundsCache[i].height = bounds.y1 - bounds.y0;
-
-				fz_drop_page(m_ctx, page);
-				page = nullptr;
+				pdf_obj* pageObj = pdf_lookup_page_obj(m_ctx, pdfDoc, i);
+				fz_rect pageBox;
+				fz_matrix pageTransform;
+				pdf_page_obj_transform(m_ctx, pageObj, &pageBox, &pageTransform);
+				bounds = fz_transform_rect(pageBox, pageTransform);
+				gotBounds = true;
+			}
+			fz_catch(m_ctx)
+			{
+				// Fall back to the generic page API for unusual or damaged pages.
 			}
 		}
-		fz_catch(m_ctx)
-		{
-			if (page)
-			{
-				fz_drop_page(m_ctx, page);
-				page = nullptr;
-			}
 
-			m_pageBoundsCache[i].x0 = 0.0f;
-			m_pageBoundsCache[i].y0 = 0.0f;
-			m_pageBoundsCache[i].width = 595.0f;
-			m_pageBoundsCache[i].height = 842.0f;
+		if (!gotBounds)
+		{
+			fz_page* page = nullptr;
+			fz_var(page);
+			fz_try(m_ctx)
+			{
+				page = fz_load_page(m_ctx, m_doc, i);
+				if (page)
+				{
+					bounds = fz_bound_page(m_ctx, page);
+					fz_drop_page(m_ctx, page);
+					page = nullptr;
+					gotBounds = true;
+				}
+			}
+			fz_catch(m_ctx)
+			{
+				if (page)
+					fz_drop_page(m_ctx, page);
+			}
 		}
+		m_pageBoundsCache[i].x0 = bounds.x0;
+		m_pageBoundsCache[i].y0 = bounds.y0;
+		m_pageBoundsCache[i].width = bounds.x1 - bounds.x0;
+		m_pageBoundsCache[i].height = bounds.y1 - bounds.y0;
 	}
 
 	m_pageBoundsCached = true;

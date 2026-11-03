@@ -248,6 +248,7 @@ private:
     // 缩略图相关
     std::map<int, ThumbnailInfo> m_thumbnailCache;  // 缩略图缓存
 	std::map<int, int> m_thumbnailImageIndices;  // 页面号到 ImageList 索引的映射
+	std::list<int> m_thumbnailImageOrder;  // ImageList 图槽的最近使用顺序
     static const float THUMBNAIL_WIDTH_RATIO;  // 缩略图区域宽度比例（30%）
 	static const int THUMBNAIL_WIDTH = 220;
 	static const int LIST_WIDTH = THUMBNAIL_WIDTH + 30;

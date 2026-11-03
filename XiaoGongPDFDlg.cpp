@@ -2656,8 +2656,25 @@ bool CXiaoGongPDFDlg::RenderThumbnail(int pageNumber)
 			{
 				thumbHeight = m_thumbnailPicHeight > 0 ? m_thumbnailPicHeight : 300;  // 默认高度
 			}
-			if (pImageList->Create(thumbWidth, thumbHeight, ILC_COLOR32, m_totalPages, 1))
+			if (pImageList->Create(thumbWidth, thumbHeight, ILC_COLOR32, 1, 1))
 			{
+				CClientDC dc(&m_thumbnailList);
+				CDC memDC;
+				CBitmap placeholder;
+				if (!dc.GetSafeHdc() || !memDC.CreateCompatibleDC(&dc) ||
+					!placeholder.CreateCompatibleBitmap(&dc, thumbWidth, thumbHeight))
+				{
+					delete pImageList;
+					return false;
+				}
+				CBitmap* pOldBitmap = memDC.SelectObject(&placeholder);
+				memDC.FillSolidRect(0, 0, thumbWidth, thumbHeight, RGB(240, 240, 240));
+				memDC.SelectObject(pOldBitmap);
+				if (pImageList->Add(&placeholder, (CBitmap*)nullptr) != 0)
+				{
+					delete pImageList;
+					return false;
+				}
 				m_thumbnailList.SetImageList(pImageList, LVSIL_NORMAL);
 				pImageList->Detach();
 				delete pImageList;
@@ -2687,24 +2704,47 @@ bool CXiaoGongPDFDlg::RenderThumbnail(int pageNumber)
 		if (pImageList)
 		{
 			int imageIndex = -1;
+			CBitmap* pBitmap = CBitmap::FromHandle(hBitmap);
+			if (!pBitmap)
+				return false;
 			auto imageIndexIt = m_thumbnailImageIndices.find(pageNumber);
 			if (imageIndexIt != m_thumbnailImageIndices.end() && imageIndexIt->second >= 0)
 			{
-				CBitmap* pBitmap = CBitmap::FromHandle(hBitmap);
 				if (pBitmap && pImageList->Replace(imageIndexIt->second, pBitmap, nullptr))
 				{
 					imageIndex = imageIndexIt->second;
 				}
 			}
-
-			if (imageIndex == -1)
+			else if (pImageList->GetImageCount() <= THUMBNAIL_CACHE_LIMIT)
 			{
-				imageIndex = pImageList->Add(CBitmap::FromHandle(hBitmap), (CBitmap*)nullptr);
+				imageIndex = pImageList->Add(pBitmap, (CBitmap*)nullptr);
+			}
+			else if (!m_thumbnailImageOrder.empty())
+			{
+				int oldestPage = m_thumbnailImageOrder.back();
+				auto oldestIt = m_thumbnailImageIndices.find(oldestPage);
+				if (oldestIt != m_thumbnailImageIndices.end() &&
+					pBitmap && pImageList->Replace(oldestIt->second, pBitmap, nullptr))
+				{
+					imageIndex = oldestIt->second;
+					for (int i = 0; i < m_thumbnailList.GetItemCount(); ++i)
+					{
+						if ((int)m_thumbnailList.GetItemData(i) == oldestPage)
+						{
+							m_thumbnailList.SetItem(i, 0, LVIF_IMAGE, NULL, 0, 0, 0, 0);
+							break;
+						}
+					}
+					m_thumbnailImageIndices.erase(oldestIt);
+					m_thumbnailImageOrder.pop_back();
+				}
 			}
 
 			if (imageIndex != -1)
 			{
 				m_thumbnailImageIndices[pageNumber] = imageIndex;
+				m_thumbnailImageOrder.remove(pageNumber);
+				m_thumbnailImageOrder.push_front(pageNumber);
 
 				CString strPageNum;
 				strPageNum.Format(_T("第 %d 页"), pageNumber + 1);
@@ -2793,6 +2833,7 @@ void CXiaoGongPDFDlg::UpdateThumbnails()
 	}
 
 	m_thumbnailImageIndices.clear();
+	m_thumbnailImageOrder.clear();
 
 	// ★★★ 清理列表控件和ImageList（缓存已从文档对象加载，但ImageList需要重建）
 	if (m_thumbnailList.GetSafeHwnd())
@@ -2833,10 +2874,11 @@ void CXiaoGongPDFDlg::UpdateThumbnails()
 		CString strPageNum;
 		strPageNum.Format(_T("第 %d 页"), i + 1);
 		LVITEM item = { 0 };
-		item.mask = LVIF_TEXT;
+		item.mask = LVIF_TEXT | LVIF_IMAGE;
 		item.iItem = i;
 		item.iSubItem = 0;
 		item.pszText = const_cast<LPTSTR>((LPCTSTR)strPageNum);
+		item.iImage = 0;
 		int itemIndex = m_thumbnailList.InsertItem(&item);
 		if (itemIndex != -1)
 		{
@@ -2982,24 +3024,23 @@ void CXiaoGongPDFDlg::RenderVisibleThumbnails()
 	int startPage = max(0, topIndex - PRELOAD_COUNT);
 	int endPage = min(m_totalPages - 1, bottomIndex + PRELOAD_COUNT);
 
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (!pDoc)
+		return;
+
 	// 渲染可见区域和预加载区域的缩略图
 	for (int i = startPage; i <= endPage; i++) {
-		// 检查是否已经渲染
-		CPDFDocument* pDoc = GetActiveDocument();
-		if (pDoc) {
-			auto& cache = pDoc->GetThumbnailCache();
-			if (cache.find(i) == cache.end()) {
-				// 未渲染，执行渲染
-				RenderThumbnail(i);
-			}
+		// ImageList 中已有图槽时无需再次生成位图。
+		if (m_thumbnailImageIndices.find(i) == m_thumbnailImageIndices.end()) {
+			RenderThumbnail(i);
+		} else {
+			m_thumbnailImageOrder.remove(i);
+			m_thumbnailImageOrder.push_front(i);
 		}
 	}
 
 	// ★★★ 限制缓存大小
-	CPDFDocument* pDoc = GetActiveDocument();
-	if (pDoc) {
-		pDoc->LimitThumbnailCache(THUMBNAIL_CACHE_LIMIT);
-	}
+	pDoc->LimitThumbnailCache(THUMBNAIL_CACHE_LIMIT);
 }
 
 // ★★★ 缩略图滚动事件处理
@@ -3171,6 +3212,7 @@ void CXiaoGongPDFDlg::CleanupThumbnails()
 	}
 	m_thumbnailCache.clear();
 	m_thumbnailImageIndices.clear();
+	m_thumbnailImageOrder.clear();
 	m_thumbnailPicWidth = 0;
 	m_thumbnailPicHeight = 0;
 }
