@@ -52,6 +52,7 @@ protected:
 	virtual BOOL OnInitDialog();
 	virtual void OnOK();
 	virtual void OnCancel();
+	virtual BOOL PreTranslateMessage(MSG* pMsg);
 
 	DECLARE_MESSAGE_MAP()
 
@@ -66,6 +67,8 @@ private:
 	CListCtrl m_thumbnailList;
 	CButton m_btnSave;
 	CButton m_btnReset;
+	CButton m_btnUndo;
+	CButton m_btnRedo;
 	CButton m_btnAddPDF;
 	CStatic m_staticInfo;
 
@@ -73,6 +76,17 @@ private:
 	std::vector<PageInfo> m_pages;
 	std::vector<PageInfo> m_originalPages;  // 用于重置
 	int m_originalTotalPages;  // 原始总页数（用于重置）
+	struct EditState
+	{
+		std::vector<PageInfo> pages;
+		int totalPages;
+	};
+	std::vector<EditState> m_history;
+	size_t m_historyIndex = 0;
+	static const size_t HISTORY_LIMIT = 51;
+	void RecordEditState();
+	void RestoreEditState(size_t index);
+	void UpdateHistoryButtons();
 
 	// 拖拽相关（优化版）
 	bool m_isDragging;              // 是否正在拖拽
@@ -171,6 +185,8 @@ private:
 
 	// 重置功能
 	afx_msg void OnBnClickedBtnReset();
+	afx_msg void OnBnClickedBtnUndo();
+	afx_msg void OnBnClickedBtnRedo();
 
 	// 双击查看
 	afx_msg void OnNMDblclk(NMHDR* pNMHDR, LRESULT* pResult);

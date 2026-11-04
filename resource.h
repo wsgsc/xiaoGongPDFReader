@@ -74,6 +74,7 @@
 #define IDC_BTN_EDIT_CANCEL             1048
 #define IDC_BTN_EDIT_RESET              1049
 #define IDC_BTN_EDIT_UNDO               1050
+#define IDC_BTN_EDIT_REDO               1076
 #define IDC_BTN_EDIT_DELETE             1051
 #define IDC_STATIC_EDIT_INFO            1052
 #define IDC_BTN_EDIT_ADD_PDF            1053
@@ -110,7 +111,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        133
 #define _APS_NEXT_COMMAND_VALUE         32792
-#define _APS_NEXT_CONTROL_VALUE         1076
+#define _APS_NEXT_CONTROL_VALUE         1077
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

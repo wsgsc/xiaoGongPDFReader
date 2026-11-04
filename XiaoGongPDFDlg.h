@@ -212,6 +212,10 @@ private:
 	// 多文档管理
 	std::vector<CPDFDocument*> m_documents;  // 所有打开的文档
 	int m_activeDocIndex;  // 当前活动文档索引
+	std::vector<CString> m_sessionRestorePaths;
+	size_t m_sessionRestoreIndex = 0;
+	CString m_sessionActivePath;
+	bool m_sessionRestoreStarted = false;
 
 	// 后台加载相关
 	struct PDFLoadParams {
@@ -301,6 +305,11 @@ private:
 	CPoint m_windowDragStartScreen;
 	CRect m_windowDragStartRect;
 	CPoint m_lastMousePos;      // 上次鼠标位置
+	CPoint m_linkPressPoint;    // 链接按下时的视图坐标
+	int m_pendingLinkPage;      // 待点击的文档内链接目标页
+	float m_pendingLinkX;
+	float m_pendingLinkY;      // 目标页内的纵向坐标；负值表示页首
+	fz_document* m_pendingLinkDocument;
 	CPoint m_panOffset;         // 当前平移偏移量
 	HCURSOR m_hHandCursor;      // 手形光标
 	HCURSOR m_hHandCursorGrab;  // 抓取光标
@@ -451,7 +460,7 @@ protected:
 	afx_msg LRESULT OnThumbnailScroll(WPARAM wParam, LPARAM lParam);  // 缩略图滚动事件
     afx_msg void OnSize(UINT nType, int cx, int cy);
     afx_msg LRESULT OnRenderThumbnailsAsync(WPARAM wParam, LPARAM lParam);  // 异步渲染缩略图
-    afx_msg LRESULT OnOpenInitialFile(WPARAM wParam, LPARAM lParam);  // 延迟打开初始文件
+    afx_msg LRESULT OnOpenInitialFile(WPARAM wParam, LPARAM lParam);  // 延迟恢复标签页
     afx_msg LRESULT OnUpdateThumbnailHighlight(WPARAM wParam, LPARAM lParam);  // 延迟更新缩略图高亮
     afx_msg LRESULT OnPDFLoadComplete(WPARAM wParam, LPARAM lParam);  // PDF后台加载完成
     afx_msg LRESULT OnPDFLoadCancelled(WPARAM wParam, LPARAM lParam);
@@ -517,6 +526,9 @@ protected:
 	CString ReadingStateKey(const CString& filePath) const;
 	void SaveReadingPosition(CPDFDocument* pDoc);
 	void RestoreReadingPosition(CPDFDocument* pDoc);
+	void SaveOpenTabs();
+	void RestoreOpenTabs();
+	void OpenNextRestoredTab();
 	void CloseProgressDialog();
 	void ReleaseLoadThread();
 	void CleanupPendingLoad();
@@ -608,6 +620,7 @@ protected:
     CString ExtractSelectedText();              // 提取选中的文本
     void CopySelectionToClipboard();            // 复制选中文本到剪贴板
     bool ScreenPointToPdfCoords(CPoint viewPt, int pageNumber, float& pdfX, float& pdfY);
+    bool HitTestInternalLink(CPoint viewPt, int& targetPage, float& targetX, float& targetY);
     bool GetSelectionPageTransform(int pageNumber, fz_rect& bounds, float& scale,
         int& offsetX, int& offsetY);
     void UpdateSelectedText();

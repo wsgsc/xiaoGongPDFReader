@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <utility>
 #include <gdiplus.h>
 
 #pragma comment(lib, "gdiplus.lib")
@@ -62,6 +63,8 @@ IMPLEMENT_DYNAMIC(CPDFEditDialog, CDialogEx)
 BEGIN_MESSAGE_MAP(CPDFEditDialog, CDialogEx)
 	ON_BN_CLICKED(IDC_BTN_EDIT_SAVE, &CPDFEditDialog::OnBnClickedBtnSave)
 	ON_BN_CLICKED(IDC_BTN_EDIT_RESET, &CPDFEditDialog::OnBnClickedBtnReset)
+	ON_BN_CLICKED(IDC_BTN_EDIT_UNDO, &CPDFEditDialog::OnBnClickedBtnUndo)
+	ON_BN_CLICKED(IDC_BTN_EDIT_REDO, &CPDFEditDialog::OnBnClickedBtnRedo)
 	ON_BN_CLICKED(IDC_BTN_EDIT_ADD_PDF, &CPDFEditDialog::OnBnClickedBtnAddPDF)
 	ON_NOTIFY(LVN_BEGINDRAG, IDC_EDIT_THUMBNAIL_LIST, &CPDFEditDialog::OnBeginDrag)
 	ON_NOTIFY(NM_RCLICK, IDC_EDIT_THUMBNAIL_LIST, &CPDFEditDialog::OnNMRClick)
@@ -106,6 +109,8 @@ void CPDFEditDialog::DoDataExchange(CDataExchange* pDX)
 	DDX_Control(pDX, IDC_EDIT_THUMBNAIL_LIST, m_thumbnailList);
 	DDX_Control(pDX, IDC_BTN_EDIT_SAVE, m_btnSave);
 	DDX_Control(pDX, IDC_BTN_EDIT_RESET, m_btnReset);
+	DDX_Control(pDX, IDC_BTN_EDIT_UNDO, m_btnUndo);
+	DDX_Control(pDX, IDC_BTN_EDIT_REDO, m_btnRedo);
 	DDX_Control(pDX, IDC_BTN_EDIT_ADD_PDF, m_btnAddPDF);
 	DDX_Control(pDX, IDC_STATIC_EDIT_INFO, m_staticInfo);
 }
@@ -122,12 +127,103 @@ BOOL CPDFEditDialog::OnInitDialog()
 
 	// 建立页面列表，缩略图按需生成。
 	LoadAllThumbnails();
+	RecordEditState();
 	SetTimer(TIMER_VISIBLE_THUMBNAILS, 180, NULL);
 
 	// 更新信息栏
 	UpdateInfoBar();
 
 	return TRUE;
+}
+
+BOOL CPDFEditDialog::PreTranslateMessage(MSG* pMsg)
+{
+	if (pMsg->message == WM_KEYDOWN && (GetKeyState(VK_CONTROL) & 0x8000))
+	{
+		if (pMsg->wParam == 'Z')
+		{
+			if (GetKeyState(VK_SHIFT) & 0x8000)
+				OnBnClickedBtnRedo();
+			else
+				OnBnClickedBtnUndo();
+			return TRUE;
+		}
+		if (pMsg->wParam == 'Y')
+		{
+			OnBnClickedBtnRedo();
+			return TRUE;
+		}
+	}
+	return CDialogEx::PreTranslateMessage(pMsg);
+}
+
+void CPDFEditDialog::UpdateHistoryButtons()
+{
+	if (m_btnUndo.GetSafeHwnd())
+		m_btnUndo.EnableWindow(m_historyIndex > 0);
+	if (m_btnRedo.GetSafeHwnd())
+		m_btnRedo.EnableWindow(m_historyIndex + 1 < m_history.size());
+}
+
+void CPDFEditDialog::RecordEditState()
+{
+	EditState state;
+	state.totalPages = m_totalPages;
+	state.pages = m_pages;
+	for (auto& page : state.pages)
+	{
+		page.hThumbnail = nullptr;
+		page.isDragging = false;
+	}
+
+	if (!m_history.empty())
+	{
+		const EditState& current = m_history[m_historyIndex];
+		bool same = current.totalPages == state.totalPages && current.pages.size() == state.pages.size();
+		for (size_t i = 0; same && i < state.pages.size(); ++i)
+		{
+			const PageInfo& a = current.pages[i];
+			const PageInfo& b = state.pages[i];
+			same = a.originalIndex == b.originalIndex && a.isDeleted == b.isDeleted &&
+				a.sourceFile == b.sourceFile && a.sourcePageIndex == b.sourcePageIndex &&
+				a.rotationAngle == b.rotationAngle;
+		}
+		if (same)
+			return;
+		m_history.erase(m_history.begin() + m_historyIndex + 1, m_history.end());
+	}
+
+	m_history.push_back(std::move(state));
+	if (m_history.size() > HISTORY_LIMIT)
+		m_history.erase(m_history.begin());
+	m_historyIndex = m_history.size() - 1;
+	UpdateHistoryButtons();
+}
+
+void CPDFEditDialog::RestoreEditState(size_t index)
+{
+	for (auto& page : m_pages)
+	{
+		if (page.hThumbnail)
+			::DeleteObject(page.hThumbnail);
+	}
+	m_pages = m_history[index].pages;
+	m_totalPages = m_history[index].totalPages;
+	m_historyIndex = index;
+	RefreshThumbnailList();
+	UpdateHistoryButtons();
+}
+
+void CPDFEditDialog::OnBnClickedBtnUndo()
+{
+	if (m_historyIndex > 0)
+		RestoreEditState(m_historyIndex - 1);
+}
+
+void CPDFEditDialog::OnBnClickedBtnRedo()
+{
+	if (m_historyIndex + 1 < m_history.size())
+		RestoreEditState(m_historyIndex + 1);
 }
 
 void CPDFEditDialog::InitializeThumbnailList()
@@ -1149,6 +1245,7 @@ void CPDFEditDialog::EndDragOperation()
 
 	// 更新信息栏
 	UpdateInfoBar();
+	RecordEditState();
 }
 
 // ========== 消息处理函数 ==========
@@ -1487,6 +1584,7 @@ void CPDFEditDialog::DeleteSelectedPages()
 
 	// 更新信息栏
 	UpdateInfoBar();
+	RecordEditState();
 }
 
 // ========== 提取功能 ==========
@@ -1689,6 +1787,7 @@ void CPDFEditDialog::SwapSelectedPages()
 	// 重新选中这两页（交换后的位置）
 	m_thumbnailList.SetItemState(selectedIndices[0], LVIS_SELECTED, LVIS_SELECTED);
 	m_thumbnailList.SetItemState(selectedIndices[1], LVIS_SELECTED, LVIS_SELECTED);
+	RecordEditState();
 }
 
 // ========== 旋转功能 ==========
@@ -1876,6 +1975,7 @@ void CPDFEditDialog::RotateSelectedPages(int angle)
 
 	// 刷新列表显示
 	RefreshThumbnailList();
+	RecordEditState();
 }
 
 // 右键菜单
@@ -2007,6 +2107,7 @@ void CPDFEditDialog::OnBnClickedBtnReset()
 
 	// 刷新列表
 	RefreshThumbnailList();
+	RecordEditState();
 }
 
 // 保存
@@ -2361,6 +2462,7 @@ bool CPDFEditDialog::ImportPDF(const CString& pdfPath)
 
 	// 更新信息栏
 	UpdateInfoBar();
+	RecordEditState();
 
 	return true;
 }
@@ -2602,6 +2704,7 @@ bool CPDFEditDialog::ImportImage(const CString& imagePath)
 	// 刷新列表
 	RefreshThumbnailList();
 	UpdateInfoBar();
+	RecordEditState();
 
 	return true;
 }
