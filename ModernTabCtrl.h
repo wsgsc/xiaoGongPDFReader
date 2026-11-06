@@ -59,5 +59,4 @@ private:
 
 	// GDI对象
 	CFont m_font;              // 标签字体
-	CFont m_boldFont;          // 粗体字体（选中时）
 };

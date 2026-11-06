@@ -45,6 +45,12 @@
     <ClInclude Include="ShortcutsDialog.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="PDFEditDialog.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="ProgressDlg.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="XiaoGongPDF.cpp">
@@ -66,6 +72,12 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="ShortcutsDialog.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="PDFEditDialog.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="ProgressDlg.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

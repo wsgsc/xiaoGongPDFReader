@@ -30,7 +30,7 @@ CModernTabCtrl::CModernTabCtrl()
 {
 	// 创建标准字体
 	VERIFY(m_font.CreateFont(
-		15,                        // 字体高度
+		24,                        // 字体高度
 		0,                         // 字体宽度
 		0,                         // 文本倾斜角度
 		0,                         // 基线倾斜角度
@@ -45,22 +45,6 @@ CModernTabCtrl::CModernTabCtrl()
 		DEFAULT_PITCH | FF_SWISS,  // 字体间距和族
 		_T("微软雅黑")));            // 字体名称
 
-	// 创建粗体字体（选中时使用）
-	VERIFY(m_boldFont.CreateFont(
-		15,                        // 字体高度
-		0,                         // 字体宽度
-		0,                         // 文本倾斜角度
-		0,                         // 基线倾斜角度
-		FW_BOLD,                   // 字体粗细（加粗）
-		FALSE,                     // 斜体
-		FALSE,                     // 下划线
-		0,                         // 删除线
-		DEFAULT_CHARSET,           // 字符集
-		OUT_DEFAULT_PRECIS,        // 输出精度
-		CLIP_DEFAULT_PRECIS,       // 裁剪精度
-		DEFAULT_QUALITY,           // 输出质量
-		DEFAULT_PITCH | FF_SWISS,  // 字体间距和族
-		_T("微软雅黑")));            // 字体名称
 }
 
 CModernTabCtrl::~CModernTabCtrl()
@@ -71,10 +55,6 @@ CModernTabCtrl::~CModernTabCtrl()
 	{
 		m_font.DeleteObject();
 	}
-	if (m_boldFont.GetSafeHandle())
-	{
-		m_boldFont.DeleteObject();
-	}
 }
 
 void CModernTabCtrl::OnDestroy()
@@ -83,10 +63,6 @@ void CModernTabCtrl::OnDestroy()
 	if (m_font.GetSafeHandle())
 	{
 		m_font.DeleteObject();
-	}
-	if (m_boldFont.GetSafeHandle())
-	{
-		m_boldFont.DeleteObject();
 	}
 
 	CTabCtrl::OnDestroy();
@@ -252,7 +228,7 @@ void CModernTabCtrl::DrawTab(CDC* pDC, int index, CRect rect, BOOL isSelected, B
 	CRect iconRect(rect.left + 14, rect.top + (rect.Height() - 16) / 2,
 		rect.left + 29, rect.top + (rect.Height() - 16) / 2 + 16);
 	pDC->FillSolidRect(iconRect, RGB(218, 48, 54));
-	CFont* pOldFont = pDC->SelectObject(isSelected ? &m_boldFont : &m_font);
+	CFont* pOldFont = pDC->SelectObject(&m_font);
 	pDC->SetBkMode(TRANSPARENT);
 	pDC->SetTextColor(RGB(255, 255, 255));
 	pDC->DrawText(_T("P"), iconRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
