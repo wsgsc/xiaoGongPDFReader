@@ -230,12 +230,15 @@
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="XiaoGongPDF.rc" />
+    <ResourceCompile Include="RotateIcons.rc" />
   </ItemGroup>
   <ItemGroup>
     <None Include="res\XiaoGongPDF.rc2" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="res\XiaoGongPDF.ico" />
+    <Image Include="rotate-left.png" />
+    <Image Include="rotate-right.png" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <Target Name="CopyPortableRuntime" AfterTargets="Build" Condition="'$(Configuration)'=='Release'">

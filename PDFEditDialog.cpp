@@ -6,11 +6,14 @@
 #include <mupdf/pdf.h>
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <map>
+#include <objidl.h>
 #include <utility>
 #include <gdiplus.h>
 
 #pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "ole32.lib")
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -18,6 +21,111 @@
 
 namespace
 {
+	const int THUMBNAIL_WIDTH = 220;
+	const int THUMBNAIL_HEIGHT = 280;
+	const int THUMBNAIL_ACTION_HEIGHT = 318;
+	const CRect PAGE_ACTION_BUTTONS[] = {
+		CRect(38, 282, 86, 316), CRect(134, 282, 182, 316)
+	};
+
+	void DrawPngResource(Gdiplus::Graphics& graphics, UINT resourceId,
+		const Gdiplus::RectF& bounds)
+	{
+		HINSTANCE module = AfxGetResourceHandle();
+		HRSRC resource = ::FindResource(module, MAKEINTRESOURCE(resourceId), RT_RCDATA);
+		if (!resource)
+			return;
+		DWORD size = ::SizeofResource(module, resource);
+		const void* data = ::LockResource(::LoadResource(module, resource));
+		if (!data || size == 0)
+			return;
+		HGLOBAL copy = ::GlobalAlloc(GMEM_MOVEABLE, size);
+		if (!copy)
+			return;
+		void* copiedData = ::GlobalLock(copy);
+		if (!copiedData)
+		{
+			::GlobalFree(copy);
+			return;
+		}
+		std::copy_n(static_cast<const BYTE*>(data), size, static_cast<BYTE*>(copiedData));
+		::GlobalUnlock(copy);
+		IStream* stream = nullptr;
+		if (FAILED(::CreateStreamOnHGlobal(copy, TRUE, &stream)))
+		{
+			::GlobalFree(copy);
+			return;
+		}
+		{
+			Gdiplus::Bitmap icon(stream);
+			if (icon.GetLastStatus() == Gdiplus::Ok)
+				graphics.DrawImage(&icon, bounds);
+		}
+		stream->Release();
+	}
+
+	void DrawPageActionButtons(BYTE* destination, int destinationStride)
+	{
+		const int actionHeight = THUMBNAIL_ACTION_HEIGHT - THUMBNAIL_HEIGHT;
+		Gdiplus::Bitmap buttonBitmap(THUMBNAIL_WIDTH, actionHeight, PixelFormat32bppARGB);
+		if (buttonBitmap.GetLastStatus() != Gdiplus::Ok)
+			return;
+		{
+			Gdiplus::Graphics graphics(&buttonBitmap);
+			graphics.Clear(Gdiplus::Color(0, 0, 0, 0));
+			graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+			graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+			Gdiplus::SolidBrush background(Gdiplus::Color(255, 250, 252, 253));
+			Gdiplus::Pen border(Gdiplus::Color(255, 203, 216, 224), 1.0f);
+			for (int action = 0; action < 2; ++action)
+			{
+				const CRect& button = PAGE_ACTION_BUTTONS[action];
+				float x = static_cast<float>(button.left) + 0.5f;
+				float y = static_cast<float>(button.top - THUMBNAIL_HEIGHT) + 0.5f;
+				float width = static_cast<float>(button.Width() - 1);
+				float height = static_cast<float>(button.Height() - 1);
+				const float radius = 4.0f;
+				Gdiplus::GraphicsPath outline;
+				outline.AddArc(x, y, radius * 2, radius * 2, 180, 90);
+				outline.AddArc(x + width - radius * 2, y, radius * 2, radius * 2, 270, 90);
+				outline.AddArc(x + width - radius * 2, y + height - radius * 2,
+					radius * 2, radius * 2, 0, 90);
+				outline.AddArc(x, y + height - radius * 2, radius * 2, radius * 2, 90, 90);
+				outline.CloseFigure();
+				graphics.FillPath(&background, &outline);
+				graphics.DrawPath(&border, &outline);
+
+				Gdiplus::RectF iconBounds(
+					(button.left + button.right - 26) / 2.0f,
+					(button.top + button.bottom - 26) / 2.0f - THUMBNAIL_HEIGHT,
+					26.0f, 26.0f);
+				DrawPngResource(graphics, action == 0 ? IDR_ROTATE_LEFT_PNG : IDR_ROTATE_RIGHT_PNG,
+					iconBounds);
+			}
+		}
+
+		Gdiplus::Rect area(0, 0, THUMBNAIL_WIDTH, actionHeight);
+		Gdiplus::BitmapData pixels = { 0 };
+		if (buttonBitmap.LockBits(&area, Gdiplus::ImageLockModeRead,
+			PixelFormat32bppARGB, &pixels) != Gdiplus::Ok)
+			return;
+		for (int y = 0; y < actionHeight; ++y)
+		{
+			const BYTE* source = static_cast<const BYTE*>(pixels.Scan0) + y * pixels.Stride;
+			BYTE* target = destination + (THUMBNAIL_HEIGHT + y) * destinationStride;
+			for (int x = 0; x < THUMBNAIL_WIDTH; ++x)
+			{
+				int alpha = source[x * 4 + 3];
+				if (alpha == 0)
+					continue;
+				for (int channel = 0; channel < 3; ++channel)
+					target[x * 3 + channel] = static_cast<BYTE>(
+						(source[x * 4 + channel] * alpha + target[x * 3 + channel] * (255 - alpha)) / 255);
+			}
+		}
+		buttonBitmap.UnlockBits(&pixels);
+	}
+
 	bool SaveValidatedPdf(fz_context* ctx, pdf_document* pdf, const CString& targetPath,
 		int expectedPages, const pdf_write_options& options)
 	{
@@ -63,12 +171,13 @@ IMPLEMENT_DYNAMIC(CPDFEditDialog, CDialogEx)
 BEGIN_MESSAGE_MAP(CPDFEditDialog, CDialogEx)
 	ON_BN_CLICKED(IDC_BTN_EDIT_SAVE, &CPDFEditDialog::OnBnClickedBtnSave)
 	ON_BN_CLICKED(IDC_BTN_EDIT_RESET, &CPDFEditDialog::OnBnClickedBtnReset)
+	ON_BN_CLICKED(IDC_BTN_EDIT_PREVIEW, &CPDFEditDialog::OnBnClickedBtnPreview)
 	ON_BN_CLICKED(IDC_BTN_EDIT_UNDO, &CPDFEditDialog::OnBnClickedBtnUndo)
 	ON_BN_CLICKED(IDC_BTN_EDIT_REDO, &CPDFEditDialog::OnBnClickedBtnRedo)
 	ON_BN_CLICKED(IDC_BTN_EDIT_ADD_PDF, &CPDFEditDialog::OnBnClickedBtnAddPDF)
 	ON_NOTIFY(LVN_BEGINDRAG, IDC_EDIT_THUMBNAIL_LIST, &CPDFEditDialog::OnBeginDrag)
 	ON_NOTIFY(NM_RCLICK, IDC_EDIT_THUMBNAIL_LIST, &CPDFEditDialog::OnNMRClick)
-	ON_NOTIFY(NM_DBLCLK, IDC_EDIT_THUMBNAIL_LIST, &CPDFEditDialog::OnNMDblclk)
+	ON_NOTIFY(NM_CLICK, IDC_EDIT_THUMBNAIL_LIST, &CPDFEditDialog::OnNMClick)
 	ON_NOTIFY(LVN_ITEMCHANGED, IDC_EDIT_THUMBNAIL_LIST, &CPDFEditDialog::OnItemChanged)
 	ON_NOTIFY(NM_CUSTOMDRAW, IDC_EDIT_THUMBNAIL_LIST, &CPDFEditDialog::OnCustomDraw)
 	ON_WM_MOUSEMOVE()
@@ -121,6 +230,25 @@ BOOL CPDFEditDialog::OnInitDialog()
 
 	// 设置对话框标题
 	SetWindowText(_T("PDF编辑工具箱"));
+	CRect resetRect;
+	CRect undoRect;
+	m_btnReset.GetWindowRect(&resetRect);
+	m_btnUndo.GetWindowRect(&undoRect);
+	ScreenToClient(&resetRect);
+	ScreenToClient(&undoRect);
+	int buttonOffset = undoRect.left - resetRect.left;
+	m_btnPreview.Create(_T("预览"), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+		resetRect, this, IDC_BTN_EDIT_PREVIEW);
+	m_btnPreview.SetFont(m_btnReset.GetFont());
+	CButton* buttons[] = { &m_btnReset, &m_btnUndo, &m_btnRedo, &m_btnAddPDF, &m_btnSave };
+	for (CButton* button : buttons)
+	{
+		CRect rect;
+		button->GetWindowRect(&rect);
+		ScreenToClient(&rect);
+		rect.OffsetRect(buttonOffset, 0);
+		button->MoveWindow(&rect);
+	}
 
 	// 初始化缩略图列表
 	InitializeThumbnailList();
@@ -231,8 +359,7 @@ void CPDFEditDialog::InitializeThumbnailList()
 	// 设置列表控件样式为大图标，支持多选
 	m_thumbnailList.ModifyStyle(LVS_SINGLESEL, LVS_ICON | LVS_SHOWSELALWAYS);
 
-	// 创建ImageList（更小的尺寸以适应网格布局）
-	// 尺寸：150×190，适合A4比例的页面
+	// 创建页面缩略图列表
 	ResetThumbnailImageList();
 
 	// 设置列表背景色为浅灰色，现代化视觉效果
@@ -240,27 +367,236 @@ void CPDFEditDialog::InitializeThumbnailList()
 	m_thumbnailList.SetTextBkColor(RGB(248, 248, 248));
 	m_thumbnailList.SetTextColor(RGB(50, 50, 50));
 
-	// 设置图标间距（水平和垂直），创建网格布局
-	// cx: 水平间距，cy: 垂直间距
-	CSize iconSpacing(180, 210);  // 调整垂直间距，因为不显示底部文本标签
-	m_thumbnailList.SetIconSpacing(iconSpacing);
+	m_thumbnailList.SetIconSpacing(CSize(250, 340));
+}
+
+void CPDFEditDialog::LayoutThumbnailItems()
+{
+	CRect client;
+	m_thumbnailList.GetClientRect(&client);
+	const int edgeMargin = 8;
+	const int minimumGap = 30;
+	const int cellWidth = THUMBNAIL_WIDTH + minimumGap;
+	int usableWidth = max(cellWidth, client.Width() - GetSystemMetrics(SM_CXVSCROLL));
+	int columns = max(1, (usableWidth - edgeMargin * 2 + minimumGap) / cellWidth);
+	int spacing = cellWidth;
+	if (columns > 1)
+		spacing = (usableWidth - edgeMargin * 2 - cellWidth) / (columns - 1);
+	for (int item = 0; item < m_thumbnailList.GetItemCount(); ++item)
+		m_thumbnailList.SetItemPosition(item,
+			CPoint(edgeMargin + (item % columns) * spacing, (item / columns) * 340));
 }
 
 void CPDFEditDialog::ResetThumbnailImageList()
 {
 	if (m_imageList.GetSafeHandle())
 		m_imageList.DeleteImageList();
-	m_imageList.Create(150, 190, ILC_COLOR24 | ILC_MASK, 1, 16);
+	m_imageList.Create(THUMBNAIL_WIDTH, THUMBNAIL_ACTION_HEIGHT, ILC_COLOR24 | ILC_MASK, 1, 16);
 	m_thumbnailList.SetImageList(&m_imageList, LVSIL_NORMAL);
 	HBITMAP hPlaceholder = CreatePlaceholderBitmap();
 	if (hPlaceholder)
 	{
-		CBitmap bitmap;
-		bitmap.Attach(hPlaceholder);
-		m_imageList.Add(&bitmap, (CBitmap*)nullptr);
-		bitmap.Detach();
+		HBITMAP hActionBitmap = CreateActionThumbnail(hPlaceholder, 0, 0);
+		if (hActionBitmap)
+		{
+			CBitmap actionBitmap;
+			actionBitmap.Attach(hActionBitmap);
+			m_imageList.Add(&actionBitmap, (CBitmap*)nullptr);
+			actionBitmap.Detach();
+			::DeleteObject(hActionBitmap);
+		}
 		::DeleteObject(hPlaceholder);
 	}
+}
+
+HBITMAP CPDFEditDialog::CreateActionThumbnail(HBITMAP hThumbnail, int currentPos, int originalPos)
+{
+	::GdiFlush();
+	CClientDC dc(this);
+	CDC bitmapDC;
+	if (!bitmapDC.CreateCompatibleDC(&dc))
+		return nullptr;
+	BITMAPINFO resultInfo = { 0 };
+	resultInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+	resultInfo.bmiHeader.biWidth = THUMBNAIL_WIDTH;
+	resultInfo.bmiHeader.biHeight = -THUMBNAIL_ACTION_HEIGHT;
+	resultInfo.bmiHeader.biPlanes = 1;
+	resultInfo.bmiHeader.biBitCount = 24;
+	resultInfo.bmiHeader.biCompression = BI_RGB;
+	void* resultBits = nullptr;
+	HBITMAP hResult = ::CreateDIBSection(dc.GetSafeHdc(), &resultInfo, DIB_RGB_COLORS,
+		&resultBits, nullptr, 0);
+	if (!hResult || !resultBits)
+		return nullptr;
+	HBITMAP hOldBitmap = (HBITMAP)bitmapDC.SelectObject(hResult);
+	const int resultStride = (THUMBNAIL_WIDTH * 3 + 3) & ~3;
+	std::fill_n(static_cast<BYTE*>(resultBits), resultStride * THUMBNAIL_ACTION_HEIGHT,
+		static_cast<BYTE>(248));
+	BITMAP sourceInfo = { 0 };
+	::GetObject(hThumbnail, sizeof(sourceInfo), &sourceInfo);
+	int copyWidth = min(THUMBNAIL_WIDTH, sourceInfo.bmWidth);
+	int copyHeight = min(THUMBNAIL_HEIGHT, sourceInfo.bmHeight);
+	if (copyWidth > 0 && copyHeight > 0)
+	{
+		BITMAPINFO sourceFormat = { 0 };
+		sourceFormat.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+		sourceFormat.bmiHeader.biWidth = sourceInfo.bmWidth;
+		sourceFormat.bmiHeader.biHeight = -sourceInfo.bmHeight;
+		sourceFormat.bmiHeader.biPlanes = 1;
+		sourceFormat.bmiHeader.biBitCount = 24;
+		sourceFormat.bmiHeader.biCompression = BI_RGB;
+		int sourceStride = (sourceInfo.bmWidth * 3 + 3) & ~3;
+		std::vector<BYTE> sourceBits(sourceStride * sourceInfo.bmHeight);
+		if (::GetDIBits(dc.GetSafeHdc(), hThumbnail, 0, sourceInfo.bmHeight,
+			sourceBits.data(), &sourceFormat, DIB_RGB_COLORS) == sourceInfo.bmHeight)
+		{
+			int sourceX = (sourceInfo.bmWidth - copyWidth) / 2;
+			int sourceY = (sourceInfo.bmHeight - copyHeight) / 2;
+			int destX = (THUMBNAIL_WIDTH - copyWidth) / 2;
+			int destY = (THUMBNAIL_HEIGHT - copyHeight) / 2;
+			for (int y = 0; y < copyHeight; ++y)
+			{
+				const BYTE* sourceRow = sourceBits.data() + (sourceY + y) * sourceStride + sourceX * 3;
+				BYTE* destRow = static_cast<BYTE*>(resultBits) + (destY + y) * resultStride + destX * 3;
+				std::copy_n(sourceRow, copyWidth * 3, destRow);
+			}
+		}
+		else
+		{
+			CDC sourceDC;
+			if (sourceDC.CreateCompatibleDC(&dc))
+			{
+				HBITMAP hOldSource = (HBITMAP)sourceDC.SelectObject(hThumbnail);
+				bitmapDC.BitBlt((THUMBNAIL_WIDTH - copyWidth) / 2,
+					(THUMBNAIL_HEIGHT - copyHeight) / 2,
+					copyWidth, copyHeight, &sourceDC,
+					(sourceInfo.bmWidth - copyWidth) / 2,
+					(sourceInfo.bmHeight - copyHeight) / 2, SRCCOPY);
+				sourceDC.SelectObject(hOldSource);
+			}
+		}
+	}
+
+	if (currentPos > 0)
+	{
+		CBrush badgeBrush(RGB(33, 150, 243));
+		CPen* oldPen = (CPen*)bitmapDC.SelectStockObject(NULL_PEN);
+		CBrush* oldBrush = bitmapDC.SelectObject(&badgeBrush);
+		bitmapDC.Ellipse(10, 10, 38, 38);
+		bitmapDC.SelectObject(oldBrush);
+		bitmapDC.SelectObject(oldPen);
+		bitmapDC.FillSolidRect(4, THUMBNAIL_HEIGHT - 30,
+			THUMBNAIL_WIDTH - 8, 26, RGB(50, 50, 50));
+		CFont badgeFont;
+		badgeFont.CreateFont(-14, 0, 0, 0, FW_BOLD, FALSE, FALSE, 0,
+			DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+			ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, _T("Arial"));
+		CFont* oldFont = bitmapDC.SelectObject(&badgeFont);
+		bitmapDC.SetBkMode(TRANSPARENT);
+		bitmapDC.SetTextColor(RGB(255, 255, 255));
+		CString pageText;
+		pageText.Format(_T("%d"), currentPos);
+		CRect badgeRect(10, 10, 38, 38);
+		bitmapDC.DrawText(pageText, &badgeRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+		pageText.Format(_T("%d"), originalPos);
+		CRect footerRect(4, THUMBNAIL_HEIGHT - 30,
+			THUMBNAIL_WIDTH - 4, THUMBNAIL_HEIGHT - 4);
+		bitmapDC.DrawText(pageText, &footerRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+		bitmapDC.SelectObject(oldFont);
+	}
+
+	::GdiFlush();
+	DrawPageActionButtons(static_cast<BYTE*>(resultBits), resultStride);
+	bitmapDC.SelectObject(hOldBitmap);
+	return hResult;
+}
+
+int CPDFEditDialog::GetPageIndex(int displayIndex) const
+{
+	for (size_t i = 0; i < m_pages.size(); ++i)
+	{
+		if (!m_pages[i].isDeleted && m_pages[i].displayIndex == displayIndex)
+			return static_cast<int>(i);
+	}
+	return -1;
+}
+
+int CPDFEditDialog::HitPageAction(int displayIndex, CPoint point)
+{
+	if (displayIndex < 0)
+		return -1;
+	CRect icon;
+	if (!m_thumbnailList.GetItemRect(displayIndex, &icon, LVIR_ICON))
+		return -1;
+	int x = point.x - icon.left;
+	int y = point.y - icon.top;
+	CPoint localPoint(x, y);
+	for (int action = 0; action < 2; ++action)
+	{
+		if (PAGE_ACTION_BUTTONS[action].PtInRect(localPoint))
+			return action;
+	}
+	return -1;
+}
+
+void CPDFEditDialog::RotatePage(int displayIndex, int angle)
+{
+	int pageIndex = GetPageIndex(displayIndex);
+	if (pageIndex < 0)
+		return;
+	PageInfo& page = m_pages[pageIndex];
+	int newAngle = (page.rotationAngle + angle + 360) % 360;
+	if (newAngle == page.rotationAngle)
+		return;
+
+	LVITEM item = { 0 };
+	item.mask = LVIF_IMAGE;
+	item.iItem = displayIndex;
+	if (!m_thumbnailList.GetItem(&item))
+		return;
+
+	HBITMAP hNewThumbnail = page.sourceFile == m_filePath ?
+		RenderThumbnail(page.originalIndex, displayIndex + 1, page.originalIndex + 1, newAngle) :
+		RenderThumbnailFromSource(page.sourceFile, page.sourcePageIndex,
+			displayIndex + 1, page.originalIndex + 1, newAngle);
+	if (!hNewThumbnail)
+		return;
+	HBITMAP hActionBitmap = CreateActionThumbnail(hNewThumbnail,
+		displayIndex + 1, page.originalIndex + 1);
+	if (!hActionBitmap)
+	{
+		::DeleteObject(hNewThumbnail);
+		return;
+	}
+
+	CBitmap actionBitmap;
+	actionBitmap.Attach(hActionBitmap);
+	bool updated = item.iImage > 0 && item.iImage < m_imageList.GetImageCount() &&
+		m_imageList.Replace(item.iImage, &actionBitmap, nullptr) != FALSE;
+	if (!updated)
+	{
+		int imageIndex = m_imageList.Add(&actionBitmap, (CBitmap*)nullptr);
+		if (imageIndex >= 0)
+		{
+			item.iImage = imageIndex;
+			updated = m_thumbnailList.SetItem(&item) != FALSE;
+		}
+	}
+	actionBitmap.Detach();
+	::DeleteObject(hActionBitmap);
+	if (!updated)
+	{
+		::DeleteObject(hNewThumbnail);
+		return;
+	}
+	if (page.hThumbnail)
+		::DeleteObject(page.hThumbnail);
+	page.hThumbnail = hNewThumbnail;
+	page.rotationAngle = newAngle;
+	CRect icon;
+	if (m_thumbnailList.GetItemRect(displayIndex, &icon, LVIR_ICON))
+		m_thumbnailList.InvalidateRect(&icon, FALSE);
+	RecordEditState();
 }
 
 void CPDFEditDialog::LoadAllThumbnails()
@@ -299,6 +635,7 @@ void CPDFEditDialog::LoadAllThumbnails()
 
 	// 保存原始总页数
 	m_originalTotalPages = m_totalPages;
+	LayoutThumbnailItems();
 	RenderVisibleThumbnails();
 }
 
@@ -322,17 +659,12 @@ HBITMAP CPDFEditDialog::RenderThumbnail(int pageNumber, int currentPos, int orig
 		// 获取页面边界
 		fz_rect bounds = fz_bound_page(m_ctx, page);
 
-		// 计算缩放比例（目标宽度150像素，考虑旋转后的尺寸）
-		float targetWidth = 150.0f;
-		float scale = targetWidth / (bounds.x1 - bounds.x0);
-
-		// 创建变换矩阵（缩放 + 旋转）
-		fz_matrix ctm = fz_scale(scale, scale);
-		if (rotationAngle != 0) {
-			// 应用旋转（MuPDF使用弧度）
-			fz_matrix rotate = fz_rotate(rotationAngle);
-			ctm = fz_concat(ctm, rotate);
-		}
+		float pageWidth = bounds.x1 - bounds.x0;
+		float pageHeight = bounds.y1 - bounds.y0;
+		if (rotationAngle == 90 || rotationAngle == 270)
+			std::swap(pageWidth, pageHeight);
+		float scale = min(212.0f / pageWidth, 232.0f / pageHeight);
+		fz_matrix ctm = fz_pre_rotate(fz_scale(scale, scale), rotationAngle);
 
 		// 渲染为pixmap（不使用alpha通道）
 		pixmap = fz_new_pixmap_from_page(m_ctx, page, ctm, fz_device_rgb(m_ctx), 0);
@@ -343,9 +675,9 @@ HBITMAP CPDFEditDialog::RenderThumbnail(int pageNumber, int currentPos, int orig
 		int stride = fz_pixmap_stride(m_ctx, pixmap);
 		unsigned char* samples = fz_pixmap_samples(m_ctx, pixmap);
 
-		// ★★★ 创建固定尺寸150×190的DIB，用于垂直居中显示PDF内容
-		const int FIXED_WIDTH = 150;
-		const int FIXED_HEIGHT = 190;
+		// 创建固定尺寸缩略图，页面内容保持原始比例。
+		const int FIXED_WIDTH = THUMBNAIL_WIDTH;
+		const int FIXED_HEIGHT = THUMBNAIL_HEIGHT;
 		BITMAPINFO bmi = { 0 };
 		bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
 		bmi.bmiHeader.biWidth = FIXED_WIDTH;
@@ -362,7 +694,7 @@ HBITMAP CPDFEditDialog::RenderThumbnail(int pageNumber, int currentPos, int orig
 			unsigned char* dest = (unsigned char*)pBits;
 			int destStride = ((FIXED_WIDTH * 3 + 3) & ~3);
 
-			// ★★★ 第1步：先用浅灰色填充整个150×190区域（匹配背景）
+			// ★★★ 第1步：先用浅灰色填充缩略图区域（匹配背景）
 			for (int y = 0; y < FIXED_HEIGHT; y++)
 			{
 				for (int x = 0; x < FIXED_WIDTH; x++)
@@ -541,9 +873,9 @@ HBITMAP CPDFEditDialog::RenderThumbnailFromSource(const CString& sourceFile, int
 		// 获取页面边界
 		fz_rect bounds = fz_bound_page(m_ctx, page);
 
-		// 计算缩放比例（目标尺寸：150x190）
-		float targetWidth = 150.0f;
-		float targetHeight = 190.0f;
+		// 按缩略图的内容区域渲染，避免放大旧位图造成模糊。
+		float targetWidth = 212.0f;
+		float targetHeight = 232.0f;
 		float pageWidth = bounds.x1 - bounds.x0;
 		float pageHeight = bounds.y1 - bounds.y0;
 
@@ -561,7 +893,7 @@ HBITMAP CPDFEditDialog::RenderThumbnailFromSource(const CString& sourceFile, int
 		ctm = fz_pre_rotate(ctm, rotationAngle);
 
 		// 渲染页面到pixmap
-		pix = fz_new_pixmap_from_page_contents(m_ctx, page, ctm, fz_device_rgb(m_ctx), 0);
+		pix = fz_new_pixmap_from_page(m_ctx, page, ctm, fz_device_rgb(m_ctx), 0);
 
 		// 转换为HBITMAP
 		int width = fz_pixmap_width(m_ctx, pix);
@@ -587,15 +919,17 @@ HBITMAP CPDFEditDialog::RenderThumbnailFromSource(const CString& sourceFile, int
 		{
 			// 复制像素数据（RGB -> BGR）
 			unsigned char* dest = (unsigned char*)pBits;
+			int destStride = (width * 3 + 3) & ~3;
 			for (int y = 0; y < height; y++)
 			{
 				unsigned char* src = samples + y * stride;
+				unsigned char* destPixel = dest + y * destStride;
 				for (int x = 0; x < width; x++)
 				{
-					dest[0] = src[2];  // B
-					dest[1] = src[1];  // G
-					dest[2] = src[0];  // R
-					dest += 3;
+					destPixel[0] = src[2];  // B
+					destPixel[1] = src[1];  // G
+					destPixel[2] = src[0];  // R
+					destPixel += 3;
 					src += 3;
 				}
 			}
@@ -666,7 +1000,7 @@ HBITMAP CPDFEditDialog::RenderPreviewBitmap(const CString& sourceFile, int pageI
 		ctm = fz_pre_rotate(ctm, rotationAngle);
 
 		// 渲染页面到pixmap
-		pix = fz_new_pixmap_from_page_contents(m_ctx, page, ctm, fz_device_rgb(m_ctx), 0);
+		pix = fz_new_pixmap_from_page(m_ctx, page, ctm, fz_device_rgb(m_ctx), 0);
 
 		// 转换为HBITMAP
 		int width = fz_pixmap_width(m_ctx, pix);
@@ -692,15 +1026,17 @@ HBITMAP CPDFEditDialog::RenderPreviewBitmap(const CString& sourceFile, int pageI
 		{
 			// 复制像素数据（RGB -> BGR）
 			unsigned char* dest = (unsigned char*)pBits;
+			int destStride = (width * 3 + 3) & ~3;
 			for (int y = 0; y < height; y++)
 			{
 				unsigned char* src = samples + y * stride;
+				unsigned char* destPixel = dest + y * destStride;
 				for (int x = 0; x < width; x++)
 				{
-					dest[0] = src[2];  // B
-					dest[1] = src[1];  // G
-					dest[2] = src[0];  // R
-					dest += 3;
+					destPixel[0] = src[2];  // B
+					destPixel[1] = src[1];  // G
+					destPixel[2] = src[0];  // R
+					destPixel += 3;
 					src += 3;
 				}
 			}
@@ -748,6 +1084,7 @@ void CPDFEditDialog::RefreshThumbnailList()
 		page.displayIndex = displayIndex;
 		m_thumbnailList.InsertItem(displayIndex++, _T(""), 0);
 	}
+	LayoutThumbnailItems();
 	for (int index : selected)
 		if (index < displayIndex)
 			m_thumbnailList.SetItemState(index, LVIS_SELECTED, LVIS_SELECTED);
@@ -819,10 +1156,17 @@ void CPDFEditDialog::RenderVisibleThumbnails()
 		}
 		if (page->hThumbnail)
 		{
-			CBitmap bitmap;
-			bitmap.Attach(page->hThumbnail);
-			int imageIndex = m_imageList.Add(&bitmap, (CBitmap*)nullptr);
-			bitmap.Detach();
+			HBITMAP hActionBitmap = CreateActionThumbnail(page->hThumbnail, item + 1,
+				page->originalIndex + 1);
+			int imageIndex = -1;
+			if (hActionBitmap)
+			{
+				CBitmap actionBitmap;
+				actionBitmap.Attach(hActionBitmap);
+				imageIndex = m_imageList.Add(&actionBitmap, (CBitmap*)nullptr);
+				actionBitmap.Detach();
+				::DeleteObject(hActionBitmap);
+			}
 			if (imageIndex >= 0)
 			{
 				state.iImage = imageIndex;
@@ -1018,8 +1362,8 @@ void CPDFEditDialog::HandleAutoScroll(CPoint point)
 // 创建占位虚影位图
 HBITMAP CPDFEditDialog::CreatePlaceholderBitmap()
 {
-	const int FIXED_WIDTH = 150;
-	const int FIXED_HEIGHT = 190;
+	const int FIXED_WIDTH = THUMBNAIL_WIDTH;
+	const int FIXED_HEIGHT = THUMBNAIL_HEIGHT;
 	const int cardMargin = 4;
 
 	BITMAPINFO bmi = { 0 };
@@ -1123,7 +1467,7 @@ void CPDFEditDialog::BeginDragOperation()
 	// 创建拖拽图像（基于原始缩略图，从m_draggedPage中）
 	if (m_draggedPage.hThumbnail) {
 		m_pDragImage = new CImageList();
-		if (m_pDragImage->Create(150, 190, ILC_COLOR24, 1, 0)) {
+		if (m_pDragImage->Create(THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT, ILC_COLOR24, 1, 0)) {
 			CBitmap bmp;
 			BITMAP bmInfo;
 			::GetObject(m_draggedPage.hThumbnail, sizeof(BITMAP), &bmInfo);
@@ -1366,6 +1710,8 @@ void CPDFEditDialog::OnBeginDrag(NMHDR* pNMHDR, LRESULT* pResult)
 {
 	NM_LISTVIEW* pNMListView = (NM_LISTVIEW*)pNMHDR;
 	*pResult = 0;
+	if (HitPageAction(pNMListView->iItem, pNMListView->ptAction) >= 0)
+		return;
 
 	m_dragIndex = pNMListView->iItem;
 	if (m_dragIndex < 0)
@@ -1412,7 +1758,7 @@ void CPDFEditDialog::OnBeginDrag(NMHDR* pNMHDR, LRESULT* pResult)
 	// 创建拖拽图像（基于保存的原始缩略图）
 	if (m_draggedPage.hThumbnail) {
 		m_pDragImage = new CImageList();
-		if (m_pDragImage->Create(150, 190, ILC_COLOR24, 1, 0)) {
+		if (m_pDragImage->Create(THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT, ILC_COLOR24, 1, 0)) {
 			CBitmap bmp;
 			bmp.Attach(m_draggedPage.hThumbnail);
 			m_pDragImage->Add(&bmp, (CBitmap*)nullptr);
@@ -2730,130 +3076,224 @@ void CPDFEditDialog::OnBnClickedBtnAddPDF()
 	}
 }
 
-// 双击查看（可选功能）
-// 简单的预览对话框类（内联定义）
-class CPagePreviewDlg : public CDialogEx
+class CEditedPreviewCanvas : public CWnd
 {
 public:
-	CPagePreviewDlg(HBITMAP hBitmap, const CString& title, CWnd* pParent = nullptr)
-		: CDialogEx(IDD_PROGRESS_DIALOG, pParent), m_hBitmap(hBitmap), m_title(title)
+	void SetBitmap(HBITMAP hBitmap)
 	{
-	}
-
-	virtual BOOL OnInitDialog()
-	{
-		CDialogEx::OnInitDialog();
-
-		// 设置标题
-		SetWindowText(m_title);
-
-		// 修改窗口样式，添加系统菜单（包括关闭按钮）
-		LONG style = GetWindowLong(m_hWnd, GWL_STYLE);
-		style |= WS_SYSMENU;
-		SetWindowLong(m_hWnd, GWL_STYLE, style);
-
-		// 刷新窗口框架以应用新样式
-		SetWindowPos(nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
-
-		// 获取位图尺寸
-		BITMAP bm;
-		::GetObject(m_hBitmap, sizeof(BITMAP), &bm);
-
-		// 计算窗口尺寸
-		int maxWidth = GetSystemMetrics(SM_CXSCREEN) * 0.8;
-		int maxHeight = GetSystemMetrics(SM_CYSCREEN) * 0.8;
-		int clientWidth = min(bm.bmWidth, maxWidth);
-		int clientHeight = min(bm.bmHeight, maxHeight);
-
-		// 调整窗口大小
-		CRect windowRect;
-		GetWindowRect(&windowRect);
-		CRect clientRect;
-		GetClientRect(&clientRect);
-		int borderWidth = windowRect.Width() - clientRect.Width();
-		int borderHeight = windowRect.Height() - clientRect.Height();
-
-		SetWindowPos(nullptr, 0, 0, clientWidth + borderWidth, clientHeight + borderHeight, SWP_NOMOVE | SWP_NOZORDER);
-		CenterWindow();
-
-		// 创建静态控件显示图片
-		m_staticImage.Create(_T(""), WS_CHILD | WS_VISIBLE | SS_BITMAP | SS_CENTERIMAGE,
-			CRect(0, 0, clientWidth, clientHeight), this);
-		m_staticImage.SetBitmap(m_hBitmap);
-
-		return TRUE;
-	}
-
-	virtual void OnOK()
-	{
-		CDialogEx::OnOK();
-	}
-
-	virtual void OnCancel()
-	{
-		CDialogEx::OnCancel();
+		m_hBitmap = hBitmap;
+		Invalidate(FALSE);
 	}
 
 private:
-	HBITMAP m_hBitmap;
-	CString m_title;
-	CStatic m_staticImage;
+	afx_msg void OnPaint()
+	{
+		CPaintDC dc(this);
+		CRect client;
+		GetClientRect(&client);
+		dc.FillSolidRect(&client, RGB(232, 235, 238));
+		if (!m_hBitmap)
+			return;
+		BITMAP bitmap = { 0 };
+		::GetObject(m_hBitmap, sizeof(bitmap), &bitmap);
+		if (bitmap.bmWidth <= 0 || bitmap.bmHeight <= 0)
+			return;
+		float scale = min(static_cast<float>(client.Width() - 24) / bitmap.bmWidth,
+			static_cast<float>(client.Height() - 24) / bitmap.bmHeight);
+		if (scale <= 0)
+			return;
+		int width = static_cast<int>(bitmap.bmWidth * scale);
+		int height = static_cast<int>(bitmap.bmHeight * scale);
+		int x = (client.Width() - width) / 2;
+		int y = (client.Height() - height) / 2;
+		CDC sourceDC;
+		sourceDC.CreateCompatibleDC(&dc);
+		HBITMAP hOldBitmap = (HBITMAP)sourceDC.SelectObject(m_hBitmap);
+		dc.SetStretchBltMode(HALFTONE);
+		dc.StretchBlt(x, y, width, height, &sourceDC, 0, 0,
+			bitmap.bmWidth, bitmap.bmHeight, SRCCOPY);
+		sourceDC.SelectObject(hOldBitmap);
+		dc.Draw3dRect(x - 1, y - 1, width + 2, height + 2,
+			RGB(190, 195, 200), RGB(190, 195, 200));
+	}
+
+	DECLARE_MESSAGE_MAP()
+	HBITMAP m_hBitmap = nullptr;
 };
 
-void CPDFEditDialog::OnNMDblclk(NMHDR* pNMHDR, LRESULT* pResult)
+BEGIN_MESSAGE_MAP(CEditedPreviewCanvas, CWnd)
+	ON_WM_PAINT()
+END_MESSAGE_MAP()
+
+class CEditedPDFPreviewDlg : public CDialogEx
+{
+public:
+	CEditedPDFPreviewDlg(int pageCount, std::function<HBITMAP(int)> renderPage, CWnd* pParent)
+		: CDialogEx(IDD_PROGRESS_DIALOG, pParent), m_pageCount(pageCount),
+		m_renderPage(std::move(renderPage))
+	{
+	}
+
+	~CEditedPDFPreviewDlg()
+	{
+		if (m_hBitmap)
+			::DeleteObject(m_hBitmap);
+	}
+
+protected:
+	BOOL OnInitDialog() override
+	{
+		CDialogEx::OnInitDialog();
+		SetWindowText(_T("编辑结果预览"));
+		ModifyStyle(0, WS_SYSMENU, SWP_FRAMECHANGED);
+		for (int id : { IDC_PROGRESS_STATUS, IDC_PROGRESS_BAR, IDCANCEL })
+		{
+			CWnd* control = GetDlgItem(id);
+			if (control && control->GetSafeHwnd())
+				control->ShowWindow(SW_HIDE);
+		}
+		int width = min(850, GetSystemMetrics(SM_CXSCREEN) - 60);
+		int height = min(700, GetSystemMetrics(SM_CYSCREEN) - 80);
+		SetWindowPos(nullptr, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER);
+		CenterWindow();
+		CRect client;
+		GetClientRect(&client);
+		CString canvasClass = AfxRegisterWndClass(CS_HREDRAW | CS_VREDRAW,
+			::LoadCursor(nullptr, IDC_ARROW), (HBRUSH)(COLOR_WINDOW + 1));
+		m_canvas.CreateEx(0, canvasClass, _T(""), WS_CHILD | WS_VISIBLE,
+			CRect(12, 12, client.right - 12, client.bottom - 56), this, 2001);
+		int center = client.Width() / 2;
+		int footerTop = client.bottom - 40;
+		m_btnPrev.Create(_T("上一页"), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+			CRect(center - 145, footerTop, center - 75, footerTop + 26), this, 2002);
+		m_pageLabel.Create(_T(""), WS_CHILD | WS_VISIBLE | SS_CENTER,
+			CRect(center - 70, footerTop + 5, center + 70, footerTop + 23), this);
+		m_btnNext.Create(_T("下一页"), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+			CRect(center + 75, footerTop, center + 145, footerTop + 26), this, 2003);
+		m_btnClose.Create(_T("关闭"), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+			CRect(client.right - 82, footerTop, client.right - 12, footerTop + 26), this, 2004);
+		CFont* font = GetFont();
+		m_btnPrev.SetFont(font);
+		m_btnNext.SetFont(font);
+		m_btnClose.SetFont(font);
+		m_pageLabel.SetFont(font);
+		if (!ShowPage(0))
+			EndDialog(IDCANCEL);
+		return TRUE;
+	}
+
+	bool ShowPage(int index)
+	{
+		if (index < 0 || index >= m_pageCount)
+			return false;
+		HBITMAP hBitmap = m_renderPage(index);
+		if (!hBitmap)
+		{
+			MessageBox(_T("无法渲染预览页面。"), _T("错误"), MB_OK | MB_ICONERROR);
+			return false;
+		}
+		m_canvas.SetBitmap(hBitmap);
+		if (m_hBitmap)
+			::DeleteObject(m_hBitmap);
+		m_hBitmap = hBitmap;
+		m_currentPage = index;
+		CString pageText;
+		pageText.Format(_T("%d / %d"), index + 1, m_pageCount);
+		m_pageLabel.SetWindowText(pageText);
+		m_btnPrev.EnableWindow(index > 0);
+		m_btnNext.EnableWindow(index + 1 < m_pageCount);
+		return true;
+	}
+
+	void HandleWheel(short delta)
+	{
+		m_wheelRemainder += delta;
+		while (m_wheelRemainder >= WHEEL_DELTA)
+		{
+			ShowPage(m_currentPage - 1);
+			m_wheelRemainder -= WHEEL_DELTA;
+		}
+		while (m_wheelRemainder <= -WHEEL_DELTA)
+		{
+			ShowPage(m_currentPage + 1);
+			m_wheelRemainder += WHEEL_DELTA;
+		}
+	}
+
+	BOOL PreTranslateMessage(MSG* pMsg) override
+	{
+		if (pMsg->message == WM_MOUSEWHEEL)
+		{
+			HandleWheel(GET_WHEEL_DELTA_WPARAM(pMsg->wParam));
+			return TRUE;
+		}
+		return CDialogEx::PreTranslateMessage(pMsg);
+	}
+
+	afx_msg BOOL OnMouseWheel(UINT, short zDelta, CPoint)
+	{
+		HandleWheel(zDelta);
+		return TRUE;
+	}
+
+	afx_msg void OnPrev() { ShowPage(m_currentPage - 1); }
+	afx_msg void OnNext() { ShowPage(m_currentPage + 1); }
+	afx_msg void OnClosePreview() { EndDialog(IDCANCEL); }
+	DECLARE_MESSAGE_MAP()
+
+private:
+	int m_pageCount;
+	int m_currentPage = 0;
+	int m_wheelRemainder = 0;
+	HBITMAP m_hBitmap = nullptr;
+	std::function<HBITMAP(int)> m_renderPage;
+	CEditedPreviewCanvas m_canvas;
+	CButton m_btnPrev;
+	CButton m_btnNext;
+	CButton m_btnClose;
+	CStatic m_pageLabel;
+};
+
+BEGIN_MESSAGE_MAP(CEditedPDFPreviewDlg, CDialogEx)
+	ON_WM_MOUSEWHEEL()
+	ON_BN_CLICKED(2002, &CEditedPDFPreviewDlg::OnPrev)
+	ON_BN_CLICKED(2003, &CEditedPDFPreviewDlg::OnNext)
+	ON_BN_CLICKED(2004, &CEditedPDFPreviewDlg::OnClosePreview)
+END_MESSAGE_MAP()
+
+void CPDFEditDialog::OnBnClickedBtnPreview()
+{
+	std::vector<int> pageIndexes;
+	for (size_t i = 0; i < m_pages.size(); ++i)
+	{
+		if (!m_pages[i].isDeleted)
+			pageIndexes.push_back(static_cast<int>(i));
+	}
+	if (pageIndexes.empty())
+	{
+		MessageBox(_T("没有可预览的页面。"), _T("提示"), MB_OK | MB_ICONINFORMATION);
+		return;
+	}
+	CEditedPDFPreviewDlg previewDlg(static_cast<int>(pageIndexes.size()),
+		[this, pageIndexes](int index)
+		{
+			const PageInfo& page = m_pages[pageIndexes[index]];
+			return RenderPreviewBitmap(page.sourceFile, page.sourcePageIndex, page.rotationAngle);
+		}, this);
+	previewDlg.DoModal();
+}
+
+void CPDFEditDialog::OnNMClick(NMHDR* pNMHDR, LRESULT* pResult)
 {
 	NM_LISTVIEW* pNMListView = (NM_LISTVIEW*)pNMHDR;
 	*pResult = 0;
-
-	if (pNMListView->iItem < 0)
-		return;
-
-	// 获取双击的显示索引
 	int displayIndex = pNMListView->iItem;
-
-	// 在m_pages中找到对应的页面（跳过已删除的页面）
-	int currentDisplayIndex = 0;
-	PageInfo* targetPage = nullptr;
-	for (size_t i = 0; i < m_pages.size(); i++)
+	int action = HitPageAction(displayIndex, pNMListView->ptAction);
+	switch (action)
 	{
-		if (m_pages[i].isDeleted)
-			continue;
-
-		if (currentDisplayIndex == displayIndex)
-		{
-			targetPage = &m_pages[i];
-			break;
-		}
-		currentDisplayIndex++;
+	case 0: RotatePage(displayIndex, -90); break;
+	case 1: RotatePage(displayIndex, 90); break;
 	}
-
-	if (!targetPage)
-		return;
-
-	// 渲染预览图（较大尺寸：600px宽）
-	HBITMAP hPreviewBitmap = RenderPreviewBitmap(targetPage->sourceFile, targetPage->sourcePageIndex, targetPage->rotationAngle);
-	if (!hPreviewBitmap)
-	{
-		MessageBox(_T("无法渲染预览图！"), _T("错误"), MB_OK | MB_ICONERROR);
-		return;
-	}
-
-	// 构建标题
-	CString title;
-	CString fileName = targetPage->sourceFile;
-	int lastSlash = fileName.ReverseFind('\\');
-	if (lastSlash >= 0)
-		fileName = fileName.Mid(lastSlash + 1);
-
-	title.Format(_T("页面预览 - 第 %d 页 (源: %s, 页码: %d)"),
-		displayIndex + 1, fileName, targetPage->sourcePageIndex + 1);
-
-	// 显示预览对话框
-	CPagePreviewDlg previewDlg(hPreviewBitmap, title, this);
-	previewDlg.DoModal();
-
-	// 清理资源
-	::DeleteObject(hPreviewBitmap);
 }
 
 // 列表选择变化
@@ -2863,10 +3303,42 @@ void CPDFEditDialog::OnItemChanged(NMHDR* pNMHDR, LRESULT* pResult)
 	*pResult = 0;
 }
 
-// 自定义绘制 - 占位虚影通过替换缩略图实现，无需自定义绘制
+// 保留列表的选中状态，但只绘制页面图，避免默认的选中边框和高亮。
 void CPDFEditDialog::OnCustomDraw(NMHDR* pNMHDR, LRESULT* pResult)
 {
-	*pResult = CDRF_DODEFAULT;
+	NMLVCUSTOMDRAW* pDraw = reinterpret_cast<NMLVCUSTOMDRAW*>(pNMHDR);
+	if (pDraw->nmcd.dwDrawStage == CDDS_PREPAINT)
+	{
+		*pResult = CDRF_NOTIFYITEMDRAW;
+		return;
+	}
+	if (pDraw->nmcd.dwDrawStage != CDDS_ITEMPREPAINT)
+	{
+		*pResult = CDRF_DODEFAULT;
+		return;
+	}
+
+	int item = static_cast<int>(pDraw->nmcd.dwItemSpec);
+	CRect bounds;
+	CRect icon;
+	if (item < 0 || item >= m_thumbnailList.GetItemCount() ||
+		!m_thumbnailList.GetItemRect(item, &bounds, LVIR_BOUNDS) ||
+		!m_thumbnailList.GetItemRect(item, &icon, LVIR_ICON))
+	{
+		*pResult = CDRF_SKIPDEFAULT;
+		return;
+	}
+
+	CDC dc;
+	dc.Attach(pDraw->nmcd.hdc);
+	dc.FillSolidRect(&bounds, RGB(248, 248, 248));
+	LVITEM state = { 0 };
+	state.mask = LVIF_IMAGE;
+	state.iItem = item;
+	if (m_imageList.GetSafeHandle() && m_thumbnailList.GetItem(&state))
+		m_imageList.Draw(&dc, state.iImage, icon.TopLeft(), ILD_NORMAL);
+	dc.Detach();
+	*pResult = CDRF_SKIPDEFAULT;
 }
 
 void CPDFEditDialog::OnOK()

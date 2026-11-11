@@ -67,6 +67,7 @@ private:
 	CListCtrl m_thumbnailList;
 	CButton m_btnSave;
 	CButton m_btnReset;
+	CButton m_btnPreview;
 	CButton m_btnUndo;
 	CButton m_btnRedo;
 	CButton m_btnAddPDF;
@@ -128,6 +129,7 @@ private:
 
 	// 初始化和渲染
 	void InitializeThumbnailList();
+	void LayoutThumbnailItems();
 	void LoadAllThumbnails();
 	void ResetThumbnailImageList();
 	void RenderVisibleThumbnails();
@@ -136,6 +138,10 @@ private:
 	HBITMAP RenderPreviewBitmap(const CString& sourceFile, int pageIndex, int rotationAngle = 0);
 	void RefreshThumbnailList();
 	void UpdateInfoBar();
+	HBITMAP CreateActionThumbnail(HBITMAP hThumbnail, int currentPos, int originalPos);
+	int GetPageIndex(int displayIndex) const;
+	int HitPageAction(int displayIndex, CPoint point);
+	void RotatePage(int displayIndex, int angle);
 
 	// 拖拽功能
 	afx_msg void OnBeginDrag(NMHDR* pNMHDR, LRESULT* pResult);
@@ -185,11 +191,11 @@ private:
 
 	// 重置功能
 	afx_msg void OnBnClickedBtnReset();
+	afx_msg void OnBnClickedBtnPreview();
 	afx_msg void OnBnClickedBtnUndo();
 	afx_msg void OnBnClickedBtnRedo();
 
-	// 双击查看
-	afx_msg void OnNMDblclk(NMHDR* pNMHDR, LRESULT* pResult);
+	afx_msg void OnNMClick(NMHDR* pNMHDR, LRESULT* pResult);
 
 	// 列表选择变化
 	afx_msg void OnItemChanged(NMHDR* pNMHDR, LRESULT* pResult);

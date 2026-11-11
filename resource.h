@@ -11,6 +11,8 @@
 #define IDR_MAINFRAME                   128
 #define IDR_MENU                        130
 #define IDS_APP_NAME                    131
+#define IDR_ROTATE_LEFT_PNG             133
+#define IDR_ROTATE_RIGHT_PNG            134
 #define IDC_LIST2                       1001
 #define IDC_THUMBNAIL_LIST              1001
 #define IDC_PDF_VIEW                    1002
@@ -75,6 +77,7 @@
 #define IDC_BTN_EDIT_RESET              1049
 #define IDC_BTN_EDIT_UNDO               1050
 #define IDC_BTN_EDIT_REDO               1076
+#define IDC_BTN_EDIT_PREVIEW            1077
 #define IDC_BTN_EDIT_DELETE             1051
 #define IDC_STATIC_EDIT_INFO            1052
 #define IDC_BTN_EDIT_ADD_PDF            1053
@@ -109,9 +112,9 @@
 // 
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
-#define _APS_NEXT_RESOURCE_VALUE        133
+#define _APS_NEXT_RESOURCE_VALUE        135
 #define _APS_NEXT_COMMAND_VALUE         32792
-#define _APS_NEXT_CONTROL_VALUE         1077
+#define _APS_NEXT_CONTROL_VALUE         1078
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif
