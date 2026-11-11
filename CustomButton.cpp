@@ -5,6 +5,10 @@ IMPLEMENT_DYNAMIC(CCustomButton, CButton)
 
 CCustomButton::CCustomButton()
 	: m_iconGlyph(0)
+	, m_iconResourceId(0)
+	, m_iconSize(18)
+	, m_pIconBitmap(nullptr)
+	, m_pIconStream(nullptr)
 	, m_windowControlStyle(false)
 	, m_closeWindowControl(false)
 	, m_normalColor(RGB(255, 255, 255))
@@ -19,6 +23,7 @@ CCustomButton::CCustomButton()
 
 CCustomButton::~CCustomButton()
 {
+	clearIconBitmap();
 	if (m_buttonFont.GetSafeHandle())
 		m_buttonFont.DeleteObject();
 	if (m_iconFont.GetSafeHandle())
@@ -58,9 +63,122 @@ void CCustomButton::SetCornerRadius(int radius)
 
 void CCustomButton::SetIconGlyph(WCHAR glyph)
 {
+	if (m_iconResourceId)
+	{
+		m_iconResourceId = 0;
+		clearIconBitmap();
+	}
 	m_iconGlyph = glyph;
 	if (GetSafeHwnd())
 		Invalidate(FALSE);
+}
+
+void CCustomButton::SetIconImage(UINT resourceId, int iconSize)
+{
+	if (m_iconResourceId != resourceId)
+		clearIconBitmap();
+	m_iconResourceId = resourceId;
+	m_iconSize = iconSize > 0 ? iconSize : 18;
+	m_iconGlyph = 0;
+	if (m_iconResourceId)
+		ensureIconBitmap();
+	if (GetSafeHwnd())
+		Invalidate(FALSE);
+}
+
+Gdiplus::Bitmap* CCustomButton::ensureIconBitmap()
+{
+	if (m_pIconBitmap || !m_iconResourceId)
+		return m_pIconBitmap;
+
+	HINSTANCE hInstance = AfxGetInstanceHandle();
+	HRSRC hRes = ::FindResource(hInstance, MAKEINTRESOURCE(m_iconResourceId), RT_RCDATA);
+	if (!hRes)
+		return nullptr;
+
+	DWORD size = ::SizeofResource(hInstance, hRes);
+	HGLOBAL hMem = ::LoadResource(hInstance, hRes);
+	if (!hMem || size == 0)
+		return nullptr;
+
+	const void* pData = ::LockResource(hMem);
+	if (!pData)
+		return nullptr;
+
+	IStream* pStream = ::SHCreateMemStream(
+		static_cast<const BYTE*>(pData), static_cast<UINT>(size));
+	if (!pStream)
+		return nullptr;
+
+	Gdiplus::Bitmap* pBitmap = Gdiplus::Bitmap::FromStream(pStream, FALSE);
+	if (!pBitmap || pBitmap->GetLastStatus() != Gdiplus::Ok ||
+		pBitmap->GetWidth() == 0 || pBitmap->GetHeight() == 0)
+	{
+		delete pBitmap;
+		pStream->Release();
+		return nullptr;
+	}
+
+	m_pIconBitmap = pBitmap;
+	m_pIconStream = pStream;
+	return m_pIconBitmap;
+}
+
+void CCustomButton::clearIconBitmap()
+{
+	if (m_pIconBitmap)
+	{
+		delete m_pIconBitmap;
+		m_pIconBitmap = nullptr;
+	}
+	if (m_pIconStream)
+	{
+		m_pIconStream->Release();
+		m_pIconStream = nullptr;
+	}
+}
+
+bool CCustomButton::DrawIconImage(CDC* pDC, const CRect& rect, bool disabled, bool active)
+{
+	Gdiplus::Bitmap* pBitmap = ensureIconBitmap();
+	if (!pBitmap)
+		return false;
+
+	int side = min(m_iconSize, min(rect.Width(), rect.Height()));
+	if (side <= 0)
+		return false;
+
+	COLORREF iconColor = disabled ? RGB(163, 173, 185) : m_textColor;
+	if (!disabled && active)
+		iconColor = RGB(32, 100, 185);
+
+	// 源图为纯黑透明图标，用颜色矩阵把它整体替换为目标颜色，保留 alpha 通道。
+	Gdiplus::ColorMatrix matrix = {};
+	matrix.m[3][3] = 1.0f;
+	matrix.m[4][0] = GetRValue(iconColor) / 255.0f;
+	matrix.m[4][1] = GetGValue(iconColor) / 255.0f;
+	matrix.m[4][2] = GetBValue(iconColor) / 255.0f;
+	matrix.m[4][4] = 1.0f;
+
+	Gdiplus::ImageAttributes attributes;
+	attributes.SetColorMatrix(&matrix, Gdiplus::ColorMatrixFlagsDefault,
+		Gdiplus::ColorAdjustTypeBitmap);
+
+	Gdiplus::RectF destRect(
+		(Gdiplus::REAL)(rect.left + (rect.Width() - side) / 2),
+		(Gdiplus::REAL)(rect.top + (rect.Height() - side) / 2),
+		(Gdiplus::REAL)side,
+		(Gdiplus::REAL)side);
+
+	Gdiplus::Graphics graphics(pDC->GetSafeHdc());
+	graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+	graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+	graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+	graphics.DrawImage(pBitmap, destRect, 0, 0,
+		(Gdiplus::REAL)pBitmap->GetWidth(), (Gdiplus::REAL)pBitmap->GetHeight(),
+		Gdiplus::UnitPixel, &attributes);
+
+	return true;
 }
 
 void CCustomButton::SetWindowControlStyle(bool closeButton)
@@ -165,6 +283,9 @@ void CCustomButton::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 	CString strText;
 	GetWindowText(strText);
 
+	// PNG 图标优先于字体图标；失败时自动回退到文字。
+	const bool useImageIcon = DrawIconImage(&bufferDC, localRect, bDisabled, m_bHover || bPressed);
+
 	CFont* pIconFont = m_windowControlStyle ? &m_windowIconFont : &m_iconFont;
 	bool useIcon = m_iconGlyph && pIconFont->GetSafeHandle();
 	if (useIcon)
@@ -188,7 +309,7 @@ void CCustomButton::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 		}
 		bufferDC.SelectObject(pOldFont);
 	}
-	if (!useIcon && !strText.IsEmpty())
+	if (!useIcon && !useImageIcon && !strText.IsEmpty())
 	{
 		CFont* pFont = m_iconGlyph ? &m_buttonFont : GetFont();
 		CFont* pOldFont = bufferDC.SelectObject(pFont ? pFont : &m_buttonFont);

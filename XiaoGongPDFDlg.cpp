@@ -4342,7 +4342,7 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_pageTotal.SetFont(&m_buttonFont);
 	m_editSearch.SetFont(&m_buttonFont);
 
-	// 图标由 Windows 系统字体提供，名称在悬停时显示。
+	// 大部分图标由 Windows 系统字体提供，左右旋转使用内置 PNG 图标。
 	m_btnFirst.SetWindowText(_T("首页"));
 	m_btnOpen.SetWindowText(_T("打开"));
 	m_btnLast.SetWindowText(_T("末页"));
@@ -4357,8 +4357,8 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_btnFirst.SetIconGlyph(0xE892);
 	m_btnLast.SetIconGlyph(0xE893);
 	m_btnFullscreen.SetIconGlyph(0xE740);
-	m_btnRotateLeft.SetIconGlyph(0xE7A7);
-	m_btnRotateRight.SetIconGlyph(0xE7A6);
+	m_btnRotateLeft.SetIconImage(IDR_ROTATE_LEFT_PNG);
+	m_btnRotateRight.SetIconImage(IDR_ROTATE_RIGHT_PNG);
 	m_btnEdit.SetIconGlyph(0xE70F);
 	m_btnSelectText.SetIconGlyph(0xE933);
 	m_btnFind.SetIconGlyph(0xE721);

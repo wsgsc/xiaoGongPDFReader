@@ -1,6 +1,7 @@
 #pragma once
 #include <afxwin.h>
 #include <afxcmn.h>
+#include <gdiplus.h>
 
 // 工具栏圆角按钮
 class CCustomButton : public CButton
@@ -16,6 +17,7 @@ public:
 	void SetTextColor(COLORREF textColor);
 	void SetCornerRadius(int radius);
 	void SetIconGlyph(WCHAR glyph);
+	void SetIconImage(UINT resourceId, int iconSize = 18);
 	void SetWindowControlStyle(bool closeButton = false);
 	void SetToolTipText(LPCTSTR text);
 	virtual BOOL PreTranslateMessage(MSG* pMsg);
@@ -35,6 +37,10 @@ private:
 	CFont m_windowIconFont;
 	CToolTipCtrl m_toolTip;
 	WCHAR m_iconGlyph;
+	UINT m_iconResourceId;
+	int m_iconSize;
+	Gdiplus::Bitmap* m_pIconBitmap;
+	IStream* m_pIconStream;
 	bool m_windowControlStyle;
 	bool m_closeWindowControl;
 	COLORREF m_normalColor;      // 正常状态颜色
@@ -47,4 +53,7 @@ private:
 	CFont m_buttonFont;          // 按钮字体
 
 	void DrawRoundRect(CDC* pDC, CRect rect, int radius, COLORREF fillColor, COLORREF borderColor);
+	void clearIconBitmap();
+	Gdiplus::Bitmap* ensureIconBitmap();
+	bool DrawIconImage(CDC* pDC, const CRect& rect, bool disabled, bool active);
 };
