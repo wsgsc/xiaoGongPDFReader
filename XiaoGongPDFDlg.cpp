@@ -3473,7 +3473,10 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 
 		m_btnMore.MoveWindow(0, 0, 46, TAB_HEIGHT);
 		if (m_tabCtrl.GetSafeHwnd())
+		{
 			m_tabCtrl.MoveWindow(46, 0, max(1, cx - 46 - 138), TAB_HEIGHT);
+			UpdateTabWidth();
+		}
 		m_btnMinimize.MoveWindow(cx - 138, 0, 46, TAB_HEIGHT);
 		m_btnMaximize.MoveWindow(cx - 92, 0, 46, TAB_HEIGHT);
 		m_btnCloseWindow.MoveWindow(cx - 46, 0, 46, TAB_HEIGHT);
@@ -5443,8 +5446,7 @@ void CXiaoGongPDFDlg::InitializeTabControl()
 	// 添加TCS_FIXEDWIDTH样式使所有标签页宽度一致
 	m_tabCtrl.ModifyStyle(0, TCS_SCROLLOPPOSITE | TCS_TOOLTIPS | TCS_FIXEDWIDTH);
 
-	// 文件名在较宽的标签中保持可读
-	m_tabCtrl.SendMessage(TCM_SETITEMSIZE, 0, MAKELPARAM(218, 42));
+	UpdateTabWidth();
 
 #ifdef _DEBUG
 	TRACE(_T("现代化标签页控件初始化完成\n"));
@@ -5452,6 +5454,22 @@ void CXiaoGongPDFDlg::InitializeTabControl()
 
 	// 确保标签页可见
 	m_tabCtrl.ShowWindow(SW_SHOW);
+}
+
+void CXiaoGongPDFDlg::UpdateTabWidth()
+{
+	if (!m_tabCtrl.GetSafeHwnd())
+		return;
+
+	CRect rect;
+	m_tabCtrl.GetClientRect(&rect);
+	const int tabCount = max(1, m_tabCtrl.GetItemCount());
+	const int availableWidth = rect.Width() / tabCount;
+	const bool compact = availableWidth < 120 ||
+		(tabCount >= 7 && availableWidth < 218);
+	const int tabWidth = compact ? 60 : min(218, availableWidth);
+	m_tabCtrl.SendMessage(TCM_SETITEMSIZE, 0, MAKELPARAM(tabWidth, 42));
+	m_tabCtrl.Invalidate(FALSE);
 }
 
 CPDFDocument* CXiaoGongPDFDlg::GetActiveDocument()
@@ -5819,6 +5837,7 @@ void CXiaoGongPDFDlg::CloseDocument(int index)
 
 	// 删除标签页
 	m_tabCtrl.DeleteItem(index);
+	UpdateTabWidth();
 
 	// 如果关闭的是当前文档
 	if (isActiveDocument)
@@ -9782,15 +9801,9 @@ LRESULT CXiaoGongPDFDlg::OnPDFLoadComplete(WPARAM wParam, LPARAM lParam)
 			}
 		}
 
-		// 截断过长的文件名
-		const int MAX_TAB_LENGTH = 12;
-		if (tabTitle.GetLength() > MAX_TAB_LENGTH)
-		{
-			tabTitle = tabTitle.Left(MAX_TAB_LENGTH - 3) + _T("...");
-		}
-
 		tci.pszText = (LPTSTR)(LPCTSTR)tabTitle;
 		m_tabCtrl.InsertItem(newIndex, &tci);
+		UpdateTabWidth();
 		if (!pParams->restoringSession || m_activeDocIndex < 0)
 			m_tabCtrl.SetCurSel(newIndex);
 		else

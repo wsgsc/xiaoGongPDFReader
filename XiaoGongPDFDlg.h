@@ -574,6 +574,7 @@ protected:
 
     // 多文档标签页管理
     void InitializeTabControl();  // 初始化标签页控件
+    void UpdateTabWidth();  // 根据可用宽度和文档数量调整标签宽度
     bool OpenPDFInNewTab(const CString& filePath, bool restoringSession = false);
     void SwitchToDocument(int index);  // 切换到指定文档
     void CloseDocument(int index);  // 关闭指定文档

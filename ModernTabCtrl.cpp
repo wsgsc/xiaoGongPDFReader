@@ -30,7 +30,7 @@ CModernTabCtrl::CModernTabCtrl()
 {
 	// 创建标准字体
 	VERIFY(m_font.CreateFont(
-		24,                        // 字体高度
+		16,                        // 字体高度
 		0,                         // 字体宽度
 		0,                         // 文本倾斜角度
 		0,                         // 基线倾斜角度
@@ -44,6 +44,10 @@ CModernTabCtrl::CModernTabCtrl()
 		DEFAULT_QUALITY,           // 输出质量
 		DEFAULT_PITCH | FF_SWISS,  // 字体间距和族
 		_T("微软雅黑")));            // 字体名称
+	VERIFY(m_compactFont.CreateFont(
+		14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, 0,
+		DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+		DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, _T("微软雅黑")));
 
 }
 
@@ -55,6 +59,10 @@ CModernTabCtrl::~CModernTabCtrl()
 	{
 		m_font.DeleteObject();
 	}
+	if (m_compactFont.GetSafeHandle())
+	{
+		m_compactFont.DeleteObject();
+	}
 }
 
 void CModernTabCtrl::OnDestroy()
@@ -63,6 +71,10 @@ void CModernTabCtrl::OnDestroy()
 	if (m_font.GetSafeHandle())
 	{
 		m_font.DeleteObject();
+	}
+	if (m_compactFont.GetSafeHandle())
+	{
+		m_compactFont.DeleteObject();
 	}
 
 	CTabCtrl::OnDestroy();
@@ -216,44 +228,41 @@ void CModernTabCtrl::DrawTab(CDC* pDC, int index, CRect rect, BOOL isSelected, B
 	tci.cchTextMax = 256;
 	GetItem(index, &tci);
 
+	const bool compact = GetTabRect(index).Width() < 124;
 	// 计算关闭按钮区域（如果启用）
 	CRect textRect = rect;
-	textRect.left += 38;
+	textRect.left += compact ? 14 : 32;
 	if (m_bCloseButtonEnabled)
 	{
-		textRect.right -= 20; // 为关闭按钮留出空间
+		textRect.right = GetCloseButtonRect(index).left - (compact ? 1 : 5);
 	}
 
 	// 绘制文本
-	CRect iconRect(rect.left + 14, rect.top + (rect.Height() - 16) / 2,
-		rect.left + 29, rect.top + (rect.Height() - 16) / 2 + 16);
+	const int iconSize = compact ? 10 : 16;
+	const int iconLeft = rect.left + (compact ? 2 : 8);
+	CRect iconRect(iconLeft, rect.top + (rect.Height() - iconSize) / 2,
+		iconLeft + iconSize, rect.top + (rect.Height() + iconSize) / 2);
 	pDC->FillSolidRect(iconRect, RGB(218, 48, 54));
-	CFont* pOldFont = pDC->SelectObject(&m_font);
+	CFont* pOldFont = pDC->SelectObject(compact ? &m_compactFont : &m_font);
 	pDC->SetBkMode(TRANSPARENT);
 	pDC->SetTextColor(RGB(255, 255, 255));
 	pDC->DrawText(_T("P"), iconRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 	pDC->SetTextColor(RGB(35, 45, 57));
 	pDC->SetBkMode(TRANSPARENT);
 
-	// 截断过长的文本
 	CString displayText = szText;
-	CSize textSize = pDC->GetTextExtent(displayText);
-	if (textSize.cx > textRect.Width() - 10)
+	if (compact)
+		displayText = displayText.Left(2);
+	else
 	{
-		// 逐字符截断直到适合
-		int len = displayText.GetLength();
-		while (len > 3 && pDC->GetTextExtent(displayText.Left(len) + _T("...")).cx > textRect.Width() - 10)
-		{
-			len--;
-		}
-		displayText = displayText.Left(len) + _T("...");
+		while (!displayText.IsEmpty() && pDC->GetTextExtent(displayText).cx > textRect.Width())
+			displayText = displayText.Left(displayText.GetLength() - 1);
 	}
-
-	pDC->DrawText(displayText, textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+	pDC->DrawText(displayText, textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 	pDC->SelectObject(pOldFont);
 
 	// 绘制关闭按钮
-	if (m_bCloseButtonEnabled)
+	if (IsCloseButtonVisible(index))
 	{
 		CRect closeRect = GetCloseButtonRect(index);
 		BOOL isCloseHovered = (index == m_closeHoverIndex);
@@ -277,7 +286,7 @@ void CModernTabCtrl::DrawCloseButton(CDC* pDC, CRect rect, BOOL isHovered)
 	pen.CreatePen(PS_SOLID, 2, isHovered ? RGB(255, 255, 255) : RGB(100, 100, 100));
 	CPen* pOldPen = pDC->SelectObject(&pen);
 
-	int margin = 4;
+	int margin = rect.Width() <= 10 ? 2 : 4;
 	pDC->MoveTo(rect.left + margin, rect.top + margin);
 	pDC->LineTo(rect.right - margin, rect.bottom - margin);
 	pDC->MoveTo(rect.right - margin, rect.top + margin);
@@ -290,6 +299,11 @@ void CModernTabCtrl::DrawCloseButton(CDC* pDC, CRect rect, BOOL isHovered)
 CRect CModernTabCtrl::GetCloseButtonRect(int index)
 {
 	CRect tabRect = GetTabRect(index);
+	if (tabRect.Width() < 124)
+	{
+		const int top = tabRect.top + (tabRect.Height() - 10) / 2;
+		return CRect(tabRect.right - 14, top, tabRect.right - 4, top + 10);
+	}
 
 	// 关闭按钮位于标签右侧
 	CRect closeRect;
@@ -299,6 +313,11 @@ CRect CModernTabCtrl::GetCloseButtonRect(int index)
 	closeRect.bottom = closeRect.top + 16;
 
 	return closeRect;
+}
+
+BOOL CModernTabCtrl::IsCloseButtonVisible(int index)
+{
+	return m_bCloseButtonEnabled && (index == GetCurSel() || index == m_hoverIndex);
 }
 
 CRect CModernTabCtrl::GetTabRect(int index)
@@ -375,7 +394,7 @@ void CModernTabCtrl::OnMouseMove(UINT nFlags, CPoint point)
 			m_hoverIndex = i;
 
 			// 检查是否在关闭按钮上
-			if (m_bCloseButtonEnabled)
+			if (IsCloseButtonVisible(i))
 			{
 				CRect closeRect = GetCloseButtonRect(i);
 				if (closeRect.PtInRect(point))
@@ -422,7 +441,7 @@ void CModernTabCtrl::OnLButtonDown(UINT nFlags, CPoint point)
 	{
 		for (int i = 0; i < GetItemCount(); ++i)
 		{
-			if (GetCloseButtonRect(i).PtInRect(point))
+			if (IsCloseButtonVisible(i) && GetCloseButtonRect(i).PtInRect(point))
 			{
 				closeIndex = i;
 				break;

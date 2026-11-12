@@ -37,6 +37,7 @@ private:
 	// 绘制相关
 	void DrawTab(CDC* pDC, int index, CRect rect, BOOL isSelected, BOOL isHovered);
 	void DrawCloseButton(CDC* pDC, CRect rect, BOOL isHovered);
+	BOOL IsCloseButtonVisible(int index);
 	CRect GetCloseButtonRect(int index);
 	CRect GetTabRect(int index);
 
@@ -59,4 +60,5 @@ private:
 
 	// GDI对象
 	CFont m_font;              // 标签字体
+	CFont m_compactFont;       // 紧凑标签字体
 };
