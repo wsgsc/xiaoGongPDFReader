@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <commctrl.h>
 #include "ModernTabCtrl.h"
 
 IMPLEMENT_DYNAMIC(CModernTabCtrl, CTabCtrl)
@@ -6,6 +7,7 @@ IMPLEMENT_DYNAMIC(CModernTabCtrl, CTabCtrl)
 BEGIN_MESSAGE_MAP(CModernTabCtrl, CTabCtrl)
 	ON_WM_PAINT()
 	ON_WM_MOUSEMOVE()
+	ON_WM_MOUSEWHEEL()
 	ON_WM_MOUSELEAVE()
 	ON_WM_LBUTTONDOWN()
 	ON_WM_LBUTTONUP()
@@ -111,6 +113,16 @@ void CModernTabCtrl::SetColors(COLORREF normal, COLORREF hover, COLORREF selecte
 		Invalidate();
 }
 
+void CModernTabCtrl::HideOverflowButtons()
+{
+	if (!GetSafeHwnd())
+		return;
+
+	HWND hButtons = ::FindWindowEx(GetSafeHwnd(), nullptr, UPDOWN_CLASS, nullptr);
+	if (hButtons && ::IsWindowVisible(hButtons))
+		::ShowWindow(hButtons, SW_HIDE);
+}
+
 BOOL CModernTabCtrl::OnEraseBkgnd(CDC* pDC)
 {
 	// 自己处理背景绘制，避免闪烁
@@ -119,6 +131,7 @@ BOOL CModernTabCtrl::OnEraseBkgnd(CDC* pDC)
 
 void CModernTabCtrl::OnPaint()
 {
+	HideOverflowButtons();
 	CPaintDC dcPaint(this);
 
 	CRect clientRect;
@@ -413,6 +426,32 @@ void CModernTabCtrl::OnMouseMove(UINT nFlags, CPoint point)
 	}
 
 	CTabCtrl::OnMouseMove(nFlags, point);
+}
+
+BOOL CModernTabCtrl::OnMouseWheel(UINT nFlags, short zDelta, CPoint point)
+{
+	CPoint clientPoint = point;
+	ScreenToClient(&clientPoint);
+	CRect clientRect;
+	GetClientRect(&clientRect);
+	if (!clientRect.PtInRect(clientPoint))
+		return CTabCtrl::OnMouseWheel(nFlags, zDelta, point);
+
+	const int current = GetCurSel();
+	const int next = current + (zDelta > 0 ? -1 : 1);
+	if (current < 0 || next < 0 || next >= GetItemCount())
+		return TRUE;
+
+	SetCurSel(next);
+	HideOverflowButtons();
+	Invalidate(FALSE);
+	NMHDR notification = {};
+	notification.hwndFrom = GetSafeHwnd();
+	notification.idFrom = GetDlgCtrlID();
+	notification.code = TCN_SELCHANGE;
+	GetParent()->SendMessage(WM_NOTIFY, notification.idFrom,
+		reinterpret_cast<LPARAM>(&notification));
+	return TRUE;
 }
 
 void CModernTabCtrl::OnMouseLeave()

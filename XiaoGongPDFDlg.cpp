@@ -5442,8 +5442,7 @@ void CXiaoGongPDFDlg::InitializeTabControl()
 	m_tabCtrl.SetTabHeight(42);
 	m_tabCtrl.SetColors(RGB(240, 244, 248), RGB(225, 234, 244), RGB(255, 255, 255));
 
-	// 添加滚动按钮样式和工具提示（ModernTabCtrl也支持这些）
-	// 添加TCS_FIXEDWIDTH样式使所有标签页宽度一致
+	// 所有标签页使用相同宽度
 	m_tabCtrl.ModifyStyle(0, TCS_SCROLLOPPOSITE | TCS_TOOLTIPS | TCS_FIXEDWIDTH);
 
 	UpdateTabWidth();
@@ -5465,10 +5464,9 @@ void CXiaoGongPDFDlg::UpdateTabWidth()
 	m_tabCtrl.GetClientRect(&rect);
 	const int tabCount = max(1, m_tabCtrl.GetItemCount());
 	const int availableWidth = rect.Width() / tabCount;
-	const bool compact = availableWidth < 120 ||
-		(tabCount >= 7 && availableWidth < 218);
-	const int tabWidth = compact ? 60 : min(218, availableWidth);
+	const int tabWidth = tabCount > 4 ? 60 : min(218, max(60, availableWidth));
 	m_tabCtrl.SendMessage(TCM_SETITEMSIZE, 0, MAKELPARAM(tabWidth, 42));
+	m_tabCtrl.HideOverflowButtons();
 	m_tabCtrl.Invalidate(FALSE);
 }
 

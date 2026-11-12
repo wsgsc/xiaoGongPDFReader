@@ -20,12 +20,14 @@ public:
 	void EnableCloseButton(BOOL bEnable = TRUE);  // 启用关闭按钮
 	void SetTabHeight(int height);                // 设置标签页高度
 	void SetColors(COLORREF normal, COLORREF hover, COLORREF selected);  // 设置颜色
+	void HideOverflowButtons();
 
 protected:
 	DECLARE_MESSAGE_MAP()
 
 	afx_msg void OnPaint();
 	afx_msg void OnMouseMove(UINT nFlags, CPoint point);
+	afx_msg BOOL OnMouseWheel(UINT nFlags, short zDelta, CPoint point);
 	afx_msg void OnMouseLeave();
 	afx_msg void OnLButtonDown(UINT nFlags, CPoint point);
 	afx_msg void OnLButtonUp(UINT nFlags, CPoint point);
