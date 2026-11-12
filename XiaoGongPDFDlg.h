@@ -64,7 +64,9 @@ private:
 class CPDFViewCtrl : public CStatic
 {
 public:
-	CPDFViewCtrl() : m_pParentDlg(nullptr), m_hDisplayBitmap(nullptr), m_readingMode(READING_NORMAL) {}
+	CPDFViewCtrl() : m_pParentDlg(nullptr), m_hDisplayBitmap(nullptr), m_readingMode(READING_NORMAL),
+		m_pWelcomeBitmap(nullptr), m_pWelcomeStream(nullptr) {}
+	~CPDFViewCtrl() override;
 	void SetParentDlg(CXiaoGongPDFDlg* pDlg) { m_pParentDlg = pDlg; }
 	void SetReadingMode(ReadingMode mode) { m_readingMode = mode; if (GetSafeHwnd()) Invalidate(FALSE); }
 	void SetDisplayBitmap(HBITMAP hBitmap);  // ★★★ 替代 SetBitmap，避免内部白色背景闪烁
@@ -73,7 +75,10 @@ protected:
 	CXiaoGongPDFDlg* m_pParentDlg;
 	HBITMAP m_hDisplayBitmap;  // ★★★ 直接持有位图句柄，不经过 CStatic::SetBitmap
 	ReadingMode m_readingMode;
+	Gdiplus::Bitmap* m_pWelcomeBitmap;
+	IStream* m_pWelcomeStream;
 
+	void DrawWelcomeImage(CDC& dc, const CRect& clientRect);
 	void ForwardMouseMessage(UINT message, UINT nFlags, CPoint point);
 	afx_msg void OnLButtonDown(UINT nFlags, CPoint point);
 	afx_msg void OnLButtonUp(UINT nFlags, CPoint point);

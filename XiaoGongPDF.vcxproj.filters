@@ -104,5 +104,8 @@
     <Image Include="rotate-right.png">
       <Filter>资源文件</Filter>
     </Image>
+    <Image Include="welcome.png">
+      <Filter>资源文件</Filter>
+    </Image>
   </ItemGroup>
 </Project>

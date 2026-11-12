@@ -13,6 +13,7 @@
 #define IDS_APP_NAME                    131
 #define IDR_ROTATE_LEFT_PNG             133
 #define IDR_ROTATE_RIGHT_PNG            134
+#define IDR_WELCOME_PNG                 135
 #define IDC_LIST2                       1001
 #define IDC_THUMBNAIL_LIST              1001
 #define IDC_PDF_VIEW                    1002
@@ -115,7 +116,7 @@
 // 
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
-#define _APS_NEXT_RESOURCE_VALUE        135
+#define _APS_NEXT_RESOURCE_VALUE        136
 #define _APS_NEXT_COMMAND_VALUE         32795
 #define _APS_NEXT_CONTROL_VALUE         1078
 #define _APS_NEXT_SYMED_VALUE           101

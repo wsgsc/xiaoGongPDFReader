@@ -457,6 +457,57 @@ BEGIN_MESSAGE_MAP(CPDFViewCtrl, CStatic)
 	ON_WM_PAINT()
 END_MESSAGE_MAP()
 
+CPDFViewCtrl::~CPDFViewCtrl()
+{
+	delete m_pWelcomeBitmap;
+	if (m_pWelcomeStream)
+		m_pWelcomeStream->Release();
+}
+
+void CPDFViewCtrl::DrawWelcomeImage(CDC& dc, const CRect& clientRect)
+{
+	if (!m_pWelcomeBitmap)
+	{
+		HINSTANCE hInstance = AfxGetInstanceHandle();
+		HRSRC hResource = ::FindResource(hInstance, MAKEINTRESOURCE(IDR_WELCOME_PNG), RT_RCDATA);
+		if (!hResource)
+			return;
+		HGLOBAL hData = ::LoadResource(hInstance, hResource);
+		DWORD dataSize = ::SizeofResource(hInstance, hResource);
+		const BYTE* pData = hData ? static_cast<const BYTE*>(::LockResource(hData)) : nullptr;
+		if (!pData || dataSize == 0)
+			return;
+		IStream* pStream = ::SHCreateMemStream(pData, dataSize);
+		if (!pStream)
+			return;
+		Gdiplus::Bitmap* pBitmap = Gdiplus::Bitmap::FromStream(pStream, FALSE);
+		if (!pBitmap || pBitmap->GetLastStatus() != Gdiplus::Ok ||
+			pBitmap->GetWidth() == 0 || pBitmap->GetHeight() == 0)
+		{
+			delete pBitmap;
+			pStream->Release();
+			return;
+		}
+		m_pWelcomeBitmap = pBitmap;
+		m_pWelcomeStream = pStream;
+	}
+
+	const int imageWidth = static_cast<int>(m_pWelcomeBitmap->GetWidth());
+	const int imageHeight = static_cast<int>(m_pWelcomeBitmap->GetHeight());
+	const double scale = min(1.0, min(clientRect.Width() * 0.9 / imageWidth,
+		clientRect.Height() * 0.9 / imageHeight));
+	const int drawWidth = static_cast<int>(imageWidth * scale);
+	const int drawHeight = static_cast<int>(imageHeight * scale);
+	if (drawWidth <= 0 || drawHeight <= 0)
+		return;
+
+	Gdiplus::Graphics graphics(dc.GetSafeHdc());
+	graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+	graphics.DrawImage(m_pWelcomeBitmap,
+		Gdiplus::Rect((clientRect.Width() - drawWidth) / 2,
+			(clientRect.Height() - drawHeight) / 2, drawWidth, drawHeight));
+}
+
 // ★★★ SetDisplayBitmap：只存句柄 + 触发无擦除重绘，完全绕开 CStatic::STM_SETIMAGE 内部的白色背景
 void CPDFViewCtrl::SetDisplayBitmap(HBITMAP hBitmap)
 {
@@ -544,6 +595,8 @@ void CPDFViewCtrl::OnPaint()
 		// 没有位图，填充背景色
 		dc.FillSolidRect(&clientRect, m_readingMode == READING_NIGHT ?
 			RGB(30, 25, 20) : PDF_VIEW_BACKGROUND);
+		if (m_pParentDlg && m_pParentDlg->m_documents.empty())
+			DrawWelcomeImage(dc, clientRect);
 		return;
 	}
 

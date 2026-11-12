@@ -2,3 +2,4 @@
 
 IDR_ROTATE_LEFT_PNG RCDATA "rotate-left.png"
 IDR_ROTATE_RIGHT_PNG RCDATA "rotate-right.png"
+IDR_WELCOME_PNG RCDATA "welcome.png"
