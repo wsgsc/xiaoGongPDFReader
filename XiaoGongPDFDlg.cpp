@@ -3604,12 +3604,15 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 
 		// PDF视图，为状态栏留出空间
 		const int scrollBarSize = 16;
+		const bool showHorizontalBar = m_doc && m_pdfHorizontalScrollBar.GetSafeHwnd() &&
+			m_pdfHorizontalScrollBar.IsWindowVisible();
+		const int horizontalBarHeight = showHorizontalBar ? scrollBarSize : 0;
 		m_pdfView.MoveWindow(pdfX, contentY, max(1, pdfWidth - scrollBarSize),
-			max(1, contentHeight - scrollBarSize));
+			max(1, contentHeight - horizontalBarHeight));
 		if (m_pdfVerticalScrollBar.GetSafeHwnd())
 		{
 			m_pdfVerticalScrollBar.MoveWindow(pdfX + pdfWidth - scrollBarSize,
-				contentY, scrollBarSize, max(1, contentHeight - scrollBarSize));
+				contentY, scrollBarSize, max(1, contentHeight - horizontalBarHeight));
 			if (!m_doc)
 				m_pdfVerticalScrollBar.ShowWindow(SW_HIDE);
 		}
@@ -8703,6 +8706,28 @@ void CXiaoGongPDFDlg::UpdateScrollBar()
 	}
 	m_scrollPositionH = max(0, min(m_scrollPositionH,
 		max(0, horizontalContentWidth - viewRect.Width())));
+	const bool showHorizontalBar = m_doc && horizontalContentWidth > viewRect.Width();
+	if (m_pdfHorizontalScrollBar.GetSafeHwnd() &&
+		m_pdfHorizontalScrollBar.IsWindowVisible() != showHorizontalBar &&
+		m_statusBar.GetSafeHwnd())
+	{
+		CRect pdfRect, statusRect;
+		m_pdfView.GetWindowRect(&pdfRect);
+		m_statusBar.GetWindowRect(&statusRect);
+		ScreenToClient(&pdfRect);
+		ScreenToClient(&statusRect);
+		const int viewHeight = max(1, statusRect.top - pdfRect.top - (showHorizontalBar ? 16 : 0));
+		m_pdfView.SetWindowPos(nullptr, 0, 0, pdfRect.Width(), viewHeight,
+			SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+		if (m_pdfVerticalScrollBar.GetSafeHwnd())
+		{
+			m_pdfVerticalScrollBar.SetWindowPos(nullptr, 0, 0, 16, viewHeight,
+				SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+		}
+		m_pdfView.GetClientRect(&viewRect);
+		m_scrollPosition = max(0, min(m_scrollPosition,
+			max(0, m_totalScrollHeight - viewRect.Height())));
+	}
 	if (m_pdfVerticalScrollBar.GetSafeHwnd())
 	{
 		m_pdfVerticalScrollBar.SetRange(m_totalScrollHeight, viewRect.Height(), m_scrollPosition);
@@ -8712,13 +8737,11 @@ void CXiaoGongPDFDlg::UpdateScrollBar()
 	if (m_pdfHorizontalScrollBar.GetSafeHwnd())
 	{
 		m_pdfHorizontalScrollBar.SetRange(horizontalContentWidth, viewRect.Width(), m_scrollPositionH);
-		m_pdfHorizontalScrollBar.ShowWindow(m_doc && horizontalContentWidth > viewRect.Width() ?
+		m_pdfHorizontalScrollBar.ShowWindow(showHorizontalBar ?
 			SW_SHOW : SW_HIDE);
 	}
 	if (m_pdfScrollCorner.GetSafeHwnd())
-		m_pdfScrollCorner.ShowWindow(m_doc &&
-			(m_totalScrollHeight > viewRect.Height() || horizontalContentWidth > viewRect.Width()) ?
-			SW_SHOW : SW_HIDE);
+		m_pdfScrollCorner.ShowWindow(showHorizontalBar ? SW_SHOW : SW_HIDE);
 }
 
 // 获取指定位置的页面索引
