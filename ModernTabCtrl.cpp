@@ -204,7 +204,9 @@ void CModernTabCtrl::DrawTab(CDC* pDC, int index, CRect rect, BOOL isSelected, B
 
 	// 绘制圆角矩形背景
 	CPen pen;
-	pen.CreatePen(PS_SOLID, 1, isSelected ? RGB(216, 224, 233) : bgColor);
+	const bool dark = GetRValue(m_normalColor) < 100;
+	pen.CreatePen(PS_SOLID, 1, isSelected ?
+		(dark ? RGB(73, 79, 85) : RGB(216, 224, 233)) : bgColor);
 	CPen* pOldPen = pDC->SelectObject(&pen);
 
 	CBrush brush;
@@ -260,7 +262,7 @@ void CModernTabCtrl::DrawTab(CDC* pDC, int index, CRect rect, BOOL isSelected, B
 	pDC->SetBkMode(TRANSPARENT);
 	pDC->SetTextColor(RGB(255, 255, 255));
 	pDC->DrawText(_T("P"), iconRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-	pDC->SetTextColor(RGB(35, 45, 57));
+	pDC->SetTextColor(dark ? RGB(226, 231, 235) : RGB(35, 45, 57));
 	pDC->SetBkMode(TRANSPARENT);
 
 	CString displayText = szText;
@@ -296,7 +298,8 @@ void CModernTabCtrl::DrawCloseButton(CDC* pDC, CRect rect, BOOL isHovered)
 
 	// 绘制 × 符号
 	CPen pen;
-	pen.CreatePen(PS_SOLID, 2, isHovered ? RGB(255, 255, 255) : RGB(100, 100, 100));
+	pen.CreatePen(PS_SOLID, 2, isHovered ? RGB(255, 255, 255) :
+		(GetRValue(m_normalColor) < 100 ? RGB(190, 198, 205) : RGB(100, 100, 100)));
 	CPen* pOldPen = pDC->SelectObject(&pen);
 
 	int margin = rect.Width() <= 10 ? 2 : 4;

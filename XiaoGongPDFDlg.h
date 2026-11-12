@@ -24,12 +24,15 @@
 // 前向声明
 class CXiaoGongPDFDlg;
 
+enum ReadingMode { READING_NORMAL, READING_NIGHT, READING_EYE };
+
 class CPDFScrollBar : public CWnd
 {
 public:
 	explicit CPDFScrollBar(bool vertical = true);
 	void SetParentDlg(CXiaoGongPDFDlg* pDlg) { m_pParentDlg = pDlg; }
 	void SetRange(int contentLength, int pageLength, int position);
+	void SetDark(bool dark) { m_dark = dark; if (GetSafeHwnd()) Invalidate(FALSE); }
 
 protected:
 	afx_msg void OnPaint();
@@ -51,6 +54,7 @@ private:
 	int m_position;
 	int m_dragOffset;
 	bool m_dragging;
+	bool m_dark = false;
 };
 
 // 搜索匹配项结构（从 SearchTypes.h 包含）
@@ -60,13 +64,15 @@ private:
 class CPDFViewCtrl : public CStatic
 {
 public:
-	CPDFViewCtrl() : m_pParentDlg(nullptr), m_hDisplayBitmap(nullptr) {}
+	CPDFViewCtrl() : m_pParentDlg(nullptr), m_hDisplayBitmap(nullptr), m_readingMode(READING_NORMAL) {}
 	void SetParentDlg(CXiaoGongPDFDlg* pDlg) { m_pParentDlg = pDlg; }
+	void SetReadingMode(ReadingMode mode) { m_readingMode = mode; if (GetSafeHwnd()) Invalidate(FALSE); }
 	void SetDisplayBitmap(HBITMAP hBitmap);  // ★★★ 替代 SetBitmap，避免内部白色背景闪烁
 
 protected:
 	CXiaoGongPDFDlg* m_pParentDlg;
 	HBITMAP m_hDisplayBitmap;  // ★★★ 直接持有位图句柄，不经过 CStatic::SetBitmap
+	ReadingMode m_readingMode;
 
 	void ForwardMouseMessage(UINT message, UINT nFlags, CPoint point);
 	afx_msg void OnLButtonDown(UINT nFlags, CPoint point);
@@ -262,6 +268,7 @@ private:
 	CBrush m_highlightBrush;  // 高亮背景画刷
 	CBrush m_whiteBrush;      // 白色背景画刷（用于标签页）
 	CBrush m_toolbarBrush;    // 工具栏背景画刷（浅灰色，扁平化风格）
+	ReadingMode m_readingMode = READING_NORMAL;
     int m_thumbnailPicHeight;  // 当前缩略图高度
 	int m_thumbnailPicWidth;   // 当前缩略图宽度
 	int m_scrollBarWidth; //系统垂直滚动条的宽度
@@ -470,6 +477,9 @@ protected:
 
     // 工具栏相关函数
     void InitializeToolbar();  // 新增初始化工具栏函数
+	void ApplyReadingMode(ReadingMode mode);
+	void UpdateOutlineButtonColors();
+	afx_msg void OnReadingMode(UINT nID);
     void UpdatePageControls();
     void UpdateStatusBar();    // 更新状态栏
     void SetStatusBarMessage(LPCTSTR message);

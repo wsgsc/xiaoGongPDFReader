@@ -330,10 +330,10 @@ void CPDFScrollBar::OnPaint()
 	CPaintDC dc(this);
 	CRect rc;
 	GetClientRect(&rc);
-	dc.FillSolidRect(&rc, RGB(250, 250, 250));
+	dc.FillSolidRect(&rc, m_dark ? RGB(39, 43, 47) : RGB(250, 250, 250));
 	if ((m_vertical ? rc.Height() : rc.Width()) < 32)
 		return;
-	const COLORREF grey = RGB(133, 133, 133);
+	const COLORREF grey = m_dark ? RGB(158, 169, 178) : RGB(133, 133, 133);
 	CPen pen(PS_SOLID, 1, grey);
 	CPen* oldPen = dc.SelectObject(&pen);
 	CBrush arrowBrush(grey);
@@ -542,7 +542,8 @@ void CPDFViewCtrl::OnPaint()
 	if (!hBitmap)
 	{
 		// 没有位图，填充背景色
-		dc.FillSolidRect(&clientRect, PDF_VIEW_BACKGROUND);
+		dc.FillSolidRect(&clientRect, m_readingMode == READING_NIGHT ?
+			RGB(30, 25, 20) : PDF_VIEW_BACKGROUND);
 		return;
 	}
 
@@ -636,8 +637,22 @@ void CPDFViewCtrl::OnPaint()
 	if (m_pParentDlg && (m_pParentDlg->m_hasSelection || m_pParentDlg->m_isSelecting))
 		m_pParentDlg->UpdateSelectionHighlight(&backDC, m_pParentDlg->m_selPageNumber);
 
-	// ★★★ 离屏合成完成，一次性输出到屏幕 DC
-	dc.BitBlt(0, 0, clientRect.Width(), clientRect.Height(), &backDC, 0, 0, SRCCOPY);
+	// Transform only the display; cached page bitmaps and print output stay original.
+	if (m_readingMode == READING_EYE)
+	{
+		CDC tintDC;
+		CBitmap tintBitmap;
+		tintDC.CreateCompatibleDC(&dc);
+		tintBitmap.CreateCompatibleBitmap(&dc, 1, 1);
+		CBitmap* pOldTint = tintDC.SelectObject(&tintBitmap);
+		tintDC.FillSolidRect(0, 0, 1, 1, RGB(92, 76, 50));
+		BLENDFUNCTION blend = { AC_SRC_OVER, 0, 64, 0 };
+		backDC.AlphaBlend(0, 0, clientRect.Width(), clientRect.Height(),
+			&tintDC, 0, 0, 1, 1, blend);
+		tintDC.SelectObject(pOldTint);
+	}
+	const DWORD rasterOp = m_readingMode == READING_NIGHT ? NOTSRCCOPY : SRCCOPY;
+	dc.BitBlt(0, 0, clientRect.Width(), clientRect.Height(), &backDC, 0, 0, rasterOp);
 
 	srcDC.SelectObject(hOldSrcBmp);
 	backDC.SelectObject(pOldBackBmp);
@@ -813,6 +828,8 @@ CXiaoGongPDFDlg::~CXiaoGongPDFDlg()
 		m_highlightBrush.DeleteObject();
 	if (m_whiteBrush.GetSafeHandle())
 		m_whiteBrush.DeleteObject();
+	if (m_toolbarBrush.GetSafeHandle())
+		m_toolbarBrush.DeleteObject();
 }
 
 void CXiaoGongPDFDlg::SaveDialogStateToDocument(CPDFDocument* pDoc, bool transferBitmaps)
@@ -1365,6 +1382,7 @@ BEGIN_MESSAGE_MAP(CXiaoGongPDFDlg, CDialogEx)
 	ON_COMMAND(ID_MENU_FIT_WIDTH, &CXiaoGongPDFDlg::OnBtnFitWidth)
 	ON_COMMAND(ID_MENU_FIT_PAGE, &CXiaoGongPDFDlg::OnBtnFitPage)
 	ON_COMMAND(ID_MENU_SEARCH_RESULTS, &CXiaoGongPDFDlg::OnMenuSearchResults)
+	ON_COMMAND_RANGE(ID_MENU_READING_NORMAL, ID_MENU_READING_EYE, &CXiaoGongPDFDlg::OnReadingMode)
 	ON_COMMAND_RANGE(ID_MENU_RECENT_FILE_1, ID_MENU_RECENT_FILE_10, &CXiaoGongPDFDlg::onMenuRecentFile)
 	ON_NOTIFY(LVN_ITEMCHANGED, IDC_THUMBNAIL_LIST, &CXiaoGongPDFDlg::OnThumbnailItemChanged)
 	ON_NOTIFY(TVN_SELCHANGED, IDC_OUTLINE_TREE, &CXiaoGongPDFDlg::OnOutlineSelectionChanged)
@@ -1630,6 +1648,8 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	CDialogEx::OnInitDialog();
 
 	// 标签栏承担标题区，保留系统窗口的缩放边框。
+	// SS_WHITERECT ignores WM_CTLCOLORSTATIC and always paints the toolbar white.
+	m_toolbar.ModifyStyle(SS_TYPEMASK, SS_LEFT, SWP_FRAMECHANGED);
 	ModifyStyle(0, WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN);
 	ModifyStyle(WS_CAPTION, 0, SWP_FRAMECHANGED);
 
@@ -1669,7 +1689,7 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	m_pdfHorizontalScrollBar.CreateEx(0, AfxRegisterWndClass(CS_DBLCLKS,
 		::LoadCursor(nullptr, IDC_ARROW)), _T("PDF horizontal scrollbar"),
 		WS_CHILD, CRect(0, 0, 100, 16), this, 0);
-	m_pdfScrollCorner.Create(_T(""), WS_CHILD | SS_WHITERECT,
+	m_pdfScrollCorner.Create(_T(""), WS_CHILD | SS_LEFT,
 		CRect(0, 0, 16, 16), this, 0);
 
 	// 初始状态隐藏滚动条（未加载PDF时不显示）
@@ -1792,6 +1812,9 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	m_btnNextMatch.SetTextColor (RGB(32, 33, 36));
 
 	// ===== 颜色配置结束 =====
+	const int savedMode = AfxGetApp()->GetProfileInt(_T("Appearance"), _T("ReadingMode"), 0);
+	ApplyReadingMode(savedMode >= READING_NORMAL && savedMode <= READING_EYE ?
+		static_cast<ReadingMode>(savedMode) : READING_NORMAL);
 	CRect clientRect;
 	GetClientRect(&clientRect);
 	// OnSize 的基类处理依赖当前消息；初始化结束后再发送真正的 WM_SIZE。
@@ -1836,7 +1859,8 @@ void CXiaoGongPDFDlg::OnPaint()
 			CDC* pDC = GetDC();
 			if (pDC)
 			{
-				CPen pen(PS_SOLID, 1, RGB(212, 220, 228));
+				CPen pen(PS_SOLID, 1, m_readingMode == READING_NIGHT ?
+					RGB(65, 68, 72) : RGB(212, 220, 228));
 				CPen* pOldPen = pDC->SelectObject(&pen);
 				pDC->MoveTo(toolbarRect.left,  toolbarRect.bottom);
 				pDC->LineTo(toolbarRect.right, toolbarRect.bottom);
@@ -1855,9 +1879,10 @@ BOOL CXiaoGongPDFDlg::OnEraseBkgnd(CDC* pDC)
 	CRect rect;
 	GetClientRect(&rect);
 
-	CBrush brush(PDF_VIEW_BACKGROUND);
+	CBrush brush(m_readingMode == READING_NIGHT ? RGB(30, 33, 36) : PDF_VIEW_BACKGROUND);
 	pDC->FillRect(&rect, &brush);
-	pDC->FillSolidRect(0, 0, rect.Width(), 42, RGB(240, 244, 248));
+	pDC->FillSolidRect(0, 0, rect.Width(), 42,
+		m_readingMode == READING_NIGHT ? RGB(36, 39, 43) : RGB(240, 244, 248));
 
 	return TRUE;  // 返回TRUE表示我们已经处理了背景擦除
 }
@@ -1865,35 +1890,43 @@ BOOL CXiaoGongPDFDlg::OnEraseBkgnd(CDC* pDC)
 HBRUSH CXiaoGongPDFDlg::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor)
 {
 	HBRUSH hbr = CDialogEx::OnCtlColor(pDC, pWnd, nCtlColor);
+	const bool dark = m_readingMode == READING_NIGHT;
+	const COLORREF toolbar = dark ? RGB(39, 43, 47) : RGB(255, 255, 255);
+	const COLORREF text = dark ? RGB(226, 231, 235) : RGB(32, 33, 36);
 
 	// 标签区与工具栏分别使用柔和灰色和白色。
 	if (pWnd->GetSafeHwnd() == m_tabCtrl.GetSafeHwnd())
 	{
-		pDC->SetBkColor(RGB(240, 244, 248));
+		pDC->SetBkColor(dark ? RGB(36, 39, 43) : RGB(240, 244, 248));
 		return m_whiteBrush;
+	}
+	if (pWnd->GetSafeHwnd() == m_pdfScrollCorner.GetSafeHwnd())
+	{
+		pDC->SetBkColor(dark ? RGB(39, 43, 47) : RGB(255, 255, 255));
+		return m_toolbarBrush;
 	}
 	if (pWnd->GetSafeHwnd() == m_statusBar.GetSafeHwnd())
 	{
-		pDC->SetBkColor(RGB(255, 255, 255));
-		pDC->SetTextColor(RGB(75, 88, 102));
+		pDC->SetBkColor(toolbar);
+		pDC->SetTextColor(dark ? text : RGB(75, 88, 102));
 		return m_toolbarBrush;
 	}
 	if (pWnd->GetSafeHwnd() == m_searchResultsHeader.GetSafeHwnd())
 	{
-		pDC->SetBkColor(RGB(255, 255, 255));
-		pDC->SetTextColor(RGB(38, 45, 53));
+		pDC->SetBkColor(toolbar);
+		pDC->SetTextColor(text);
 		return m_toolbarBrush;
 	}
 	// 工具栏背景：白色（Chrome/Edge 风格）
 	if (pWnd->GetSafeHwnd() == m_toolbar.GetSafeHwnd())
 	{
-		pDC->SetBkColor(RGB(255, 255, 255));
+		pDC->SetBkColor(toolbar);
 		return m_toolbarBrush;
 	}
 	if (pWnd->GetSafeHwnd() == m_pageTotal.GetSafeHwnd())
 	{
-		pDC->SetBkColor(RGB(255, 255, 255));
-		pDC->SetTextColor(RGB(32, 33, 36));
+		pDC->SetBkColor(toolbar);
+		pDC->SetTextColor(text);
 		return m_toolbarBrush;
 	}
 
@@ -1902,8 +1935,8 @@ HBRUSH CXiaoGongPDFDlg::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor)
 		(pWnd->GetSafeHwnd() == m_editCurrent.GetSafeHwnd() ||
 		 pWnd->GetSafeHwnd() == m_editSearch.GetSafeHwnd()))
 	{
-		pDC->SetBkColor(RGB(255, 255, 255));
-		pDC->SetTextColor(RGB(32, 33, 36));
+		pDC->SetBkColor(toolbar);
+		pDC->SetTextColor(text);
 		return m_toolbarBrush;
 	}
 
@@ -3943,8 +3976,7 @@ void CXiaoGongPDFDlg::OnCheckThumbnail()
 	m_outlineVisible = !m_outlineVisible;
 	if (m_outlineVisible)
 		m_searchResultsVisible = false;
-	m_btnOutline.SetColors(m_outlineVisible ? RGB(221, 235, 252) : RGB(255, 255, 255),
-		RGB(232, 241, 252), RGB(211, 229, 250));
+	UpdateOutlineButtonColors();
 	m_btnOutline.SetToolTipText(m_outlineVisible ? _T("隐藏目录") : _T("显示目录"));
 	if (m_outlineVisible && m_outlineTree.GetSafeHwnd() && !m_outlineTree.GetRootItem())
 		UpdateOutlineTree();
@@ -4981,6 +5013,18 @@ void CXiaoGongPDFDlg::OnBtnMore()
 	}
 	menu.AppendMenu(MF_STRING | (m_doc ? 0 : MF_GRAYED), ID_MENU_PRINT, _T("打印..."));
 	menu.AppendMenu(MF_STRING, ID_MENU_SHORTCUTS, _T("快捷键"));
+	CMenu readingMenu;
+	if (readingMenu.CreatePopupMenu())
+	{
+		readingMenu.AppendMenu(MF_STRING, ID_MENU_READING_NORMAL, _T("正常"));
+		readingMenu.AppendMenu(MF_STRING, ID_MENU_READING_NIGHT, _T("夜间"));
+		readingMenu.AppendMenu(MF_STRING, ID_MENU_READING_EYE, _T("护眼"));
+		readingMenu.CheckMenuRadioItem(ID_MENU_READING_NORMAL, ID_MENU_READING_EYE,
+			ID_MENU_READING_NORMAL + m_readingMode, MF_BYCOMMAND);
+		if (menu.AppendMenu(MF_POPUP, reinterpret_cast<UINT_PTR>(readingMenu.GetSafeHmenu()),
+			_T("阅读模式")))
+			readingMenu.Detach();
+	}
 	CMenu zoomMenu;
 	if (zoomMenu.CreatePopupMenu())
 	{
@@ -5005,6 +5049,91 @@ void CXiaoGongPDFDlg::OnBtnMore()
 		buttonRect.left, buttonRect.bottom, this));
 	if (command != 0)
 		PostMessage(WM_COMMAND, MAKEWPARAM(command, 0));
+}
+
+void CXiaoGongPDFDlg::OnReadingMode(UINT nID)
+{
+	if (nID < ID_MENU_READING_NORMAL || nID > ID_MENU_READING_EYE)
+		return;
+	ApplyReadingMode(static_cast<ReadingMode>(nID - ID_MENU_READING_NORMAL));
+	AfxGetApp()->WriteProfileInt(_T("Appearance"), _T("ReadingMode"), m_readingMode);
+}
+
+void CXiaoGongPDFDlg::ApplyReadingMode(ReadingMode mode)
+{
+	m_readingMode = mode;
+	m_pdfView.SetReadingMode(mode);
+	const bool dark = mode == READING_NIGHT;
+	m_pdfVerticalScrollBar.SetDark(dark);
+	m_pdfHorizontalScrollBar.SetDark(dark);
+	const COLORREF tab = dark ? RGB(36, 39, 43) : RGB(240, 244, 248);
+	const COLORREF toolbar = dark ? RGB(39, 43, 47) : RGB(255, 255, 255);
+	const COLORREF hover = dark ? RGB(55, 65, 72) : RGB(232, 241, 252);
+	const COLORREF pressed = dark ? RGB(69, 82, 91) : RGB(211, 229, 250);
+	const COLORREF text = dark ? RGB(226, 231, 235) : RGB(32, 33, 36);
+
+	m_whiteBrush.DeleteObject();
+	m_whiteBrush.CreateSolidBrush(tab);
+	m_toolbarBrush.DeleteObject();
+	m_toolbarBrush.CreateSolidBrush(toolbar);
+	m_tabCtrl.SetColors(tab, dark ? RGB(49, 54, 59) : RGB(225, 234, 244), toolbar);
+	if (m_outlineTree.GetSafeHwnd())
+	{
+		m_outlineTree.SetBkColor(toolbar);
+		m_outlineTree.SetTextColor(text);
+	}
+	CListCtrl* lists[] = { &m_thumbnailList, &m_searchResultsList };
+	for (CListCtrl* pList : lists)
+	{
+		if (!pList->GetSafeHwnd()) continue;
+		pList->SetBkColor(toolbar);
+		pList->SetTextBkColor(toolbar);
+		pList->SetTextColor(text);
+		pList->Invalidate(FALSE);
+	}
+	CCustomButton* buttons[] = { &m_btnOpen, &m_btnZoomOut, &m_btnFitWidth,
+		&m_btnFitPage, &m_btnZoomIn, &m_btnOutline, &m_btnFirst, &m_btnLast,
+		&m_btnFullscreen, &m_btnRotateLeft, &m_btnRotateRight, &m_btnEdit,
+		&m_btnSelectText, &m_btnFind, &m_btnPrevMatch, &m_btnNextMatch,
+		&m_btnCloseSearchResults };
+	for (CCustomButton* pButton : buttons)
+	{
+		pButton->SetColors(toolbar, hover, pressed);
+		pButton->SetTextColor(text);
+	}
+	UpdateOutlineButtonColors();
+	CCustomButton* titleButtons[] = { &m_btnMore, &m_btnMinimize, &m_btnMaximize };
+	for (CCustomButton* pButton : titleButtons)
+	{
+		pButton->SetColors(tab, dark ? RGB(55, 60, 65) : RGB(224, 231, 238),
+			dark ? RGB(72, 78, 84) : RGB(207, 218, 228));
+		pButton->SetTextColor(text);
+	}
+	m_btnCloseWindow.SetColors(tab, RGB(232, 38, 51), RGB(192, 25, 38));
+	m_btnCloseWindow.SetTextColor(text);
+
+	// Windows 10 1809 used attribute 19; newer builds use 20.
+	BOOL enabled = dark ? TRUE : FALSE;
+	if (FAILED(DwmSetWindowAttribute(GetSafeHwnd(), 20, &enabled, sizeof(enabled))))
+		DwmSetWindowAttribute(GetSafeHwnd(), 19, &enabled, sizeof(enabled));
+	Invalidate(FALSE);
+	if (m_toolbar.GetSafeHwnd()) m_toolbar.Invalidate(FALSE);
+	if (m_statusBar.GetSafeHwnd()) m_statusBar.Invalidate(FALSE);
+	if (m_pageTotal.GetSafeHwnd()) m_pageTotal.Invalidate(FALSE);
+	if (m_searchResultsHeader.GetSafeHwnd()) m_searchResultsHeader.Invalidate(FALSE);
+	if (m_editCurrent.GetSafeHwnd()) m_editCurrent.Invalidate(FALSE);
+	if (m_editSearch.GetSafeHwnd()) m_editSearch.Invalidate(FALSE);
+	if (m_pdfScrollCorner.GetSafeHwnd()) m_pdfScrollCorner.Invalidate(FALSE);
+}
+
+void CXiaoGongPDFDlg::UpdateOutlineButtonColors()
+{
+	const bool dark = m_readingMode == READING_NIGHT;
+	m_btnOutline.SetColors(
+		m_outlineVisible ? (dark ? RGB(65, 82, 88) : RGB(221, 235, 252)) :
+			(dark ? RGB(39, 43, 47) : RGB(255, 255, 255)),
+		dark ? RGB(55, 65, 72) : RGB(232, 241, 252),
+		dark ? RGB(69, 82, 91) : RGB(211, 229, 250));
 }
 
 void CXiaoGongPDFDlg::OnBtnMinimize()
@@ -5729,7 +5858,7 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 	if (m_searchResultsVisible)
 	{
 		m_outlineVisible = false;
-		m_btnOutline.SetColors(RGB(255, 255, 255), RGB(232, 241, 252), RGB(211, 229, 250));
+		UpdateOutlineButtonColors();
 		m_btnOutline.SetToolTipText(_T("显示目录"));
 	}
 	RefreshSearchResultsList();
@@ -8706,7 +8835,7 @@ void CXiaoGongPDFDlg::OnMenuSearchResults()
 		return;
 	m_searchResultsVisible = true;
 	m_outlineVisible = false;
-	m_btnOutline.SetColors(RGB(255, 255, 255), RGB(232, 241, 252), RGB(211, 229, 250));
+	UpdateOutlineButtonColors();
 	m_btnOutline.SetToolTipText(_T("显示目录"));
 	CRect rect;
 	GetClientRect(&rect);
@@ -9021,7 +9150,7 @@ void CXiaoGongPDFDlg::SearchPDF(const CString& keyword, bool caseSensitive)
 	m_isSearching = true;
 	m_searchResultsVisible = true;
 	m_outlineVisible = false;
-	m_btnOutline.SetColors(RGB(255, 255, 255), RGB(232, 241, 252), RGB(211, 229, 250));
+	UpdateOutlineButtonColors();
 	m_btnOutline.SetToolTipText(_T("显示目录"));
 	RefreshSearchResultsList();
 	RefreshDocumentLayout();
