@@ -143,6 +143,8 @@ public:
 	std::map<PageCacheKey, PageCacheItem>& GetPageCache() { return m_pageCache; }
 	std::list<PageCacheKey>& GetCacheOrder() { return m_cacheOrder; }
 	void ClearPageCache();
+	fz_display_list* GetDisplayList(int pageNumber);
+	void ClearDisplayLists();
 
 	HBITMAP GetCurrentBitmap() const { return m_hCurrentBitmap; }
 	void SetCurrentBitmap(HBITMAP hBitmap);
@@ -205,6 +207,9 @@ private:
 	std::map<PageCacheKey, PageCacheItem> m_pageCache;
 	std::list<PageCacheKey> m_cacheOrder;
 	static const int CACHE_LIMIT = 50;
+	std::map<int, fz_display_list*> m_displayLists;
+	std::list<int> m_displayListOrder;
+	static const int DISPLAY_LIST_LIMIT = 24;
 
 	HBITMAP m_hCurrentBitmap;
 

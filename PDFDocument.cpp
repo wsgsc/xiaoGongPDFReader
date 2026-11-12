@@ -128,6 +128,7 @@ void CPDFDocument::CloseDocument()
 	CleanupPanPageBitmap();
 	CleanupThumbnails();
 	ClearPageCache();
+	ClearDisplayLists();
 
 	if (m_doc && m_ctx)
 	{
@@ -417,6 +418,63 @@ void CPDFDocument::ClearPageCache()
 	}
 	m_pageCache.clear();
 	m_cacheOrder.clear();
+}
+
+fz_display_list* CPDFDocument::GetDisplayList(int pageNumber)
+{
+	if (!m_ctx || !m_doc || pageNumber < 0 || pageNumber >= m_totalPages)
+		return nullptr;
+	auto it = m_displayLists.find(pageNumber);
+	if (it != m_displayLists.end())
+	{
+		m_displayListOrder.remove(pageNumber);
+		m_displayListOrder.push_front(pageNumber);
+		return it->second;
+	}
+
+	fz_page* page = nullptr;
+	fz_display_list* list = nullptr;
+	fz_var(page);
+	fz_var(list);
+	fz_try(m_ctx)
+	{
+		page = fz_load_page(m_ctx, m_doc, pageNumber);
+		list = fz_new_display_list_from_page(m_ctx, page);
+	}
+	fz_always(m_ctx)
+	{
+		if (page)
+			fz_drop_page(m_ctx, page);
+	}
+	fz_catch(m_ctx)
+	{
+		if (list)
+			fz_drop_display_list(m_ctx, list);
+		return nullptr;
+	}
+	if (!list)
+		return nullptr;
+	m_displayLists[pageNumber] = list;
+	m_displayListOrder.push_front(pageNumber);
+	while ((int)m_displayListOrder.size() > DISPLAY_LIST_LIMIT)
+	{
+		int oldest = m_displayListOrder.back();
+		m_displayListOrder.pop_back();
+		fz_drop_display_list(m_ctx, m_displayLists[oldest]);
+		m_displayLists.erase(oldest);
+	}
+	return list;
+}
+
+void CPDFDocument::ClearDisplayLists()
+{
+	if (m_ctx)
+	{
+		for (auto& entry : m_displayLists)
+			fz_drop_display_list(m_ctx, entry.second);
+	}
+	m_displayLists.clear();
+	m_displayListOrder.clear();
 }
 
 void CPDFDocument::SetCurrentBitmap(HBITMAP hBitmap)

@@ -228,6 +228,9 @@ private:
 		PDFOpenResult openResult = PDFOpenResult::Failed;
 		std::atomic<bool> cancelled{ false };
 		CString errorMsg;
+		CWinThread* pThread = nullptr;
+		CDialog* pProgressDlg = nullptr;
+		bool restoringSession = false;
 		~PDFLoadParams()
 		{
 			if (!utf8Password.empty())
@@ -235,9 +238,7 @@ private:
 		}
 	};
 	static UINT PDFLoadThreadProc(LPVOID pParam);  // 后台加载线程函数
-	CWinThread* m_pLoadThread;  // 加载线程指针
-	PDFLoadParams* m_pLoadParams;  // 加载参数
-	CDialog* m_pProgressDlg;  // 进度对话框指针
+	std::vector<PDFLoadParams*> m_pendingLoads;
 	bool m_closePending;  // 等待后台加载结束后再关闭窗口
 
 	// 缩放相关（ZoomMode 定义在 PDFDocument.h 中）
@@ -281,6 +282,7 @@ private:
 
 	// ★★★ P1优化：OnSize 防抖定时器，避免拖拽调整窗口时高频触发完整重渲染
 	static const UINT_PTR TIMER_ID_RESIZE_DEBOUNCE = 1002;  // 防抖定时器 ID
+	static const UINT_PTR TIMER_ID_PAGE_PREFETCH = 1003;
 	static const UINT RESIZE_DEBOUNCE_MS = 60;              // 防抖延迟（毫秒）
 	static const UINT RESIZE_THROTTLE_MS = 33;              // 拖拽过程中的即时重渲染节流
 	int m_pendingResizeCx;   // 待处理的 OnSize 宽度
@@ -529,9 +531,10 @@ protected:
 	void SaveOpenTabs();
 	void RestoreOpenTabs();
 	void OpenNextRestoredTab();
-	void CloseProgressDialog();
-	void ReleaseLoadThread();
+	void CloseProgressDialog(PDFLoadParams* pParams);
+	void ReleaseLoadThread(PDFLoadParams* pParams);
 	void CleanupPendingLoad();
+	void CleanupPendingLoad(PDFLoadParams* pParams);
 
     // 内部辅助函数
     void RefreshCurrentView();
@@ -571,7 +574,7 @@ protected:
 
     // 多文档标签页管理
     void InitializeTabControl();  // 初始化标签页控件
-    bool OpenPDFInNewTab(const CString& filePath);  // 在新标签页中打开PDF
+    bool OpenPDFInNewTab(const CString& filePath, bool restoringSession = false);
     void SwitchToDocument(int index);  // 切换到指定文档
     void CloseDocument(int index);  // 关闭指定文档
     void CloseCurrentDocument();  // 关闭当前文档
@@ -592,6 +595,8 @@ protected:
     // 连续滚动模式相关函数
     void CalculatePagePositions(bool recalcScale = true);  // 计算所有页面的位置和高度；recalcScale=false时保持现有m_uniformScale不变
     void RenderVisiblePages();  // 渲染可见的页面
+	bool RenderContinuousPageToCache(int pageNumber, HDC hDC);
+	void PrefetchNearbyPages();
     afx_msg void OnVScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar);  // 垂直滚动条消息处理
     afx_msg void OnHScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar);  // 横向滚动条消息处理
     void UpdateScrollBar();  // 更新滚动条

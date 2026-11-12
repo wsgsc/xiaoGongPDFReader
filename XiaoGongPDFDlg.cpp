@@ -8,6 +8,7 @@
 #include "afxdialogex.h"
 #include <mupdf/fitz.h>
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -692,9 +693,6 @@ CXiaoGongPDFDlg::CXiaoGongPDFDlg(CWnd* pParent /*=nullptr*/)
 	, m_selPageNumber(-1)       // 未选择页码
 	, m_selectionTextPage(nullptr)
 	, m_activeDocIndex(-1)      // 初始化活动文档索引（-1表示无文档）
-	, m_pLoadThread(nullptr)    // 初始化加载线程指针
-	, m_pLoadParams(nullptr)    // 初始化加载参数
-	, m_pProgressDlg(nullptr)   // 初始化进度对话框指针
 	, m_closePending(false)
 	, m_continuousScrollMode(true)  // ★★★ 默认启用连续滚动模式
 	, m_scrollPosition(0)        // 初始化垂直滚动位置
@@ -1003,9 +1001,9 @@ void CXiaoGongPDFDlg::RestoreOpenTabs()
 
 void CXiaoGongPDFDlg::OpenNextRestoredTab()
 {
-	if (m_sessionRestorePaths.empty() || m_pLoadParams || m_pLoadThread)
+	if (m_sessionRestorePaths.empty())
 		return;
-	while (m_sessionRestoreIndex < m_sessionRestorePaths.size())
+	while (m_sessionRestoreIndex < m_sessionRestorePaths.size() && m_pendingLoads.size() < 8)
 	{
 		const CString path = m_sessionRestorePaths[m_sessionRestoreIndex++];
 		if (!PathFileExists(path) && path.CompareNoCase(m_initialFilePath) != 0)
@@ -1020,9 +1018,11 @@ void CXiaoGongPDFDlg::OpenNextRestoredTab()
 				break;
 			}
 		}
-		if (!alreadyOpen && OpenPDFInNewTab(path))
-			return;
+		if (!alreadyOpen)
+			OpenPDFInNewTab(path, true);
 	}
+	if (m_sessionRestoreIndex < m_sessionRestorePaths.size() || !m_pendingLoads.empty())
+		return;
 	for (int i = 0; i < static_cast<int>(m_documents.size()); ++i)
 	{
 		if (FullPathForComparison(m_documents[i]->GetFilePath()).CompareNoCase(
@@ -1037,48 +1037,50 @@ void CXiaoGongPDFDlg::OpenNextRestoredTab()
 	m_sessionActivePath.Empty();
 }
 
-void CXiaoGongPDFDlg::CloseProgressDialog()
+void CXiaoGongPDFDlg::CloseProgressDialog(PDFLoadParams* pParams)
 {
-	if (!m_pProgressDlg)
+	if (!pParams || !pParams->pProgressDlg)
 		return;
 
-	if (m_pProgressDlg->GetSafeHwnd() && ::IsWindow(m_pProgressDlg->GetSafeHwnd()))
-		m_pProgressDlg->DestroyWindow();
+	if (pParams->pProgressDlg->GetSafeHwnd() && ::IsWindow(pParams->pProgressDlg->GetSafeHwnd()))
+		pParams->pProgressDlg->DestroyWindow();
 
-	delete m_pProgressDlg;
-	m_pProgressDlg = nullptr;
+	delete pParams->pProgressDlg;
+	pParams->pProgressDlg = nullptr;
 }
 
-void CXiaoGongPDFDlg::ReleaseLoadThread()
+void CXiaoGongPDFDlg::ReleaseLoadThread(PDFLoadParams* pParams)
 {
-	if (!m_pLoadThread)
+	if (!pParams || !pParams->pThread)
 		return;
 
-	if (m_pLoadThread->m_hThread)
-		WaitForSingleObject(m_pLoadThread->m_hThread, INFINITE);
+	if (pParams->pThread->m_hThread)
+		WaitForSingleObject(pParams->pThread->m_hThread, INFINITE);
 
-	delete m_pLoadThread;
-	m_pLoadThread = nullptr;
+	delete pParams->pThread;
+	pParams->pThread = nullptr;
 }
 
 void CXiaoGongPDFDlg::CleanupPendingLoad()
 {
-	if (m_pLoadParams)
-		m_pLoadParams->cancelled.store(true);
-	CloseProgressDialog();
-	ReleaseLoadThread();
+	for (PDFLoadParams* pParams : m_pendingLoads)
+		pParams->cancelled.store(true);
+	while (!m_pendingLoads.empty())
+		CleanupPendingLoad(m_pendingLoads.back());
+}
 
-	if (m_pLoadParams)
-	{
-		if (m_pLoadParams->pDoc)
-		{
-			delete m_pLoadParams->pDoc;
-			m_pLoadParams->pDoc = nullptr;
-		}
-
-		delete m_pLoadParams;
-		m_pLoadParams = nullptr;
-	}
+void CXiaoGongPDFDlg::CleanupPendingLoad(PDFLoadParams* pParams)
+{
+	if (!pParams)
+		return;
+	pParams->cancelled.store(true);
+	ReleaseLoadThread(pParams);
+	CloseProgressDialog(pParams);
+	auto it = std::find(m_pendingLoads.begin(), m_pendingLoads.end(), pParams);
+	if (it != m_pendingLoads.end())
+		m_pendingLoads.erase(it);
+	delete pParams->pDoc;
+	delete pParams;
 }
 
 void CXiaoGongPDFDlg::CleanupBitmap()
@@ -3232,6 +3234,12 @@ void CXiaoGongPDFDlg::OnTimer(UINT_PTR nIDEvent)
 		{
 			PerformResizeRender();
 		}
+		return;
+	}
+	if (nIDEvent == TIMER_ID_PAGE_PREFETCH)
+	{
+		KillTimer(TIMER_ID_PAGE_PREFETCH);
+		PrefetchNearbyPages();
 		return;
 	}
 
@@ -5455,19 +5463,15 @@ CPDFDocument* CXiaoGongPDFDlg::GetActiveDocument()
 	return nullptr;
 }
 
-bool CXiaoGongPDFDlg::OpenPDFInNewTab(const CString& filePath)
+bool CXiaoGongPDFDlg::OpenPDFInNewTab(const CString& filePath, bool restoringSession)
 {
+	if (m_closePending)
+		return false;
 #ifdef _DEBUG
 	TRACE(_T("OpenPDFInNewTab: %s\n"), filePath);
 	TRACE(_T("当前已打开文档数: %d\n"), (int)m_documents.size());
 	TRACE(_T("标签页控件句柄: %p\n"), m_tabCtrl.GetSafeHwnd());
 #endif
-
-	if (m_pLoadThread || m_pLoadParams)
-	{
-		MessageBox(_T("请等待当前PDF加载完成后再打开新文件。"), _T("提示"), MB_OK | MB_ICONINFORMATION);
-		return false;
-	}
 
 	// 检查文件是否已经打开
 	// 规范化路径用于比较（转为小写、获取完整路径,win路径不区分大小写，但是字符比较区分）
@@ -5502,6 +5506,11 @@ bool CXiaoGongPDFDlg::OpenPDFInNewTab(const CString& filePath)
 
 			return true;
 		}
+	}
+	for (PDFLoadParams* pPending : m_pendingLoads)
+	{
+		if (normalizedNewPath.CompareNoCase(pPending->filePath) == 0)
+			return true;
 	}
 
 	// 转换为UTF-8 mupdf需要转换成 UTF-8形式
@@ -5550,40 +5559,47 @@ bool CXiaoGongPDFDlg::OpenPDFInNewTab(const CString& filePath)
 	TRACE(_T("准备后台加载PDF文件...\n"));
 #endif
 
-	// 创建进度对话框
-	CProgressDlg* pProgressDlg = new CProgressDlg(this);
-	pProgressDlg->Create(IDD_PROGRESS_DIALOG, this);
-	pProgressDlg->ShowWindow(SW_SHOW);
-	pProgressDlg->UpdateWindow();
-	m_pProgressDlg = pProgressDlg;  // 保存指针，供后续使用
-
 	// 创建新文档对象
 	CPDFDocument* newDoc = new CPDFDocument();
 
 	// 创建加载参数
-	m_pLoadParams = new PDFLoadParams();
-	m_pLoadParams->filePath = normalizedNewPath;
-	m_pLoadParams->utf8Path = utf8Path;
-	m_pLoadParams->notifyWnd = GetSafeHwnd();
-	m_pLoadParams->pDoc = newDoc;
-	m_pLoadParams->success = false;
+	PDFLoadParams* pParams = new PDFLoadParams();
+	pParams->filePath = normalizedNewPath;
+	pParams->utf8Path = utf8Path;
+	pParams->notifyWnd = GetSafeHwnd();
+	pParams->pDoc = newDoc;
+	pParams->success = false;
+	pParams->restoringSession = restoringSession;
+	if (!restoringSession)
+	{
+		CProgressDlg* pProgressDlg = new CProgressDlg(this);
+		if (!pProgressDlg->Create(IDD_PROGRESS_DIALOG, this))
+		{
+			delete pProgressDlg;
+			delete newDoc;
+			delete pParams;
+			return false;
+		}
+		pParams->pProgressDlg = pProgressDlg;
+		pProgressDlg->ShowWindow(SW_SHOW);
+		pProgressDlg->UpdateWindow();
+	}
 
 	// 启动后台加载线程
-	m_pLoadThread = AfxBeginThread(PDFLoadThreadProc, m_pLoadParams, THREAD_PRIORITY_NORMAL, 0, CREATE_SUSPENDED);
-	if (m_pLoadThread)
+	pParams->pThread = AfxBeginThread(PDFLoadThreadProc, pParams, THREAD_PRIORITY_NORMAL, 0, CREATE_SUSPENDED);
+	if (pParams->pThread)
 	{
-		m_pLoadThread->m_bAutoDelete = FALSE;  // 手动管理线程生命周期
-		m_pLoadThread->ResumeThread();
-
+		pParams->pThread->m_bAutoDelete = FALSE;
+		m_pendingLoads.push_back(pParams);
+		pParams->pThread->ResumeThread();
 	}
 	else
 	{
 		// 线程创建失败 ,电脑资源极度紧张，概率很小
 		DWORD dwError = GetLastError();
 		delete newDoc;
-		delete m_pLoadParams;
-		m_pLoadParams = nullptr;
-		CloseProgressDialog();
+		CloseProgressDialog(pParams);
+		delete pParams;
 		CString strMsg;
 		strMsg.Format(_T("启动后台线程失败 (错误码: %d)\n\n")
 			_T("可能原因：系统资源不足\n")
@@ -5761,6 +5777,7 @@ void CXiaoGongPDFDlg::CloseDocument(int index)
 
 	if (isActiveDocument)
 	{
+		KillTimer(TIMER_ID_PAGE_PREFETCH);
 		ClearSelection();
 		m_pdfView.SetDisplayBitmap(NULL);
 		SafeDeleteBitmap(m_hContinuousViewBitmap);
@@ -6073,10 +6090,11 @@ void CXiaoGongPDFDlg::OnOK()
 // 自定义Cancel函数,防止关闭时发出警告音
 void CXiaoGongPDFDlg::OnCancel()
 {
-	if (m_pLoadParams)
+	if (!m_pendingLoads.empty())
 	{
 		m_closePending = true;
-		m_pLoadParams->cancelled.store(true);
+		for (PDFLoadParams* pParams : m_pendingLoads)
+			pParams->cancelled.store(true);
 		return;
 	}
 	CDialogEx::OnCancel();
@@ -6090,6 +6108,7 @@ void CXiaoGongPDFDlg::OnClose()
 void CXiaoGongPDFDlg::OnDestroy()
 {
 	TRACE(_T("OnDestroy() called\n"));
+	KillTimer(TIMER_ID_PAGE_PREFETCH);
 	if (m_sessionRestoreStarted)
 		SaveOpenTabs();
 	ClearSelection();
@@ -7729,6 +7748,159 @@ void CXiaoGongPDFDlg::CalculatePagePositions(bool recalcScale)
 #endif
 }
 
+bool CXiaoGongPDFDlg::RenderContinuousPageToCache(int pageNumber, HDC hDC)
+{
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (!pDoc || !m_ctx || pageNumber < 0 || pageNumber >= m_totalPages)
+		return false;
+
+	float pageWidth = 0.0f;
+	float pageHeight = 0.0f;
+	fz_rect bounds = { 0 };
+	if (!pDoc->GetPageBounds(pageNumber, pageWidth, pageHeight) ||
+		!pDoc->GetPageBaseBounds(pageNumber, bounds))
+		return false;
+	int width = ClampRenderDimension(pageWidth * m_uniformScale);
+	int height = ClampRenderDimension(pageHeight * m_uniformScale);
+	int rotation = GetPageRotation(pageNumber);
+	::PageCacheKey key{ pageNumber, width, height, rotation };
+	auto& cache = pDoc->GetPageCache();
+	if (cache.find(key) != cache.end())
+		return true;
+
+	fz_pixmap* pixmap = nullptr;
+	fz_device* dev = nullptr;
+	fz_var(pixmap);
+	fz_var(dev);
+	bool rendered = false;
+	fz_try(m_ctx)
+	{
+		fz_display_list* list = pDoc->GetDisplayList(pageNumber);
+		if (!list)
+			fz_throw(m_ctx, FZ_ERROR_GENERIC, "Failed to create display list");
+		pixmap = fz_new_pixmap(m_ctx, fz_device_rgb(m_ctx), width, height, nullptr, 1);
+		fz_clear_pixmap_with_value(m_ctx, pixmap, 0xff);
+		fz_matrix ctm = fz_scale(m_uniformScale, m_uniformScale);
+		if (rotation != 0)
+		{
+			fz_matrix rotate = fz_rotate((float)rotation);
+			if (rotation == 90)
+				rotate = fz_pre_translate(rotate, 0, -(bounds.y1 - bounds.y0));
+			else if (rotation == 180)
+				rotate = fz_pre_translate(rotate, -(bounds.x1 - bounds.x0), -(bounds.y1 - bounds.y0));
+			else if (rotation == 270)
+				rotate = fz_pre_translate(rotate, -(bounds.x1 - bounds.x0), 0);
+			ctm = fz_concat(rotate, ctm);
+		}
+		dev = fz_new_draw_device(m_ctx, ctm, pixmap);
+		fz_run_display_list(m_ctx, list, dev, fz_identity, fz_infinite_rect, nullptr);
+		fz_close_device(m_ctx, dev);
+		rendered = true;
+	}
+	fz_always(m_ctx)
+	{
+		if (dev)
+			fz_drop_device(m_ctx, dev);
+	}
+	fz_catch(m_ctx)
+	{
+		rendered = false;
+	}
+	if (!rendered)
+	{
+		if (pixmap)
+			fz_drop_pixmap(m_ctx, pixmap);
+		return false;
+	}
+
+	BITMAPINFO bmi = { 0 };
+	bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+	bmi.bmiHeader.biWidth = width;
+	bmi.bmiHeader.biHeight = -height;
+	bmi.bmiHeader.biPlanes = 1;
+	bmi.bmiHeader.biBitCount = 24;
+	bmi.bmiHeader.biCompression = BI_RGB;
+	BYTE* bits = nullptr;
+	HBITMAP hBitmap = CreateDIBSection(hDC, &bmi, DIB_RGB_COLORS,
+		reinterpret_cast<void**>(&bits), nullptr, 0);
+	if (!hBitmap || !bits)
+	{
+		if (hBitmap)
+			DeleteObject(hBitmap);
+		fz_drop_pixmap(m_ctx, pixmap);
+		return false;
+	}
+	unsigned char* samples = fz_pixmap_samples(m_ctx, pixmap);
+	int components = fz_pixmap_components(m_ctx, pixmap);
+	int stride = (width * 3 + 3) & ~3;
+	for (int y = 0; y < height; ++y)
+	{
+		for (int x = 0; x < width; ++x)
+		{
+			bits[y * stride + x * 3] = samples[(y * width + x) * components + 2];
+			bits[y * stride + x * 3 + 1] = samples[(y * width + x) * components + 1];
+			bits[y * stride + x * 3 + 2] = samples[(y * width + x) * components];
+		}
+	}
+	fz_drop_pixmap(m_ctx, pixmap);
+	cache[key] = { hBitmap };
+	auto& order = pDoc->GetCacheOrder();
+	order.push_back(key);
+	TrimBitmapCache(cache, order, true, PAGE_CACHE_BUDGET, 50);
+	return true;
+}
+
+void CXiaoGongPDFDlg::PrefetchNearbyPages()
+{
+	if (!m_continuousScrollMode || !m_doc || m_totalPages <= 0 ||
+		(int)m_pageYPositions.size() != m_totalPages ||
+		(int)m_pageHeights.size() != m_totalPages)
+		return;
+	CRect viewRect;
+	m_pdfView.GetClientRect(&viewRect);
+	int screenHeight = viewRect.Height();
+	if (screenHeight <= 0)
+		return;
+	int top = max(0, m_scrollPosition - 2 * screenHeight);
+	int bottom = m_scrollPosition + 3 * screenHeight;
+	int center = m_scrollPosition + screenHeight / 2;
+	int bestPage = -1;
+	int bestDistance = INT_MAX;
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (!pDoc)
+		return;
+	for (int i = 0; i < m_totalPages; ++i)
+	{
+		int pageTop = m_pageYPositions[i];
+		int pageBottom = pageTop + m_pageHeights[i];
+		if (pageBottom < top || pageTop > bottom ||
+			(pageBottom >= m_scrollPosition && pageTop <= m_scrollPosition + screenHeight))
+			continue;
+		float width = 0.0f, height = 0.0f;
+		if (!pDoc->GetPageBounds(i, width, height))
+			continue;
+		::PageCacheKey key{ i, ClampRenderDimension(width * m_uniformScale),
+			ClampRenderDimension(height * m_uniformScale), GetPageRotation(i) };
+		if (pDoc->GetPageCache().find(key) != pDoc->GetPageCache().end())
+			continue;
+		int distance = abs((pageTop + pageBottom) / 2 - center);
+		if (distance < bestDistance)
+		{
+			bestPage = i;
+			bestDistance = distance;
+		}
+	}
+	if (bestPage < 0)
+		return;
+	CDC* pDC = m_pdfView.GetDC();
+	if (!pDC)
+		return;
+	bool rendered = RenderContinuousPageToCache(bestPage, pDC->GetSafeHdc());
+	m_pdfView.ReleaseDC(pDC);
+	if (rendered)
+		SetTimer(TIMER_ID_PAGE_PREFETCH, 30, nullptr);
+}
+
 // 渲染可见的页面
 void CXiaoGongPDFDlg::RenderVisiblePages()
 {
@@ -7845,12 +8017,14 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 		{
 			fz_try(m_ctx)
 			{
-				page = fz_load_page(m_ctx, m_doc, i);
-				if (!page)
-					fz_throw(m_ctx, FZ_ERROR_GENERIC, "Failed to load page");
-
-				bounds = fz_bound_page(m_ctx, page);
-				gotBaseBounds = true;
+				if (!gotBaseBounds || !gotBounds)
+				{
+					page = fz_load_page(m_ctx, m_doc, i);
+					if (!page)
+						fz_throw(m_ctx, FZ_ERROR_GENERIC, "Failed to load page");
+					bounds = fz_bound_page(m_ctx, page);
+					gotBaseBounds = true;
+				}
 
 				if (!gotBounds)
 				{
@@ -7902,7 +8076,10 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 					}
 
 					dev = fz_new_draw_device(m_ctx, ctm, pixmap);
-					fz_run_page(m_ctx, page, dev, fz_identity, nullptr);
+					fz_display_list* list = pActiveDoc->GetDisplayList(i);
+					if (!list)
+						fz_throw(m_ctx, FZ_ERROR_GENERIC, "Failed to create display list");
+					fz_run_display_list(m_ctx, list, dev, fz_identity, fz_infinite_rect, nullptr);
 					fz_close_device(m_ctx, dev);
 					fz_drop_device(m_ctx, dev);
 					dev = nullptr;
@@ -7940,6 +8117,11 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 
 						TrimBitmapCache(pageCache, cacheOrder, true,
 							PAGE_CACHE_BUDGET, 50);
+					}
+					else if (hBitmap)
+					{
+						DeleteObject(hBitmap);
+						hBitmap = nullptr;
 					}
 
 					if (pixmap)
@@ -8105,6 +8287,8 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 #endif
 
 	m_pdfView.ReleaseDC(pDC);
+	KillTimer(TIMER_ID_PAGE_PREFETCH);
+	SetTimer(TIMER_ID_PAGE_PREFETCH, 180, nullptr);
 
 	// 更新当前页（根据滚动位置）
 	int newCurrentPage = GetPageAtPosition(m_scrollPosition + viewHeight / 2);
@@ -9415,10 +9599,17 @@ UINT CXiaoGongPDFDlg::PDFLoadThreadProc(LPVOID pParam)
 	return 0;
 }
 
-LRESULT CXiaoGongPDFDlg::OnPDFLoadCancelled(WPARAM, LPARAM)
+LRESULT CXiaoGongPDFDlg::OnPDFLoadCancelled(WPARAM wParam, LPARAM)
 {
-	if (m_pLoadParams)
-		m_pLoadParams->cancelled.store(true);
+	for (PDFLoadParams* pParams : m_pendingLoads)
+	{
+		if (pParams->pProgressDlg &&
+			pParams->pProgressDlg->GetSafeHwnd() == reinterpret_cast<HWND>(wParam))
+		{
+			pParams->cancelled.store(true);
+			break;
+		}
+	}
 	return 0;
 }
 
@@ -9426,27 +9617,24 @@ LRESULT CXiaoGongPDFDlg::OnPDFLoadCancelled(WPARAM, LPARAM)
 LRESULT CXiaoGongPDFDlg::OnPDFLoadComplete(WPARAM wParam, LPARAM lParam)
 {
 	PDFLoadParams* pParams = (PDFLoadParams*)lParam;
-	if (!pParams || pParams != m_pLoadParams)
+	if (!pParams || std::find(m_pendingLoads.begin(), m_pendingLoads.end(), pParams) == m_pendingLoads.end())
 	{
 		return 0;
 	}
 	if (m_closePending)
 	{
-		CleanupPendingLoad();
-		CDialogEx::OnCancel();
+		CleanupPendingLoad(pParams);
+		if (m_pendingLoads.empty())
+			CDialogEx::OnCancel();
 		return 0;
 	}
-	if (m_pProgressDlg && static_cast<CProgressDlg*>(m_pProgressDlg)->IsCancelled())
+	if (pParams->pProgressDlg && static_cast<CProgressDlg*>(pParams->pProgressDlg)->IsCancelled())
 		pParams->cancelled.store(true);
 	if (pParams->cancelled.load())
 	{
-		delete pParams->pDoc;
-		delete pParams;
-		m_pLoadParams = nullptr;
-		ReleaseLoadThread();
-		CloseProgressDialog();
+		CleanupPendingLoad(pParams);
 		UpdateStatusBar();
-		PostMessage(WM_USER + 101, 0, 0);
+		OpenNextRestoredTab();
 		return 0;
 	}
 
@@ -9457,8 +9645,8 @@ LRESULT CXiaoGongPDFDlg::OnPDFLoadComplete(WPARAM wParam, LPARAM lParam)
 			pParams->openResult == PDFOpenResult::InvalidPassword)
 		{
 			const bool invalidPassword = pParams->openResult == PDFOpenResult::InvalidPassword;
-			ReleaseLoadThread();
-			CloseProgressDialog();
+			ReleaseLoadThread(pParams);
+			CloseProgressDialog(pParams);
 			if (!pParams->utf8Password.empty())
 			{
 				SecureZeroMemory(pParams->utf8Password.data(), pParams->utf8Password.size());
@@ -9471,9 +9659,16 @@ LRESULT CXiaoGongPDFDlg::OnPDFLoadComplete(WPARAM wParam, LPARAM lParam)
 			CPasswordDialog passwordDlg(fileName, invalidPassword, this);
 			if (passwordDlg.DoModal() != IDOK)
 			{
-				CleanupPendingLoad();
+				CleanupPendingLoad(pParams);
 				UpdateStatusBar();
-				PostMessage(WM_USER + 101, 0, 0);
+				OpenNextRestoredTab();
+				return 0;
+			}
+			if (m_closePending)
+			{
+				CleanupPendingLoad(pParams);
+				if (m_pendingLoads.empty())
+					CDialogEx::OnCancel();
 				return 0;
 			}
 
@@ -9482,18 +9677,18 @@ LRESULT CXiaoGongPDFDlg::OnPDFLoadComplete(WPARAM wParam, LPARAM lParam)
 				nullptr, 0, nullptr, nullptr);
 			if (length <= 0)
 			{
-				CleanupPendingLoad();
+				CleanupPendingLoad(pParams);
 				MessageBox(_T("无法读取密码"), _T("错误"), MB_OK | MB_ICONERROR);
-				PostMessage(WM_USER + 101, 0, 0);
+				OpenNextRestoredTab();
 				return 0;
 			}
 			pParams->utf8Password.resize(length);
 			if (!WideCharToMultiByte(CP_UTF8, 0, password, -1,
 				pParams->utf8Password.data(), length, nullptr, nullptr))
 			{
-				CleanupPendingLoad();
+				CleanupPendingLoad(pParams);
 				MessageBox(_T("无法读取密码"), _T("错误"), MB_OK | MB_ICONERROR);
-				PostMessage(WM_USER + 101, 0, 0);
+				OpenNextRestoredTab();
 				return 0;
 			}
 
@@ -9501,48 +9696,64 @@ LRESULT CXiaoGongPDFDlg::OnPDFLoadComplete(WPARAM wParam, LPARAM lParam)
 			if (!pProgressDlg->Create(IDD_PROGRESS_DIALOG, this))
 			{
 				delete pProgressDlg;
-				CleanupPendingLoad();
+				CleanupPendingLoad(pParams);
 				MessageBox(_T("无法创建加载窗口"), _T("错误"), MB_OK | MB_ICONERROR);
-				PostMessage(WM_USER + 101, 0, 0);
+				OpenNextRestoredTab();
 				return 0;
 			}
-			m_pProgressDlg = pProgressDlg;
+			pParams->pProgressDlg = pProgressDlg;
 			pProgressDlg->ShowWindow(SW_SHOW);
 			pProgressDlg->UpdateWindow();
 			pParams->openResult = PDFOpenResult::Failed;
 			pParams->success = false;
-			m_pLoadThread = AfxBeginThread(PDFLoadThreadProc, pParams,
+			pParams->pThread = AfxBeginThread(PDFLoadThreadProc, pParams,
 				THREAD_PRIORITY_NORMAL, 0, CREATE_SUSPENDED);
-			if (!m_pLoadThread)
+			if (!pParams->pThread)
 			{
-				CleanupPendingLoad();
+				CleanupPendingLoad(pParams);
 				MessageBox(_T("无法启动加载线程"), _T("错误"), MB_OK | MB_ICONERROR);
-				PostMessage(WM_USER + 101, 0, 0);
+				OpenNextRestoredTab();
 				return 0;
 			}
-			m_pLoadThread->m_bAutoDelete = FALSE;
-			m_pLoadThread->ResumeThread();
+			pParams->pThread->m_bAutoDelete = FALSE;
+			pParams->pThread->ResumeThread();
 			return 0;
 		}
 		CString errMsg = pParams->errorMsg;
-		delete pParams->pDoc;
-		delete pParams;
-		m_pLoadParams = nullptr;
-		ReleaseLoadThread();
-
-		CloseProgressDialog();
+		CleanupPendingLoad(pParams);
 
 		MessageBox(errMsg, _T("错误"), MB_OK | MB_ICONERROR);
 		UpdateStatusBar();
-		PostMessage(WM_USER + 101, 0, 0);
+		OpenNextRestoredTab();
 		return 0;
 	}
 
 	// 加载成功，恢复此文件上次的阅读位置。
 	RestoreReadingPosition(pParams->pDoc);
-	// 加载成功，添加到文档列表
-	m_documents.push_back(pParams->pDoc);
-	int newIndex = (int)m_documents.size() - 1;
+	// Keep restored tabs in saved order even when workers finish out of order.
+	int newIndex = (int)m_documents.size();
+	if (pParams->restoringSession)
+	{
+		auto requested = std::find_if(m_sessionRestorePaths.begin(), m_sessionRestorePaths.end(),
+			[pParams](const CString& path) {
+				return FullPathForComparison(path).CompareNoCase(pParams->filePath) == 0;
+			});
+		for (int i = 0; i < (int)m_documents.size(); ++i)
+		{
+			auto existing = std::find_if(m_sessionRestorePaths.begin(), m_sessionRestorePaths.end(),
+				[this, i](const CString& path) {
+					return FullPathForComparison(path).CompareNoCase(m_documents[i]->GetFilePath()) == 0;
+				});
+			if (existing > requested)
+			{
+				newIndex = i;
+				break;
+			}
+		}
+	}
+	m_documents.insert(m_documents.begin() + newIndex, pParams->pDoc);
+	if (m_activeDocIndex >= newIndex)
+		++m_activeDocIndex;
 
 	// 添加标签页
 	if (m_tabCtrl.GetSafeHwnd())
@@ -9580,14 +9791,17 @@ LRESULT CXiaoGongPDFDlg::OnPDFLoadComplete(WPARAM wParam, LPARAM lParam)
 
 		tci.pszText = (LPTSTR)(LPCTSTR)tabTitle;
 		m_tabCtrl.InsertItem(newIndex, &tci);
-		m_tabCtrl.SetCurSel(newIndex);
+		if (!pParams->restoringSession || m_activeDocIndex < 0)
+			m_tabCtrl.SetCurSel(newIndex);
+		else
+			m_tabCtrl.SetCurSel(m_activeDocIndex);
 
 		// ★★★ 强制刷新标签页显示，避免显示异常
 		m_tabCtrl.RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE | RDW_ALLCHILDREN);
 	}
 
-	// 切换到新文档（这会触发文档渲染）
-	SwitchToDocument(newIndex);
+	if (!pParams->restoringSession || m_activeDocIndex < 0)
+		SwitchToDocument(newIndex);
 
 	// 更新状态栏
 	UpdateStatusBar();
@@ -9601,14 +9815,14 @@ LRESULT CXiaoGongPDFDlg::OnPDFLoadComplete(WPARAM wParam, LPARAM lParam)
 	UpdateWindow();
 
 	// 清理
+	pParams->pDoc = nullptr;
+	ReleaseLoadThread(pParams);
+	CloseProgressDialog(pParams);
+	auto pendingIt = std::find(m_pendingLoads.begin(), m_pendingLoads.end(), pParams);
+	if (pendingIt != m_pendingLoads.end())
+		m_pendingLoads.erase(pendingIt);
 	delete pParams;
-	m_pLoadParams = nullptr;
-	ReleaseLoadThread();
-
-	// ★★★ 关键：在所有UI更新完成后才关闭进度对话框
-	// 这样用户看到进度条消失时，PDF页面已经显示出来了
-	CloseProgressDialog();
-	PostMessage(WM_USER + 101, 0, 0);
+	OpenNextRestoredTab();
 
 	return 0;
 }
