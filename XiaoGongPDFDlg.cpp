@@ -592,11 +592,19 @@ void CPDFViewCtrl::OnPaint()
 
 	if (!hBitmap)
 	{
-		// 没有位图，填充背景色
-		dc.FillSolidRect(&clientRect, m_readingMode == READING_NIGHT ?
+		if (clientRect.IsRectEmpty())
+			return;
+		CDC backDC;
+		backDC.CreateCompatibleDC(&dc);
+		CBitmap backBmp;
+		backBmp.CreateCompatibleBitmap(&dc, clientRect.Width(), clientRect.Height());
+		CBitmap* pOldBackBmp = backDC.SelectObject(&backBmp);
+		backDC.FillSolidRect(&clientRect, m_readingMode == READING_NIGHT ?
 			RGB(30, 25, 20) : PDF_VIEW_BACKGROUND);
 		if (m_pParentDlg && m_pParentDlg->m_documents.empty())
-			DrawWelcomeImage(dc, clientRect);
+			DrawWelcomeImage(backDC, clientRect);
+		dc.BitBlt(0, 0, clientRect.Width(), clientRect.Height(), &backDC, 0, 0, SRCCOPY);
+		backDC.SelectObject(pOldBackBmp);
 		return;
 	}
 
@@ -5972,9 +5980,13 @@ void CXiaoGongPDFDlg::CloseDocument(int index)
 	}
 
 	bool isActiveDocument = (index == m_activeDocIndex);
+	const bool closingLastDocument = isActiveDocument && m_documents.size() == 1;
 	CPDFDocument* doc = m_documents[index];
 	if (m_pSearchParams && m_pSearchParams->pDoc == doc)
 		StopSearch();
+	// 最后一个文档关闭期间会多次更新布局，只在布局完成后绘制空视图。
+	if (closingLastDocument)
+		m_pdfView.SetRedraw(FALSE);
 
 	if (isActiveDocument)
 	{
@@ -6036,7 +6048,6 @@ void CXiaoGongPDFDlg::CloseDocument(int index)
 			if (m_editSearch.GetSafeHwnd())
 				m_editSearch.SetWindowText(_T(""));
 			SetWindowText(_T("小龚PDF阅读器"));
-			RefreshDocumentLayout();
 			m_outlineTree.DeleteAllItems();
 			m_outlineTree.ShowWindow(SW_HIDE);
 
@@ -6047,8 +6058,6 @@ void CXiaoGongPDFDlg::CloseDocument(int index)
 				m_tabCtrl.DeleteAllItems();
 				// 隐藏标签页控件
 				m_tabCtrl.ShowWindow(SW_HIDE);
-				// 强制刷新
-				m_tabCtrl.RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE | RDW_ALLCHILDREN);
 			}
 
 			// 清空显示
@@ -6065,6 +6074,8 @@ void CXiaoGongPDFDlg::CloseDocument(int index)
 			// 无文档时隐藏滚动条（必须在 OnSize 之后，防止 OnSize 重新显示）
 			m_pdfView.ShowScrollBar(SB_VERT, FALSE);
 			m_pdfView.ShowScrollBar(SB_HORZ, FALSE);
+			m_pdfView.SetRedraw(TRUE);
+			m_pdfView.RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE);
 		}
 		else
 		{
