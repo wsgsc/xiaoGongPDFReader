@@ -6,6 +6,7 @@
 #include "resource.h"
 #include <mupdf/fitz.h>
 #include <vector>
+#include <map>
 
 // 页面信息结构
 struct PageInfo {
@@ -40,7 +41,8 @@ class CPDFEditDialog : public CDialogEx
 	DECLARE_DYNAMIC(CPDFEditDialog)
 
 public:
-	CPDFEditDialog(fz_context* ctx, fz_document* doc, const CString& filePath, CWnd* pParent = nullptr);
+	CPDFEditDialog(fz_context* ctx, fz_document* doc, const CString& filePath,
+		const std::vector<char>& password, CWnd* pParent = nullptr);
 	virtual ~CPDFEditDialog();
 
 	enum { IDD = IDD_PDF_EDIT_DIALOG };
@@ -61,7 +63,10 @@ private:
 	fz_context* m_ctx;
 	fz_document* m_doc;
 	CString m_filePath;
+	std::vector<char> m_password;
+	std::map<CString, std::vector<char>> m_importPasswords;
 	int m_totalPages;
+	fz_document* OpenAuthenticatedSource(const CString& path);
 
 	// 控件
 	CListCtrl m_thumbnailList;

@@ -782,7 +782,6 @@ CXiaoGongPDFDlg::CXiaoGongPDFDlg(CWnd* pParent /*=nullptr*/)
 	, m_scrollbarDragStartPos(0)    // 初始化滚动条拖拽起始位置
 	, m_currentMatchIndex(-1)       // 初始化当前匹配项索引
 	, m_searchCaseSensitive(false)  // 默认不区分大小写
-	, m_pSearchThread(nullptr)      // 初始化搜索线程指针
 	, m_pSearchParams(nullptr)      // 初始化搜索参数
 	, m_isSearching(false)          // 初始化搜索状态
 	, m_searchTaskId(0)
@@ -4014,7 +4013,7 @@ void CXiaoGongPDFDlg::OnBtnEdit()
 	}
 
 	// 创建编辑对话框
-	CPDFEditDialog editDlg(m_ctx, m_doc, pDoc->GetFilePath(), this);
+	CPDFEditDialog editDlg(m_ctx, m_doc, pDoc->GetFilePath(), pDoc->GetPassword(), this);
 
 	// 显示对话框
 	if (editDlg.DoModal() == IDOK)
@@ -5379,10 +5378,56 @@ void CXiaoGongPDFDlg::onMenuPrint()
 		// 确定要打印的页面范围
 		int startPage = printDlg.m_pageFrom - 1;
 		int endPage = printDlg.m_pageTo - 1;
+		CProgressDlg progress(this);
+		progress.SetLoadCancelNotification(false);
+		if (!progress.Create(IDD_PROGRESS_DIALOG, this))
+		{
+			dcPrint.AbortDoc();
+			dcPrint.DeleteDC();
+			MessageBox(_T("无法创建打印进度窗口"), _T("错误"), MB_OK | MB_ICONERROR);
+			return;
+		}
+		progress.SetWindowText(_T("正在打印"));
+		progress.SetIndeterminate(false);
+		progress.ShowWindow(SW_SHOW);
+		EnableWindow(FALSE);
+		progress.EnableWindow(TRUE);
+		long long completedPages = 0;
+		const long long totalPagesToPrint =
+			static_cast<long long>(endPage - startPage + 1) * printDlg.m_copies;
+		auto printPage = [&](int pageNum) -> bool
+		{
+			CString status;
+			status.Format(_T("正在打印第 %d 页 (%lld / %lld)"), pageNum + 1,
+				completedPages + 1, totalPagesToPrint);
+			progress.SetStatus(status);
+			progress.UpdateWindow();
+			if (!PrintSinglePage(dcPrint, pageNum, horRes, verRes))
+				return false;
+			++completedPages;
+			progress.SetProgress(static_cast<int>(completedPages * 100LL / totalPagesToPrint));
+			MSG message;
+			while (::PeekMessage(&message, progress.GetSafeHwnd(), 0, 0, PM_REMOVE))
+			{
+				if (!progress.IsDialogMessage(&message))
+				{
+					::TranslateMessage(&message);
+					::DispatchMessage(&message);
+				}
+			}
+			return !progress.IsCancelled();
+		};
+		auto closeProgress = [&]()
+		{
+			EnableWindow(TRUE);
+			progress.DestroyWindow();
+			SetActiveWindow();
+		};
 
 		// 显示进度
 		bool failed = false;
 		int failedPage = -1;
+		bool cancelled = false;
 
 		try
 		{
@@ -5396,7 +5441,7 @@ void CXiaoGongPDFDlg::onMenuPrint()
 				{
 					for (int pageNum = startPage; pageNum <= endPage && !failed; pageNum++)
 					{
-						failed = !PrintSinglePage(dcPrint, pageNum, horRes, verRes);
+						failed = !printPage(pageNum);
 						if (failed) failedPage = pageNum;
 					}
 				}
@@ -5408,18 +5453,23 @@ void CXiaoGongPDFDlg::onMenuPrint()
 				{
 					for (int copy = 0; copy < totalCopies && !failed; copy++)
 					{
-						failed = !PrintSinglePage(dcPrint, pageNum, horRes, verRes);
+						failed = !printPage(pageNum);
 						if (failed) failedPage = pageNum;
 					}
 				}
 			}
 
-			if (failed)
+			cancelled = progress.IsCancelled();
+			closeProgress();
+			if (failed || cancelled)
 			{
 				dcPrint.AbortDoc();
-				CString message;
-				message.Format(_T("第 %d 页打印失败，任务已取消。"), failedPage + 1);
-				MessageBox(message, _T("错误"), MB_OK | MB_ICONERROR);
+				if (!cancelled)
+				{
+					CString message;
+					message.Format(_T("第 %d 页打印失败，任务已取消。"), failedPage + 1);
+					MessageBox(message, _T("错误"), MB_OK | MB_ICONERROR);
+				}
 			}
 			else if (dcPrint.EndDoc() < 0)
 				MessageBox(_T("打印机未能完成任务。"), _T("错误"), MB_OK | MB_ICONERROR);
@@ -5428,6 +5478,8 @@ void CXiaoGongPDFDlg::onMenuPrint()
 		}
 		catch (...)
 		{
+			if (progress.GetSafeHwnd())
+				closeProgress();
 			dcPrint.AbortDoc();
 			MessageBox(_T("打印过程中发生错误"), _T("错误"), MB_OK | MB_ICONERROR);
 		}
@@ -6303,14 +6355,22 @@ void CXiaoGongPDFDlg::OnOK()
 // 自定义Cancel函数,防止关闭时发出警告音
 void CXiaoGongPDFDlg::OnCancel()
 {
-	if (!m_pendingLoads.empty())
+	if (!m_pendingLoads.empty() || m_pSearchParams || !m_retiredSearches.empty())
 	{
 		m_closePending = true;
 		for (PDFLoadParams* pParams : m_pendingLoads)
 			pParams->cancelled.store(true);
+		StopSearch();
 		return;
 	}
 	CDialogEx::OnCancel();
+}
+
+void CXiaoGongPDFDlg::FinishPendingClose()
+{
+	if (m_closePending && m_pendingLoads.empty() &&
+		!m_pSearchParams && m_retiredSearches.empty())
+		CDialogEx::OnCancel();
 }
 
 void CXiaoGongPDFDlg::OnClose()
@@ -7687,6 +7747,13 @@ bool CXiaoGongPDFDlg::PrintSinglePage(CDC& dcPrint, int pageNum, int horRes, int
 		float scaleX = (float)horRes / safePageWidth;
 		float scaleY = (float)verRes / safePageHeight;
 		float scale = min(scaleX, scaleY);
+		const int outputWidth = ClampRenderDimension(pageWidth * scale);
+		const int outputHeight = ClampRenderDimension(pageHeight * scale);
+		// Bound the RGB pixmap and 24-bit DIB to roughly 56 MB combined.
+		constexpr double MAX_PRINT_PIXELS = 8.0 * 1024.0 * 1024.0;
+		const double requestedPixels = static_cast<double>(pageWidth) * pageHeight * scale * scale;
+		if (requestedPixels > MAX_PRINT_PIXELS)
+			scale *= static_cast<float>(std::sqrt(MAX_PRINT_PIXELS / requestedPixels));
 
 		// 计算渲染尺寸
 		int renderWidth = ClampRenderDimension(pageWidth * scale);
@@ -7736,10 +7803,11 @@ bool CXiaoGongPDFDlg::PrintSinglePage(CDC& dcPrint, int pageNum, int horRes, int
 			HBITMAP oldBitmap = (HBITMAP)memDC.SelectObject(hBitmap);
 
 			// 居中打印
-			int xOffset = (horRes - renderWidth) / 2;
-			int yOffset = (verRes - renderHeight) / 2;
+			int xOffset = (horRes - outputWidth) / 2;
+			int yOffset = (verRes - outputHeight) / 2;
 
-			success = dcPrint.StretchBlt(xOffset, yOffset, renderWidth, renderHeight,
+			dcPrint.SetStretchBltMode(HALFTONE);
+			success = dcPrint.StretchBlt(xOffset, yOffset, outputWidth, outputHeight,
 				&memDC, 0, 0, renderWidth, renderHeight, SRCCOPY) != FALSE;
 
 			memDC.SelectObject(oldBitmap);
@@ -8831,16 +8899,11 @@ int CXiaoGongPDFDlg::GetPageAtPosition(int yPos)
 void CXiaoGongPDFDlg::StopSearch()
 {
 	if (m_pSearchParams)
-		m_pSearchParams->cancelled.store(true);
-	if (m_pSearchThread)
 	{
-		// 文档必须在工作线程结束后才能释放。不能超时后删除参数或强制终止线程。
-		::WaitForSingleObject(m_pSearchThread->m_hThread, INFINITE);
-		delete m_pSearchThread;
-		m_pSearchThread = nullptr;
+		m_pSearchParams->cancelled.store(true);
+		m_retiredSearches.push_back(m_pSearchParams);
+		m_pSearchParams = nullptr;
 	}
-	delete m_pSearchParams;
-	m_pSearchParams = nullptr;
 	m_isSearching = false;
 }
 
@@ -9040,17 +9103,18 @@ LRESULT CXiaoGongPDFDlg::OnSearchProgress(WPARAM wParam, LPARAM lParam)
 LRESULT CXiaoGongPDFDlg::OnSearchComplete(WPARAM wParam, LPARAM lParam)
 {
 	SearchParams* pParams = (SearchParams*)lParam;
-	// StopSearch 可能已经释放了旧任务；旧完成消息只携带悬空地址，不能解引用。
+	auto retired = std::find(m_retiredSearches.begin(), m_retiredSearches.end(), pParams);
+	if (retired != m_retiredSearches.end())
+	{
+		m_retiredSearches.erase(retired);
+		delete pParams;
+		FinishPendingClose();
+		return 0;
+	}
 	if (!pParams || pParams != m_pSearchParams || wParam != m_searchTaskId)
 		return 0;
 
 	m_isSearching = false;
-	if (m_pSearchThread)
-	{
-		::WaitForSingleObject(m_pSearchThread->m_hThread, INFINITE);
-		delete m_pSearchThread;
-		m_pSearchThread = nullptr;
-	}
 
 	// 如果搜索已被取消或用户关闭了文档，忽略结果
 	if (pParams->cancelled.load() || pParams->pDoc != GetActiveDocument() ||
@@ -9244,12 +9308,11 @@ void CXiaoGongPDFDlg::SearchPDF(const CString& keyword, bool caseSensitive)
 
 	SetStatusBarMessage(_T("正在搜索..."));
 
-	m_pSearchThread = AfxBeginThread(SearchThreadProc, pParams,
+	CWinThread* pSearchThread = AfxBeginThread(SearchThreadProc, pParams,
 		THREAD_PRIORITY_BELOW_NORMAL, 0, CREATE_SUSPENDED);
-	if (m_pSearchThread)
+	if (pSearchThread)
 	{
-		m_pSearchThread->m_bAutoDelete = FALSE;
-		m_pSearchThread->ResumeThread();
+		pSearchThread->ResumeThread();
 	}
 	else
 	{
@@ -9857,8 +9920,7 @@ LRESULT CXiaoGongPDFDlg::OnPDFLoadComplete(WPARAM wParam, LPARAM lParam)
 	if (m_closePending)
 	{
 		CleanupPendingLoad(pParams);
-		if (m_pendingLoads.empty())
-			CDialogEx::OnCancel();
+		FinishPendingClose();
 		return 0;
 	}
 	if (pParams->pProgressDlg && static_cast<CProgressDlg*>(pParams->pProgressDlg)->IsCancelled())
@@ -9900,8 +9962,7 @@ LRESULT CXiaoGongPDFDlg::OnPDFLoadComplete(WPARAM wParam, LPARAM lParam)
 			if (m_closePending)
 			{
 				CleanupPendingLoad(pParams);
-				if (m_pendingLoads.empty())
-					CDialogEx::OnCancel();
+				FinishPendingClose();
 				return 0;
 			}
 

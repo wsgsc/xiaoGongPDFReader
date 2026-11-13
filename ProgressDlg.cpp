@@ -67,8 +67,11 @@ void CProgressDlg::OnCancel()
 	if (CWnd* pButton = GetDlgItem(IDCANCEL))
 		pButton->EnableWindow(FALSE);
 	SetStatus(_T("正在取消，请稍候..."));
-	if (CWnd* pParent = GetParent())
-		pParent->PostMessage(WM_PDF_LOAD_CANCELLED, reinterpret_cast<WPARAM>(GetSafeHwnd()));
+	if (m_notifyLoadCancel)
+	{
+		if (CWnd* pParent = GetParent())
+			pParent->PostMessage(WM_PDF_LOAD_CANCELLED, reinterpret_cast<WPARAM>(GetSafeHwnd()));
+	}
 }
 
 void CProgressDlg::SetProgress(int percent)

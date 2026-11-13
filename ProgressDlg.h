@@ -22,6 +22,7 @@ public:
 
 	// 检查是否取消
 	bool IsCancelled() const { return m_bCancelled; }
+	void SetLoadCancelNotification(bool enabled) { m_notifyLoadCancel = enabled; }
 
 protected:
 	virtual void DoDataExchange(CDataExchange* pDX);
@@ -35,4 +36,5 @@ private:
 	CStatic m_statusText;
 	bool m_bCancelled;
 	bool m_bIndeterminate;
+	bool m_notifyLoadCancel = true;
 };

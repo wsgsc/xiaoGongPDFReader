@@ -425,12 +425,13 @@ private:
 				SecureZeroMemory(utf8Password.data(), utf8Password.size());
 		}
 	};
-	CWinThread* m_pSearchThread;
 	SearchParams* m_pSearchParams;
+	std::vector<SearchParams*> m_retiredSearches;
 	bool m_isSearching;
 	UINT_PTR m_searchTaskId;
 	static UINT SearchThreadProc(LPVOID pParam);
 	void StopSearch();
+	void FinishPendingClose();
 	void RefreshSearchResultsList();
 	void NavigateToSearchMatch(int index);
 	afx_msg void OnSearchResultSelected(NMHDR* pNMHDR, LRESULT* pResult);

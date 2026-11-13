@@ -6,6 +6,7 @@
 #include <mupdf/pdf.h>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <map>
 #include <objidl.h>
@@ -21,6 +22,41 @@
 
 namespace
 {
+	class CEditPasswordDialog : public CDialogEx
+	{
+	public:
+		CEditPasswordDialog(const CString& fileName, bool invalid, CWnd* pParent)
+			: CDialogEx(IDD_PASSWORD_DIALOG, pParent), m_fileName(fileName), m_invalid(invalid) {}
+		~CEditPasswordDialog()
+		{
+			if (!m_password.IsEmpty())
+			{
+				SecureZeroMemory(m_password.GetBuffer(), m_password.GetLength() * sizeof(TCHAR));
+				m_password.ReleaseBuffer(0);
+			}
+		}
+		const CString& GetPassword() const { return m_password; }
+	protected:
+		BOOL OnInitDialog() override
+		{
+			CDialogEx::OnInitDialog();
+			SetDlgItemText(IDC_PASSWORD_FILE, m_fileName);
+			if (m_invalid)
+				SetDlgItemText(IDC_PASSWORD_PROMPT, _T("密码错误，请重新输入"));
+			GetDlgItem(IDC_EDIT_PASSWORD)->SetFocus();
+			return FALSE;
+		}
+		void OnOK() override
+		{
+			GetDlgItemText(IDC_EDIT_PASSWORD, m_password);
+			CDialogEx::OnOK();
+		}
+	private:
+		CString m_fileName;
+		CString m_password;
+		bool m_invalid;
+	};
+
 	const int THUMBNAIL_WIDTH = 220;
 	const int THUMBNAIL_HEIGHT = 280;
 	const int THUMBNAIL_ACTION_HEIGHT = 318;
@@ -127,7 +163,8 @@ namespace
 	}
 
 	bool SaveValidatedPdf(fz_context* ctx, pdf_document* pdf, const CString& targetPath,
-		int expectedPages, const pdf_write_options& options)
+		int expectedPages, const pdf_write_options& options,
+		const std::vector<char>* password = nullptr)
 	{
 		if (expectedPages < 1 || pdf_count_pages(ctx, pdf) != expectedPages)
 			return false;
@@ -139,12 +176,17 @@ namespace
 			return false;
 
 		fz_document* checkDoc = nullptr;
+		fz_var(checkDoc);
 		volatile bool valid = false;
 		CW2A tempPath(tempName, CP_UTF8);
 		fz_try(ctx)
 		{
 			pdf_save_document(ctx, pdf, tempPath, &options);
 			checkDoc = fz_open_document(ctx, tempPath);
+			if (fz_needs_password(ctx, checkDoc) &&
+				(!password || password->empty() ||
+				 !fz_authenticate_password(ctx, checkDoc, password->data())))
+				fz_throw(ctx, FZ_ERROR_GENERIC, "Cannot authenticate saved PDF");
 			valid = fz_count_pages(ctx, checkDoc) == expectedPages;
 		}
 		fz_always(ctx)
@@ -186,11 +228,13 @@ BEGIN_MESSAGE_MAP(CPDFEditDialog, CDialogEx)
 	ON_WM_TIMER()
 END_MESSAGE_MAP()
 
-CPDFEditDialog::CPDFEditDialog(fz_context* ctx, fz_document* doc, const CString& filePath, CWnd* pParent)
+CPDFEditDialog::CPDFEditDialog(fz_context* ctx, fz_document* doc, const CString& filePath,
+	const std::vector<char>& password, CWnd* pParent)
 	: CDialogEx(IDD_PDF_EDIT_DIALOG, pParent)
 	, m_ctx(ctx)
 	, m_doc(doc)
 	, m_filePath(filePath)
+	, m_password(password)
 	, m_totalPages(0)
 	, m_isDragging(false)
 	, m_potentialDrag(false)
@@ -210,6 +254,41 @@ CPDFEditDialog::CPDFEditDialog(fz_context* ctx, fz_document* doc, const CString&
 CPDFEditDialog::~CPDFEditDialog()
 {
 	CleanupThumbnails();
+	if (!m_password.empty())
+		SecureZeroMemory(m_password.data(), m_password.size());
+	for (auto& entry : m_importPasswords)
+		if (!entry.second.empty())
+			SecureZeroMemory(entry.second.data(), entry.second.size());
+}
+
+fz_document* CPDFEditDialog::OpenAuthenticatedSource(const CString& path)
+{
+	CW2A utf8Path(path, CP_UTF8);
+	fz_document* source = nullptr;
+	fz_var(source);
+	fz_try(m_ctx)
+	{
+		source = fz_open_document(m_ctx, utf8Path);
+		if (fz_needs_password(m_ctx, source))
+		{
+			const std::vector<char>* password = &m_password;
+			if (path.CompareNoCase(m_filePath) != 0)
+			{
+				auto it = m_importPasswords.find(path);
+				password = it == m_importPasswords.end() ? nullptr : &it->second;
+			}
+			if (!password || password->empty() ||
+				!fz_authenticate_password(m_ctx, source, password->data()))
+				fz_throw(m_ctx, FZ_ERROR_GENERIC, "PDF password is required");
+		}
+	}
+	fz_catch(m_ctx)
+	{
+		if (source)
+			fz_drop_document(m_ctx, source);
+		fz_rethrow(m_ctx);
+	}
+	return source;
 }
 
 void CPDFEditDialog::DoDataExchange(CDataExchange* pDX)
@@ -858,7 +937,7 @@ HBITMAP CPDFEditDialog::RenderThumbnailFromSource(const CString& sourceFile, int
 	fz_try(m_ctx)
 	{
 		// 打开源文件
-		sourceDoc = fz_open_document(m_ctx, CT2A(sourceFile, CP_UTF8));
+		sourceDoc = OpenAuthenticatedSource(sourceFile);
 		if (!sourceDoc)
 			fz_throw(m_ctx, FZ_ERROR_GENERIC, "无法打开源文件");
 
@@ -968,7 +1047,7 @@ HBITMAP CPDFEditDialog::RenderPreviewBitmap(const CString& sourceFile, int pageI
 	fz_try(m_ctx)
 	{
 		// 打开源文件
-		sourceDoc = fz_open_document(m_ctx, CT2A(sourceFile, CP_UTF8));
+		sourceDoc = OpenAuthenticatedSource(sourceFile);
 		if (!sourceDoc)
 			fz_throw(m_ctx, FZ_ERROR_GENERIC, "无法打开源文件");
 
@@ -2020,8 +2099,7 @@ void CPDFEditDialog::ExtractSelectedPages()
 			}
 			else {
 				// 打开源文档
-				CW2A sourcePathA(pageInfo.sourceFile, CP_UTF8);
-				sourceDoc = fz_open_document(m_ctx, sourcePathA);
+				sourceDoc = OpenAuthenticatedSource(pageInfo.sourceFile);
 				openDocs[pageInfo.sourceFile] = sourceDoc;
 			}
 
@@ -2505,8 +2583,7 @@ bool CPDFEditDialog::SaveToNewFile(const CString& newFilePath)
 			if (!page.isDeleted && page.sourceFile.CompareNoCase(m_filePath) == 0)
 				originalPages.push_back(page.sourcePageIndex);
 		}
-		CW2A originalPath(m_filePath, CP_UTF8);
-		newPdf = pdf_open_document(m_ctx, originalPath);
+		newPdf = pdf_document_from_fz_document(m_ctx, OpenAuthenticatedSource(m_filePath));
 		pdf_obj* oldRoot = pdf_dict_get(m_ctx, pdf_trailer(m_ctx, newPdf), PDF_NAME(Root));
 		catalogMetadata = pdf_keep_obj(m_ctx, pdf_dict_get(m_ctx, oldRoot, PDF_NAME(Metadata)));
 		pdf_rearrange_pages(m_ctx, newPdf, static_cast<int>(originalPages.size()),
@@ -2666,8 +2743,7 @@ bool CPDFEditDialog::SaveToNewFile(const CString& newFilePath)
 				}
 				else {
 					// 打开源文档
-					CW2A sourcePathA(page.sourceFile, CP_UTF8);
-					sourceDoc = fz_open_document(m_ctx, sourcePathA);
+					sourceDoc = OpenAuthenticatedSource(page.sourceFile);
 					openDocs[page.sourceFile] = sourceDoc;
 				}
 
@@ -2707,7 +2783,8 @@ bool CPDFEditDialog::SaveToNewFile(const CString& newFilePath)
 		OutputDebugString(countMsg);
 
 		// 缺页时拒绝保存；临时文件验证通过后才替换目标文件。
-		success = SaveValidatedPdf(m_ctx, newPdf, newFilePath, pageCount, opts);
+			success = SaveValidatedPdf(m_ctx, newPdf, newFilePath, pageCount, opts,
+				&m_password);
 		if (!success)
 			errorMsg = _T("页面数量不符，或无法完成文件写入与验证。\n");
 	}
@@ -2757,28 +2834,82 @@ bool CPDFEditDialog::SaveToNewFile(const CString& newFilePath)
 // 导入PDF文件
 bool CPDFEditDialog::ImportPDF(const CString& pdfPath)
 {
-	if (!m_ctx) return false;
-
-	// 打开新的PDF文件
-	CW2A pdfPathA(pdfPath, CP_UTF8);
-	fz_document* newDoc = nullptr;
-
-	fz_try(m_ctx) {
-		newDoc = fz_open_document(m_ctx, pdfPathA);
-	}
-	fz_catch(m_ctx) {
-		MessageBox(_T("无法打开PDF文件！"), _T("错误"), MB_OK | MB_ICONERROR);
+	if (!m_ctx)
 		return false;
+
+	fz_document* newDoc = nullptr;
+	fz_var(newDoc);
+	std::vector<char> password;
+	volatile int pageCount = 0;
+	bool promptForPassword = false;
+	bool invalidPassword = false;
+	for (;;)
+	{
+		if (promptForPassword)
+		{
+			CEditPasswordDialog dialog(pdfPath.Mid(pdfPath.ReverseFind(_T('\\')) + 1),
+				invalidPassword, this);
+			if (dialog.DoModal() != IDOK)
+				return false;
+			CW2A utf8Password(dialog.GetPassword(), CP_UTF8);
+			const char* pUtf8Password = utf8Password;
+			password.assign(pUtf8Password, pUtf8Password + std::strlen(pUtf8Password) + 1);
+		}
+		volatile bool failed = false;
+		volatile bool needsPassword = false;
+		CW2A utf8Path(pdfPath, CP_UTF8);
+		fz_try(m_ctx)
+		{
+			newDoc = fz_open_document(m_ctx, utf8Path);
+			if (fz_needs_password(m_ctx, newDoc))
+			{
+				needsPassword = password.empty() ||
+					!fz_authenticate_password(m_ctx, newDoc, password.data());
+			}
+			if (!needsPassword)
+				pageCount = fz_count_pages(m_ctx, newDoc);
+		}
+		fz_catch(m_ctx)
+		{
+			failed = true;
+		}
+		if (needsPassword || failed)
+		{
+			if (newDoc)
+				fz_drop_document(m_ctx, newDoc);
+			newDoc = nullptr;
+		}
+		if (failed)
+		{
+			if (!password.empty())
+				SecureZeroMemory(password.data(), password.size());
+			MessageBox(_T("无法打开PDF文件！"), _T("错误"), MB_OK | MB_ICONERROR);
+			return false;
+		}
+		if (!needsPassword)
+			break;
+		invalidPassword = promptForPassword;
+		promptForPassword = true;
+		if (!password.empty())
+			SecureZeroMemory(password.data(), password.size());
+		password.clear();
 	}
 
-	if (!newDoc) return false;
-
-	// 获取新PDF的页数
-	int newPageCount = fz_count_pages(m_ctx, newDoc);
+	int newPageCount = static_cast<int>(pageCount);
 	if (newPageCount <= 0) {
 		fz_drop_document(m_ctx, newDoc);
+		if (!password.empty())
+			SecureZeroMemory(password.data(), password.size());
 		MessageBox(_T("PDF文件为空！"), _T("错误"), MB_OK | MB_ICONERROR);
 		return false;
+	}
+	if (!password.empty())
+	{
+		auto existing = m_importPasswords.find(pdfPath);
+		if (existing != m_importPasswords.end() && !existing->second.empty())
+			SecureZeroMemory(existing->second.data(), existing->second.size());
+		m_importPasswords[pdfPath] = password;
+		SecureZeroMemory(password.data(), password.size());
 	}
 
 	// 计算起始索引（添加到现有页面后面）
