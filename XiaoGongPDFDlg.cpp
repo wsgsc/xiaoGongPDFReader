@@ -494,7 +494,7 @@ void CPDFViewCtrl::DrawWelcomeImage(CDC& dc, const CRect& clientRect)
 
 	const int imageWidth = static_cast<int>(m_pWelcomeBitmap->GetWidth());
 	const int imageHeight = static_cast<int>(m_pWelcomeBitmap->GetHeight());
-	const double scale = min(1.0, min(clientRect.Width() * 0.9 / imageWidth,
+	const double scale = 0.75 * min(1.0, min(clientRect.Width() * 0.9 / imageWidth,
 		clientRect.Height() * 0.9 / imageHeight));
 	const int drawWidth = static_cast<int>(imageWidth * scale);
 	const int drawHeight = static_cast<int>(imageHeight * scale);

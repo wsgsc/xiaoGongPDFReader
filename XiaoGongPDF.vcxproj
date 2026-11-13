@@ -239,7 +239,7 @@
     <Image Include="res\XiaoGongPDF.ico" />
     <Image Include="rotate-left.png" />
     <Image Include="rotate-right.png" />
-    <Image Include="welcome.png" />
+    <Image Include="welcome2.png" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <Target Name="CopyPortableRuntime" AfterTargets="Build" Condition="'$(Configuration)'=='Release'">
