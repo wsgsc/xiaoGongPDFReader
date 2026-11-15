@@ -194,7 +194,11 @@ private:
 	CCustomButton m_btnMaximize;
 	CCustomButton m_btnCloseWindow;
 	CCustomButton m_btnFirst;
+	CCustomButton m_btnPrevPage;
+	CCustomButton m_btnNextPage;
 	CCustomButton m_btnLast;
+	CCustomButton m_btnPrint;
+	CStatic m_toolbarDividers[10];
 	CCustomButton m_btnFullscreen;    // 全屏按钮
 	CCustomButton m_btnRotateLeft;    // 向左旋转按钮
 	CCustomButton m_btnRotateRight;   // 向右旋转按钮
@@ -204,12 +208,17 @@ private:
 	CEdit m_editCurrent;
 	CStatic m_pageTotal;
 	CStatic m_statusBar;        // 状态栏
+	CStatic m_zoomStatus;
 
 	// 搜索相关控件
 	CEdit m_editSearch;              // 搜索输入框
+	CStatic m_searchPopup;
+	CStatic m_searchMatchCount;
+	CCustomButton m_btnCloseSearchPopup;
 	CCustomButton m_btnFind;         // 查找按钮
 	CCustomButton m_btnPrevMatch;    // 上一个匹配按钮
 	CCustomButton m_btnNextMatch;    // 下一个匹配按钮
+	bool m_searchToolsVisible = false;
 	CFont m_buttonFont;      // 按钮字体
 	
 	fz_context* m_ctx;
@@ -254,6 +263,7 @@ private:
 
 	// 缩放相关（ZoomMode 定义在 PDFDocument.h 中）
 	ZoomMode m_zoomMode;
+	ZoomMode m_nextFitMode = ZOOM_FIT_PAGE;
 	float m_customZoom;
 	float m_documentMaxPageWidth;  // ★★★ 文档最大页面宽度（原始PDF点单位）
 	float m_documentUniformScale;  // ★★★ 文档统一缩放比例（基于最大页面宽度，确保所有页面宽度一致）
@@ -436,7 +446,6 @@ private:
 	void NavigateToSearchMatch(int index);
 	afx_msg void OnSearchResultSelected(NMHDR* pNMHDR, LRESULT* pResult);
 	afx_msg void OnCloseSearchResults();
-	afx_msg void OnMenuSearchResults();
 	afx_msg LRESULT OnSearchComplete(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnSearchProgress(WPARAM wParam, LPARAM lParam);
 
@@ -449,6 +458,7 @@ private:
 // 实现
 protected:
 	HICON m_hIcon;
+	HICON m_hTitleIcon;
 
 	// 生成的消息映射函数
 	virtual BOOL OnInitDialog();
@@ -488,8 +498,11 @@ protected:
 	afx_msg void OnReadingMode(UINT nID);
     void UpdatePageControls();
     void UpdateStatusBar();    // 更新状态栏
+	void UpdateZoomStatus();
     void SetStatusBarMessage(LPCTSTR message);
     afx_msg void OnBtnFirst();
+    afx_msg void OnBtnPrevPage();
+    afx_msg void OnBtnNextPage();
     afx_msg void OnBtnLast();
     afx_msg void OnEnChangeEditCurrent();
     afx_msg void OnEnChangeEditSearch();  // 搜索框文本变化事件
@@ -569,6 +582,8 @@ protected:
 	void OnBtnZoomOut();
 	void OnBtnFitWidth();
 	void OnBtnFitPage();
+	void OnBtnToggleFit();
+	void UpdateFitButton();
 	void OnBtnZoomIn();
 	void OnBtnMore();
 	void OnBtnMinimize();
@@ -625,7 +640,7 @@ protected:
     void SearchPDF(const CString& keyword, bool caseSensitive);  // 搜索PDF文档
     void GoToNextMatch();  // 跳转到下一个匹配项
     void GoToPrevMatch();  // 跳转到上一个匹配项
-    void ClearSearchResults();  // 清除搜索结果
+    void ClearSearchResults(bool keepPanel = false);  // 清除搜索结果
     void HighlightSearchMatches(CDC* pDC, int pageNumber);  // 高亮显示搜索匹配项
     void UpdateSelectionHighlight(CDC* pDC, int pageNumber);  // 绘制文本选择高亮
     CRect TransformQuadToScreen(const fz_quad& quad, int pageNumber);  // 将PDF坐标转换为屏幕坐标
@@ -634,6 +649,8 @@ protected:
 	CRect TransformQuadToBitmapRect(const fz_quad& quad, const fz_rect& bounds,
 		int rotation, float scale) const;
     afx_msg void OnBtnFind();  // 查找按钮点击事件
+	void ShowSearchTools();
+	afx_msg void OnCloseSearchPopup();
     afx_msg void OnBtnNextMatch();  // 下一个匹配按钮点击事件
     afx_msg void OnBtnPrevMatch();  // 上一个匹配按钮点击事件
     afx_msg void OnBtnSelectText();  // 文本选择按钮点击事件

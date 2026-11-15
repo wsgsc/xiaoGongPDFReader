@@ -17,6 +17,7 @@ public:
 	void SetTextColor(COLORREF textColor);
 	void SetCornerRadius(int radius);
 	void SetIconGlyph(WCHAR glyph);
+	void SetIconAndText(bool enabled);
 	void SetIconImage(UINT resourceId, int iconSize = 18);
 	void SetWindowControlStyle(bool closeButton = false);
 	void SetToolTipText(LPCTSTR text);
@@ -37,6 +38,7 @@ private:
 	CFont m_windowIconFont;
 	CToolTipCtrl m_toolTip;
 	WCHAR m_iconGlyph;
+	bool m_iconAndText;
 	UINT m_iconResourceId;
 	int m_iconSize;
 	Gdiplus::Bitmap* m_pIconBitmap;

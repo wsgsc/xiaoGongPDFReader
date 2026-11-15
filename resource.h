@@ -14,6 +14,7 @@
 #define IDR_ROTATE_LEFT_PNG             133
 #define IDR_ROTATE_RIGHT_PNG            134
 #define IDR_WELCOME_PNG                 135
+#define IDR_TITLE_ICON                  136
 #define IDC_LIST2                       1001
 #define IDC_THUMBNAIL_LIST              1001
 #define IDC_PDF_VIEW                    1002
@@ -64,6 +65,11 @@
 #define IDC_SEARCH_RESULTS_LIST         1070
 #define IDC_SEARCH_RESULTS_HEADER       1071
 #define IDC_BTN_CLOSE_SEARCH_RESULTS    1072
+#define IDC_BTN_PRINT                   1078
+#define IDC_SEARCH_POPUP                 1080
+#define IDC_SEARCH_MATCH_COUNT           1081
+#define IDC_BTN_CLOSE_SEARCH_POPUP       1082
+#define IDC_STATUS_ZOOM                  1083
 #define IDD_PDF_EDIT_DIALOG             105
 #define IDD_PROGRESS_DIALOG             106
 #define IDD_PASSWORD_DIALOG             107
@@ -100,9 +106,6 @@
 #define ID_MENU_RECENT_FILE_8           32786
 #define ID_MENU_RECENT_FILE_9           32787
 #define ID_MENU_RECENT_FILE_10          32788
-#define ID_MENU_FIT_WIDTH               32789
-#define ID_MENU_FIT_PAGE                32790
-#define ID_MENU_SEARCH_RESULTS          32791
 #define ID_MENU_READING_NORMAL          32792
 #define ID_MENU_READING_NIGHT           32793
 #define ID_MENU_READING_EYE             32794
@@ -116,9 +119,9 @@
 // 
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
-#define _APS_NEXT_RESOURCE_VALUE        136
+#define _APS_NEXT_RESOURCE_VALUE        137
 #define _APS_NEXT_COMMAND_VALUE         32795
-#define _APS_NEXT_CONTROL_VALUE         1078
+#define _APS_NEXT_CONTROL_VALUE         1084
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

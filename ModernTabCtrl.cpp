@@ -193,6 +193,7 @@ void CModernTabCtrl::OnPaint()
 
 void CModernTabCtrl::DrawTab(CDC* pDC, int index, CRect rect, BOOL isSelected, BOOL isHovered)
 {
+	const bool dark = GetRValue(m_normalColor) < 100;
 	// 根据状态选择背景色
 	COLORREF bgColor;
 	if (isSelected)
@@ -200,13 +201,13 @@ void CModernTabCtrl::DrawTab(CDC* pDC, int index, CRect rect, BOOL isSelected, B
 	else if (isHovered)
 		bgColor = m_hoverColor;
 	else
-		bgColor = m_normalColor;
+		bgColor = dark ? RGB(51, 55, 61) : RGB(244, 248, 254);
 
 	// 绘制圆角矩形背景
 	CPen pen;
-	const bool dark = GetRValue(m_normalColor) < 100;
 	pen.CreatePen(PS_SOLID, 1, isSelected ?
-		(dark ? RGB(73, 79, 85) : RGB(216, 224, 233)) : bgColor);
+		(dark ? RGB(73, 79, 85) : RGB(216, 228, 250)) :
+		(dark ? RGB(78, 83, 91) : RGB(200, 215, 236)));
 	CPen* pOldPen = pDC->SelectObject(&pen);
 
 	CBrush brush;
@@ -223,16 +224,11 @@ void CModernTabCtrl::DrawTab(CDC* pDC, int index, CRect rect, BOOL isSelected, B
 	pDC->SelectObject(pOldBrush);
 	pDC->SelectObject(pOldPen);
 
-	// 如果是选中状态，绘制底部边框覆盖
+	// Selected tabs use a blue underline.
 	if (isSelected)
 	{
-		CPen whitePen;
-		whitePen.CreatePen(PS_SOLID, 2, m_selectedColor);
-		CPen* pOldWhitePen = pDC->SelectObject(&whitePen);
-		pDC->MoveTo(rect.left, rect.bottom - 1);
-		pDC->LineTo(rect.right, rect.bottom - 1);
-		pDC->SelectObject(pOldWhitePen);
-		// 让CPen析构函数自动清理
+		pDC->FillSolidRect(rect.left + 3, rect.bottom - 3, rect.Width() - 6, 3,
+			dark ? RGB(94, 158, 249) : RGB(26, 119, 244));
 	}
 
 	// 获取标签文本
@@ -257,7 +253,7 @@ void CModernTabCtrl::DrawTab(CDC* pDC, int index, CRect rect, BOOL isSelected, B
 	const int iconLeft = rect.left + (compact ? 2 : 8);
 	CRect iconRect(iconLeft, rect.top + (rect.Height() - iconSize) / 2,
 		iconLeft + iconSize, rect.top + (rect.Height() + iconSize) / 2);
-	pDC->FillSolidRect(iconRect, RGB(218, 48, 54));
+	pDC->FillSolidRect(iconRect, RGB(29, 124, 243));
 	CFont* pOldFont = pDC->SelectObject(compact ? &m_compactFont : &m_font);
 	pDC->SetBkMode(TRANSPARENT);
 	pDC->SetTextColor(RGB(255, 255, 255));
@@ -266,14 +262,8 @@ void CModernTabCtrl::DrawTab(CDC* pDC, int index, CRect rect, BOOL isSelected, B
 	pDC->SetBkMode(TRANSPARENT);
 
 	CString displayText = szText;
-	if (compact)
-		displayText = displayText.Left(2);
-	else
-	{
-		while (!displayText.IsEmpty() && pDC->GetTextExtent(displayText).cx > textRect.Width())
-			displayText = displayText.Left(displayText.GetLength() - 1);
-	}
-	pDC->DrawText(displayText, textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+	pDC->DrawText(displayText, textRect,
+		DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 	pDC->SelectObject(pOldFont);
 
 	// 绘制关闭按钮

@@ -5,6 +5,7 @@ IMPLEMENT_DYNAMIC(CCustomButton, CButton)
 
 CCustomButton::CCustomButton()
 	: m_iconGlyph(0)
+	, m_iconAndText(false)
 	, m_iconResourceId(0)
 	, m_iconSize(18)
 	, m_pIconBitmap(nullptr)
@@ -69,6 +70,13 @@ void CCustomButton::SetIconGlyph(WCHAR glyph)
 		clearIconBitmap();
 	}
 	m_iconGlyph = glyph;
+	if (GetSafeHwnd())
+		Invalidate(FALSE);
+}
+
+void CCustomButton::SetIconAndText(bool enabled)
+{
+	m_iconAndText = enabled;
 	if (GetSafeHwnd())
 		Invalidate(FALSE);
 }
@@ -239,7 +247,7 @@ void CCustomButton::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 	bufferBitmap.CreateCompatibleBitmap(pDC, rect.Width(), rect.Height());
 	CBitmap* pOldBitmap = bufferDC.SelectObject(&bufferBitmap);
 	CRect localRect(0, 0, rect.Width(), rect.Height());
-	bufferDC.FillSolidRect(localRect, RGB(255, 255, 255));
+	bufferDC.FillSolidRect(localRect, m_normalColor);
 	if (!m_buttonFont.GetSafeHandle())
 		m_buttonFont.CreatePointFont(90, _T("Microsoft YaHei UI"));
 	if (!m_iconFont.GetSafeHandle())
@@ -259,17 +267,15 @@ void CCustomButton::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 	else if (bPressed)
 	{
 		fillColor = m_pressedColor;
-		borderColor = RGB(117, 165, 230);
+		borderColor = RGB(158, 192, 248);
 	}
 	else if (m_bHover)
 	{
 		fillColor = m_hoverColor;
-		borderColor = RGB(151, 188, 239);
+		borderColor = RGB(186, 209, 250);
 	}
-	else if (m_iconGlyph)
-	{
-		borderColor = RGB(255, 255, 255);
-	}
+	else
+		borderColor = m_normalColor;
 
 	if (m_windowControlStyle)
 		bufferDC.FillSolidRect(localRect, fillColor);
@@ -284,7 +290,13 @@ void CCustomButton::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 	GetWindowText(strText);
 
 	// PNG 图标优先于字体图标；失败时自动回退到文字。
-	const bool useImageIcon = DrawIconImage(&bufferDC, localRect, bDisabled, m_bHover || bPressed);
+	CRect iconRect = localRect;
+	if (m_iconAndText)
+	{
+		iconRect.left += 7;
+		iconRect.right = iconRect.left + 24;
+	}
+	const bool useImageIcon = DrawIconImage(&bufferDC, iconRect, bDisabled, m_bHover || bPressed);
 
 	CFont* pIconFont = m_windowControlStyle ? &m_windowIconFont : &m_iconFont;
 	bool useIcon = m_iconGlyph && pIconFont->GetSafeHandle();
@@ -305,11 +317,11 @@ void CCustomButton::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 			else if (!bDisabled && !m_windowControlStyle && (m_bHover || bPressed))
 				iconColor = RGB(32, 100, 185);
 			bufferDC.SetTextColor(iconColor);
-			bufferDC.DrawText(glyph, localRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+			bufferDC.DrawText(glyph, iconRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 		}
 		bufferDC.SelectObject(pOldFont);
 	}
-	if (!useIcon && !useImageIcon && !strText.IsEmpty())
+	if ((m_iconAndText || (!useIcon && !useImageIcon)) && !strText.IsEmpty())
 	{
 		CFont* pFont = m_iconGlyph ? &m_buttonFont : GetFont();
 		CFont* pOldFont = bufferDC.SelectObject(pFont ? pFont : &m_buttonFont);
@@ -320,7 +332,10 @@ void CCustomButton::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 			(m_bHover || bPressed))
 			textColor = RGB(255, 255, 255);
 		bufferDC.SetTextColor(textColor);
-		bufferDC.DrawText(strText, localRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+		CRect textRect = localRect;
+		if (m_iconAndText)
+			textRect.left += 32;
+		bufferDC.DrawText(strText, textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 		bufferDC.SelectObject(pOldFont);
 	}
 
