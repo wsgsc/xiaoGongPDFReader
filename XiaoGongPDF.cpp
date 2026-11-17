@@ -71,8 +71,8 @@ BOOL CALLBACK EnumWindowsProc(HWND hWnd, LPARAM lParam)
 {
 	FindWindowData* pData = (FindWindowData*)lParam;
 
-	// 检查是否为顶层可见窗口
-	if (!IsWindowVisible(hWnd) || GetParent(hWnd) != NULL)
+	// 主窗口即使暂时隐藏，也需要能被新进程找到并显示。
+	if (GetParent(hWnd) != NULL)
 		return TRUE;
 
 	// 获取窗口标题
@@ -100,6 +100,24 @@ HWND FindXiaoGongPDFWindow()
 	EnumWindows(EnumWindowsProc, (LPARAM)&data);
 
 	return data.hWnd;
+}
+
+void ActivateXiaoGongPDFWindow(HWND hWnd)
+{
+	if (IsIconic(hWnd))
+		ShowWindow(hWnd, SW_RESTORE);
+	else if (!IsWindowVisible(hWnd))
+		ShowWindow(hWnd, SW_SHOW);
+
+	// Windows may reject cross-process foreground activation. Raise the window
+	// temporarily so it still appears in front, without leaving it always on top.
+	const bool wasTopmost = (GetWindowLong(hWnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+	const UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE;
+	SetWindowPos(hWnd, HWND_TOPMOST, 0, 0, 0, 0, flags);
+	if (!wasTopmost)
+		SetWindowPos(hWnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
+
+	SetForegroundWindow(hWnd);
 }
 
 // CXiaoGongPDFApp 初始化
@@ -155,6 +173,8 @@ BOOL CXiaoGongPDFApp::InitInstance()
 
 			if (hWnd)
 			{
+				ActivateXiaoGongPDFWindow(hWnd);
+
 				// 使用 WM_COPYDATA 消息发送文件路径
 				COPYDATASTRUCT cds;
 				cds.dwData = 1;  // 自定义数据标识，1 表示打开PDF文件
@@ -163,11 +183,8 @@ BOOL CXiaoGongPDFApp::InitInstance()
 
 				SendMessage(hWnd, WM_COPYDATA, 0, (LPARAM)&cds);
 
-				// 激活已存在的窗口
-				if (IsIconic(hWnd)) {
-					ShowWindow(hWnd, SW_RESTORE);
-				}
-				SetForegroundWindow(hWnd);
+				// 加载窗口可能在处理消息时获得焦点，再激活主窗口。
+				ActivateXiaoGongPDFWindow(hWnd);
 			}
 		}
 		else
@@ -175,12 +192,7 @@ BOOL CXiaoGongPDFApp::InitInstance()
 			// 没有文件参数，只是激活已存在的窗口
 			HWND hWnd = FindXiaoGongPDFWindow();
 			if (hWnd)
-			{
-				if (IsIconic(hWnd)) {
-					ShowWindow(hWnd, SW_RESTORE);
-				}
-				SetForegroundWindow(hWnd);
-			}
+				ActivateXiaoGongPDFWindow(hWnd);
 		}
 
 		// 退出当前实例
