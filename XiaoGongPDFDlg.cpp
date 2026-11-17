@@ -1267,13 +1267,14 @@ HBITMAP CXiaoGongPDFDlg::CreatePageDIBSection(int w, int h, HDC hDC, BYTE** ppBi
 void CXiaoGongPDFDlg::CopyMuPDFPixelsToBuffer(fz_pixmap* pixmap, BYTE* pbBits, int width, int height)
 {
 	unsigned char* samples = fz_pixmap_samples(m_ctx, pixmap);
-	int stride = (width * 3 + 3) & ~3;
+	int dstStride = (width * 3 + 3) & ~3;
 	int n = fz_pixmap_components(m_ctx, pixmap);
+	int srcStride = fz_pixmap_stride(m_ctx, pixmap);
 	for (int y = 0; y < height; y++)
 		for (int x = 0; x < width; x++) {
-			pbBits[y * stride + x * 3 + 0] = samples[(y * width + x) * n + 2];
-			pbBits[y * stride + x * 3 + 1] = samples[(y * width + x) * n + 1];
-			pbBits[y * stride + x * 3 + 2] = samples[(y * width + x) * n + 0];
+			pbBits[y * dstStride + x * 3 + 0] = samples[y * srcStride + x * n + 2];
+			pbBits[y * dstStride + x * 3 + 1] = samples[y * srcStride + x * n + 1];
+			pbBits[y * dstStride + x * 3 + 2] = samples[y * srcStride + x * n + 0];
 		}
 }
 
@@ -1321,13 +1322,14 @@ HBITMAP CXiaoGongPDFDlg::RenderMuPDFPageToBitmap(fz_context* ctx, fz_page* page,
 		if (hBitmap && pbBits)
 		{
 			unsigned char* samples = fz_pixmap_samples(ctx, pixmap);
-			int stride = (width * 3 + 3) & ~3;
+			int dstStride = (width * 3 + 3) & ~3;
 			int n = fz_pixmap_components(ctx, pixmap);
+			int srcStride = fz_pixmap_stride(ctx, pixmap);
 			for (int y = 0; y < height; y++)
 				for (int x = 0; x < width; x++) {
-					pbBits[y * stride + x * 3 + 0] = samples[(y * width + x) * n + 2];
-					pbBits[y * stride + x * 3 + 1] = samples[(y * width + x) * n + 1];
-					pbBits[y * stride + x * 3 + 2] = samples[(y * width + x) * n + 0];
+					pbBits[y * dstStride + x * 3 + 0] = samples[y * srcStride + x * n + 2];
+					pbBits[y * dstStride + x * 3 + 1] = samples[y * srcStride + x * n + 1];
+					pbBits[y * dstStride + x * 3 + 2] = samples[y * srcStride + x * n + 0];
 				}
 		}
 
@@ -7032,14 +7034,15 @@ void CXiaoGongPDFDlg::OnLButtonDown(UINT nFlags, CPoint point)
 					{
 						// 复制像素数据
 						unsigned char* samples = fz_pixmap_samples(m_ctx, pixmap);
-						int stride = (width * 3 + 3) & ~3;
+						int dstStride = (width * 3 + 3) & ~3;
 						int n = fz_pixmap_components(m_ctx, pixmap);
+						int srcStride = fz_pixmap_stride(m_ctx, pixmap);
 
 						for (int y = 0; y < height; y++) {
 							for (int x = 0; x < width; x++) {
-								pbBits[y * stride + x * 3 + 0] = samples[(y * width + x) * n + 2];
-								pbBits[y * stride + x * 3 + 1] = samples[(y * width + x) * n + 1];
-								pbBits[y * stride + x * 3 + 2] = samples[(y * width + x) * n + 0];
+								pbBits[y * dstStride + x * 3 + 0] = samples[y * srcStride + x * n + 2];
+								pbBits[y * dstStride + x * 3 + 1] = samples[y * srcStride + x * n + 1];
+								pbBits[y * dstStride + x * 3 + 2] = samples[y * srcStride + x * n + 0];
 							}
 						}
 
@@ -8298,6 +8301,7 @@ bool CXiaoGongPDFDlg::RenderContinuousPageToCache(int pageNumber, HDC hDC)
 	CPDFDocument* pDoc = GetActiveDocument();
 	if (!pDoc || !m_ctx || pageNumber < 0 || pageNumber >= m_totalPages)
 		return false;
+	CSingleLock lock(&m_renderLock, TRUE);
 
 	float pageWidth = 0.0f;
 	float pageHeight = 0.0f;
@@ -8377,14 +8381,15 @@ bool CXiaoGongPDFDlg::RenderContinuousPageToCache(int pageNumber, HDC hDC)
 	}
 	unsigned char* samples = fz_pixmap_samples(m_ctx, pixmap);
 	int components = fz_pixmap_components(m_ctx, pixmap);
-	int stride = (width * 3 + 3) & ~3;
+	int dstStride = (width * 3 + 3) & ~3;
+	int srcStride = fz_pixmap_stride(m_ctx, pixmap);
 	for (int y = 0; y < height; ++y)
 	{
 		for (int x = 0; x < width; ++x)
 		{
-			bits[y * stride + x * 3] = samples[(y * width + x) * components + 2];
-			bits[y * stride + x * 3 + 1] = samples[(y * width + x) * components + 1];
-			bits[y * stride + x * 3 + 2] = samples[(y * width + x) * components];
+			bits[y * dstStride + x * 3] = samples[y * srcStride + x * components + 2];
+			bits[y * dstStride + x * 3 + 1] = samples[y * srcStride + x * components + 1];
+			bits[y * dstStride + x * 3 + 2] = samples[y * srcStride + x * components];
 		}
 	}
 	fz_drop_pixmap(m_ctx, pixmap);
@@ -8478,6 +8483,8 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 #endif
 
 	// 创建内存DC和位图
+	CSingleLock lock(&m_renderLock, TRUE);
+
 	CDC* pDC = m_pdfView.GetDC();
 	CDC memDC;
 	memDC.CreateCompatibleDC(pDC);
@@ -8644,14 +8651,15 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 					if (hBitmap && pbBits)
 					{
 						unsigned char* samples = fz_pixmap_samples(m_ctx, pixmap);
-						int stride = (width * 3 + 3) & ~3;
+						int dstStride = (width * 3 + 3) & ~3;
 						int n = fz_pixmap_components(m_ctx, pixmap);
+						int srcStride = fz_pixmap_stride(m_ctx, pixmap);
 
 						for (int y = 0; y < height; y++) {
 							for (int x = 0; x < width; x++) {
-								pbBits[y * stride + x * 3 + 0] = samples[(y * width + x) * n + 2];
-								pbBits[y * stride + x * 3 + 1] = samples[(y * width + x) * n + 1];
-								pbBits[y * stride + x * 3 + 2] = samples[(y * width + x) * n + 0];
+								pbBits[y * dstStride + x * 3 + 0] = samples[y * srcStride + x * n + 2];
+								pbBits[y * dstStride + x * 3 + 1] = samples[y * srcStride + x * n + 1];
+								pbBits[y * dstStride + x * 3 + 2] = samples[y * srcStride + x * n + 0];
 							}
 						}
 
@@ -9323,6 +9331,8 @@ UINT CXiaoGongPDFDlg::SearchThreadProc(LPVOID pParam)
 		{
 			fz_page* page = nullptr;
 			fz_stext_page* stext = nullptr;
+			fz_var(page);
+			fz_var(stext);
 			const size_t firstResult = pParams->results.size();
 			fz_try(ctx)
 			{

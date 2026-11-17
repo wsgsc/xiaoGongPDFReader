@@ -2393,7 +2393,11 @@ void CPDFEditDialog::RotateSelectedPages(int angle)
 			// 重新渲染缩略图（会自动应用旋转角度）
 			int currentPos = currentDisplayIndex + 1;
 			int originalPos = m_pages[actualIndex].originalIndex + 1;
-			m_pages[actualIndex].hThumbnail = RenderThumbnail(m_pages[actualIndex].originalIndex, currentPos, originalPos, m_pages[actualIndex].rotationAngle);
+			const PageInfo& pageInfo = m_pages[actualIndex];
+			m_pages[actualIndex].hThumbnail = (pageInfo.sourceFile == m_filePath) ?
+				RenderThumbnail(pageInfo.originalIndex, currentPos, originalPos, pageInfo.rotationAngle) :
+				RenderThumbnailFromSource(pageInfo.sourceFile, pageInfo.sourcePageIndex,
+					currentPos, originalPos, pageInfo.rotationAngle);
 		}
 	}
 
