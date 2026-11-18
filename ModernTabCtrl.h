@@ -42,6 +42,7 @@ private:
 	BOOL IsCloseButtonVisible(int index);
 	CRect GetCloseButtonRect(int index);
 	CRect GetTabRect(int index);
+	int HitTestTab(CPoint point);
 
 	// 状态跟踪
 	int m_hoverIndex;          // 当前悬停的标签页索引

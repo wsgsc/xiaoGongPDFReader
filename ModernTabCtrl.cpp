@@ -328,9 +328,46 @@ BOOL CModernTabCtrl::IsCloseButtonVisible(int index)
 
 CRect CModernTabCtrl::GetTabRect(int index)
 {
+	int tabCount = GetItemCount();
+	if (tabCount <= 0)
+	{
+		CRect rect;
+		GetItemRect(index, &rect);
+		return rect;
+	}
+
+	CRect clientRect;
+	GetClientRect(&clientRect);
+	int availableWidth = clientRect.Width();
+
+	const int maxTabWidth = 220;
+	const int minTabWidth = 60;
+
+	int tabWidth = availableWidth / tabCount;
+	if (tabWidth > maxTabWidth)
+		tabWidth = maxTabWidth;
+	if (tabWidth < minTabWidth)
+		tabWidth = minTabWidth;
+
 	CRect rect;
-	GetItemRect(index, &rect);
+	rect.left = index * tabWidth;
+	rect.right = rect.left + tabWidth;
+	rect.top = 0;
+	rect.bottom = m_tabHeight;
+
 	return rect;
+}
+
+int CModernTabCtrl::HitTestTab(CPoint point)
+{
+	int tabCount = GetItemCount();
+	for (int i = 0; i < tabCount; i++)
+	{
+		CRect tabRect = GetTabRect(i);
+		if (tabRect.PtInRect(point))
+			return i;
+	}
+	return -1;
 }
 
 void CModernTabCtrl::OnMouseMove(UINT nFlags, CPoint point)
@@ -487,9 +524,7 @@ void CModernTabCtrl::OnLButtonDown(UINT nFlags, CPoint point)
 		GetParent()->SendMessage(WM_APP + 100, closeIndex, 0);
 		return;
 	}
-	TCHITTESTINFO hitInfo = {};
-	hitInfo.pt = point;
-	m_tabPressedIndex = HitTest(&hitInfo);
+	m_tabPressedIndex = HitTestTab(point);
 	::GetCursorPos(&m_tabDragStartScreen);
 	GetParent()->GetWindowRect(&m_tabDragStartWindow);
 	m_tabDragArmed = TRUE;
@@ -507,9 +542,7 @@ void CModernTabCtrl::OnLButtonUp(UINT nFlags, CPoint point)
 		::ReleaseCapture();
 	if (!wasDragging && pressedIndex >= 0)
 	{
-		TCHITTESTINFO hitInfo = {};
-		hitInfo.pt = point;
-		if (HitTest(&hitInfo) == pressedIndex)
+		if (HitTestTab(point) == pressedIndex)
 		{
 			SetCurSel(pressedIndex);
 			Invalidate(FALSE);
@@ -525,9 +558,7 @@ void CModernTabCtrl::OnLButtonUp(UINT nFlags, CPoint point)
 
 void CModernTabCtrl::OnLButtonDblClk(UINT nFlags, CPoint point)
 {
-	TCHITTESTINFO hitInfo = {};
-	hitInfo.pt = point;
-	if (HitTest(&hitInfo) < 0)
+	if (HitTestTab(point) < 0)
 	{
 		GetParent()->SendMessage(WM_SYSCOMMAND,
 			GetParent()->IsZoomed() ? SC_RESTORE : SC_MAXIMIZE);
