@@ -29,6 +29,7 @@ CPDFDocument::CPDFDocument()
 	, m_pageBoundsCached(false)
 	, m_maxPageWidth(0.0f)
 {
+	m_lastWriteTime = {0, 0};
 	m_ctx = fz_new_context(nullptr, nullptr, MUPDF_STORE_LIMIT);
 	if (m_ctx)
 	{
@@ -118,6 +119,7 @@ PDFOpenResult CPDFDocument::OpenDocument(const char* filename, const char* passw
 	}
 	if (password)
 		m_password.assign(password, password + std::strlen(password) + 1);
+	UpdateLastWriteTime();
 	return PDFOpenResult::Success;
 }
 
@@ -137,6 +139,7 @@ void CPDFDocument::CloseDocument()
 	m_doc = nullptr;
 
 	m_filePath.Empty();
+	m_lastWriteTime = {0, 0};
 	if (!m_password.empty())
 	{
 		SecureZeroMemory(m_password.data(), m_password.size());
@@ -604,4 +607,26 @@ bool CPDFDocument::CachePageseBounds(const std::atomic<bool>* cancelled)
 	m_pageBoundsCached = true;
 	RecalculateMaxPageWidth();
 	return true;
+}
+
+void CPDFDocument::UpdateLastWriteTime()
+{
+	if (m_filePath.IsEmpty())
+	{
+		m_lastWriteTime = {0, 0};
+		return;
+	}
+	WIN32_FILE_ATTRIBUTE_DATA attrs;
+	if (GetFileAttributesEx(m_filePath, GetFileExInfoStandard, &attrs))
+		m_lastWriteTime = attrs.ftLastWriteTime;
+}
+
+bool CPDFDocument::IsFileModified() const
+{
+	if (m_filePath.IsEmpty() || (m_lastWriteTime.dwLowDateTime == 0 && m_lastWriteTime.dwHighDateTime == 0))
+		return false;
+	WIN32_FILE_ATTRIBUTE_DATA attrs;
+	if (!GetFileAttributesEx(m_filePath, GetFileExInfoStandard, &attrs))
+		return false;
+	return CompareFileTime(&attrs.ftLastWriteTime, &m_lastWriteTime) != 0;
 }

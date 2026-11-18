@@ -8,6 +8,7 @@
 #include <vector>
 #include "ShortcutsDialog.h"  // 包含快捷键对话框
 #include "PDFDocument.h"       // 包含PDF文档类
+#include "FileWatcher.h"       // 文件变化监听
 #include "ModernTabCtrl.h"     // 包含现代化Tab控件
 #include "CustomButton.h"      // 包含自定义按钮类
 #include <list>
@@ -451,6 +452,11 @@ private:
 	afx_msg void OnCloseSearchResults();
 	afx_msg LRESULT OnSearchComplete(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnSearchProgress(WPARAM wParam, LPARAM lParam);
+
+	// 文件变化监听
+	CFileWatcher m_fileWatcher;
+	afx_msg LRESULT OnFileChanged(WPARAM wParam, LPARAM lParam);
+	void ReloadDocument(CPDFDocument* pDoc);
 
 	// 防止 static 局部变量跨实例污染，改为成员变量
 	bool m_isThumbnailSubclassed;

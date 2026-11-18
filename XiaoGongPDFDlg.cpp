@@ -1527,6 +1527,7 @@ BEGIN_MESSAGE_MAP(CXiaoGongPDFDlg, CDialogEx)
 	ON_MESSAGE(WM_PDF_LOAD_CANCELLED, &CXiaoGongPDFDlg::OnPDFLoadCancelled)
 	ON_MESSAGE(WM_SEARCH_COMPLETE, &CXiaoGongPDFDlg::OnSearchComplete)  // 搜索后台完成
 	ON_MESSAGE(WM_SEARCH_PROGRESS, &CXiaoGongPDFDlg::OnSearchProgress)
+	ON_MESSAGE(WM_FILE_CHANGED, &CXiaoGongPDFDlg::OnFileChanged)  // 文件变化通知
 	ON_WM_TIMER()  // 定时器消息处理（用于去抖动缩略图高亮更新）
 	ON_WM_MOUSEWHEEL()
 	ON_BN_CLICKED(IDC_BTN_FIRST, &CXiaoGongPDFDlg::OnBtnFirst)
@@ -6318,6 +6319,10 @@ void CXiaoGongPDFDlg::CloseDocument(int index)
 	bool isActiveDocument = (index == m_activeDocIndex);
 	const bool closingLastDocument = isActiveDocument && m_documents.size() == 1;
 	CPDFDocument* doc = m_documents[index];
+
+	// 取消文件变化监听
+	if (doc && !doc->GetFilePath().IsEmpty())
+		m_fileWatcher.RemoveWatch(doc->GetFilePath());
 	if (m_pSearchParams && m_pSearchParams->pDoc == doc)
 		StopSearch();
 	// 最后一个文档关闭期间会多次更新布局，只在布局完成后绘制空视图。
@@ -6665,6 +6670,7 @@ void CXiaoGongPDFDlg::OnClose()
 void CXiaoGongPDFDlg::OnDestroy()
 {
 	TRACE(_T("OnDestroy() called\n"));
+	m_fileWatcher.Stop();
 	KillTimer(TIMER_ID_PAGE_PREFETCH);
 	if (m_sessionRestoreStarted)
 		SaveOpenTabs();
@@ -10456,6 +10462,11 @@ LRESULT CXiaoGongPDFDlg::OnPDFLoadComplete(WPARAM wParam, LPARAM lParam)
 	// ★★★ 添加到最近文件列表
 	AddRecentFile(pParams->filePath);
 
+	// 注册文件变化监听
+	m_fileWatcher.AddWatch(pParams->filePath, GetSafeHwnd());
+	if (!m_fileWatcher.IsRunning())
+		m_fileWatcher.Start();
+
 	// ★★★ 强制刷新显示，确保PDF页面立即显示
 	// 使用FALSE参数避免擦除背景，减少高刷新率显示器上的闪烁
 	Invalidate(FALSE);
@@ -10472,4 +10483,120 @@ LRESULT CXiaoGongPDFDlg::OnPDFLoadComplete(WPARAM wParam, LPARAM lParam)
 	OpenNextRestoredTab();
 
 	return 0;
+}
+
+LRESULT CXiaoGongPDFDlg::OnFileChanged(WPARAM wParam, LPARAM lParam)
+{
+	CString* pPath = reinterpret_cast<CString*>(lParam);
+	if (!pPath)
+		return 0;
+
+	CString changedPath = *pPath;
+	delete pPath;
+
+	for (int i = 0; i < (int)m_documents.size(); ++i)
+	{
+		CPDFDocument* pDoc = m_documents[i];
+		if (!pDoc || pDoc->GetFilePath().IsEmpty())
+			continue;
+
+		if (pDoc->GetFilePath().CompareNoCase(changedPath) == 0 && pDoc->IsFileModified())
+		{
+			CString msg;
+			msg.Format(_T("文件 \"%s\" 已被外部程序修改，是否重新加载？"),
+				pDoc->GetFileName());
+			int ret = MessageBox(msg, _T("文件已修改"), MB_YESNO | MB_ICONQUESTION);
+			if (ret == IDYES)
+				ReloadDocument(pDoc);
+			else
+				pDoc->UpdateLastWriteTime();
+			break;
+		}
+	}
+	return 0;
+}
+
+void CXiaoGongPDFDlg::ReloadDocument(CPDFDocument* pDoc)
+{
+	if (!pDoc || pDoc->GetFilePath().IsEmpty())
+		return;
+
+	int docIndex = -1;
+	for (int i = 0; i < (int)m_documents.size(); ++i)
+	{
+		if (m_documents[i] == pDoc)
+		{
+			docIndex = i;
+			break;
+		}
+	}
+	if (docIndex < 0)
+		return;
+
+	bool isActive = (docIndex == m_activeDocIndex);
+
+	if (isActive)
+		SaveDialogStateToDocument(pDoc);
+
+	// 保存阅读状态（active 文档需先 SaveDialogStateToDocument 再读取）
+	int savedPage = pDoc->GetCurrentPage();
+	ZoomMode savedZoomMode = pDoc->GetZoomMode();
+	float savedCustomZoom = pDoc->GetCustomZoom();
+	float savedUniformScale = pDoc->GetUniformScale();
+	int savedScroll = pDoc->GetScrollPosition();
+	std::map<int, int> savedRotations = pDoc->GetPageRotations();
+
+	CString filePath = pDoc->GetFilePath();
+	std::vector<char> password = pDoc->GetPassword();
+	const char* pwd = password.empty() ? nullptr : password.data();
+
+	// 转换路径为 UTF-8
+	int utf8Len = WideCharToMultiByte(CP_UTF8, 0, filePath, -1, NULL, 0, NULL, NULL);
+	std::vector<char> utf8Path(utf8Len);
+	WideCharToMultiByte(CP_UTF8, 0, filePath, -1, utf8Path.data(), utf8Len, NULL, NULL);
+
+	// 重新打开文档
+	pDoc->CloseDocument();
+	PDFOpenResult result = pDoc->OpenDocument(utf8Path.data(), pwd);
+
+	if (result != PDFOpenResult::Success)
+	{
+		TRACE(_T("ReloadDocument: 重新打开文档失败\n"));
+		return;
+	}
+
+	// 恢复阅读状态
+	int totalPages = pDoc->GetTotalPages();
+	if (savedPage >= totalPages)
+		savedPage = totalPages - 1;
+	if (savedPage < 0)
+		savedPage = 0;
+
+	pDoc->SetCurrentPage(savedPage);
+	pDoc->RestoreReadingZoom(savedZoomMode, savedCustomZoom, savedUniformScale);
+	pDoc->SetScrollPosition(savedScroll);
+
+	// 恢复旋转状态（仅恢复仍存在的页面）
+	for (auto& pair : savedRotations)
+	{
+		if (pair.first < totalPages)
+			pDoc->SetPageRotation(pair.first, pair.second);
+	}
+
+	if (isActive)
+	{
+		LoadDialogStateFromDocument(pDoc);
+		ClearPageCache();
+		for (auto& pair : m_continuousPageBitmaps)
+		{
+			if (pair.second)
+				DeleteObject(pair.second);
+		}
+		m_continuousPageBitmaps.clear();
+
+		UpdateThumbnails();
+		UpdateOutlineTree();
+		UpdatePageControls();
+		RefreshCurrentView();
+	}
 }

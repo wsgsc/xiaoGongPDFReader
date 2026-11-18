@@ -94,6 +94,9 @@ public:
 
 	CString GetFilePath() const { return m_filePath; }
 	CString GetFileName() const;
+	FILETIME GetLastWriteTime() const { return m_lastWriteTime; }
+	void UpdateLastWriteTime();
+	bool IsFileModified() const;
 	int GetTotalPages() const { return m_totalPages; }
 
 	int GetCurrentPage() const { return m_currentPage; }
@@ -218,4 +221,6 @@ private:
 	CString m_searchKeyword;
 
 	int m_scrollPosition;
+
+	FILETIME m_lastWriteTime;
 };
