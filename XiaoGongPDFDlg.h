@@ -25,6 +25,8 @@
 class CXiaoGongPDFDlg;
 
 enum ReadingMode { READING_NORMAL, READING_NIGHT, READING_EYE };
+constexpr COLORREF PDF_VIEW_BACKGROUND = RGB(232, 239, 253);
+constexpr COLORREF DARK_VIEW_BACKGROUND = RGB(30, 33, 36);
 
 class CPDFScrollBar : public CWnd
 {
@@ -283,6 +285,7 @@ private:
 	CBrush m_highlightBrush;  // 高亮背景画刷
 	CBrush m_whiteBrush;      // 白色背景画刷（用于标签页）
 	CBrush m_toolbarBrush;    // 工具栏背景画刷（浅灰色，扁平化风格）
+	CBrush m_searchPopupBrush; // 搜索弹窗背景画刷
 	ReadingMode m_readingMode = READING_NORMAL;
     int m_thumbnailPicHeight;  // 当前缩略图高度
 	int m_thumbnailPicWidth;   // 当前缩略图宽度
@@ -495,6 +498,7 @@ protected:
     void InitializeToolbar();  // 新增初始化工具栏函数
 	void ApplyReadingMode(ReadingMode mode);
 	void UpdateOutlineButtonColors();
+	COLORREF ViewBgColor() const { return m_readingMode == READING_NIGHT ? DARK_VIEW_BACKGROUND : PDF_VIEW_BACKGROUND; }
 	afx_msg void OnReadingMode(UINT nID);
     void UpdatePageControls();
     void UpdateStatusBar();    // 更新状态栏

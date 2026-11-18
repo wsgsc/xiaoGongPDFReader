@@ -115,7 +115,6 @@ namespace
 	};
 
 	constexpr size_t PAGE_CACHE_BUDGET = 128u * 1024u * 1024u;
-	constexpr COLORREF PDF_VIEW_BACKGROUND = RGB(232, 239, 253);
 	constexpr int FIT_WIDTH_SIDE_PADDING = 12;
 	constexpr float FIT_WIDTH_FACTOR = 0.99f;
 
@@ -647,7 +646,7 @@ void CPDFViewCtrl::OnPaint()
 		backBmp.CreateCompatibleBitmap(&dc, clientRect.Width(), clientRect.Height());
 		CBitmap* pOldBackBmp = backDC.SelectObject(&backBmp);
 		backDC.FillSolidRect(&clientRect, m_readingMode == READING_NIGHT ?
-			RGB(30, 25, 20) : PDF_VIEW_BACKGROUND);
+			DARK_VIEW_BACKGROUND : PDF_VIEW_BACKGROUND);
 		if (m_pParentDlg && m_pParentDlg->m_documents.empty())
 			DrawWelcomeImage(backDC, clientRect);
 		dc.BitBlt(0, 0, clientRect.Width(), clientRect.Height(), &backDC, 0, 0, SRCCOPY);
@@ -682,7 +681,8 @@ void CPDFViewCtrl::OnPaint()
 	if (isContinuousMode)
 	{
 		// ★★★ 连续滚动模式：位图已经是可见区域，填灰色背景后居中贴图
-		backDC.FillSolidRect(&clientRect, PDF_VIEW_BACKGROUND);
+		backDC.FillSolidRect(&clientRect, m_readingMode == READING_NIGHT ?
+			DARK_VIEW_BACKGROUND : PDF_VIEW_BACKGROUND);
 
 		int destX = 0;
 		int destY = 0;
@@ -713,7 +713,8 @@ void CPDFViewCtrl::OnPaint()
 			scrollY = m_pParentDlg->m_scrollPosition;
 		}
 
-		backDC.FillSolidRect(&clientRect, PDF_VIEW_BACKGROUND);
+		backDC.FillSolidRect(&clientRect, m_readingMode == READING_NIGHT ?
+			DARK_VIEW_BACKGROUND : PDF_VIEW_BACKGROUND);
 
 		int destX = 0;
 		int destY = 0;
@@ -845,6 +846,7 @@ CXiaoGongPDFDlg::CXiaoGongPDFDlg(CWnd* pParent /*=nullptr*/)
 	m_highlightBrush.CreateSolidBrush(RGB(173, 216, 230));  // 浅蓝色
 	m_whiteBrush.CreateSolidBrush(RGB(240, 244, 248));
 	m_toolbarBrush.CreateSolidBrush(RGB(255, 255, 255));   // 白色（Chrome/Edge 风格工具栏背景）
+	m_searchPopupBrush.CreateSolidBrush(RGB(255, 255, 255));
 	LoadRecentFiles();
 
 	// 加载手形光标
@@ -1848,7 +1850,7 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	m_searchResultsList.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
 	m_searchResultsList.InsertColumn(0, _T("页码"), LVCFMT_LEFT, 58);
 	m_searchResultsList.InsertColumn(1, _T("上下文"), LVCFMT_LEFT, 230);
-	m_searchPopup.Create(_T(""), WS_CHILD | WS_CLIPSIBLINGS | SS_WHITERECT | WS_BORDER,
+	m_searchPopup.Create(_T(""), WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER,
 		CRect(0, 0, 430, 54), this, IDC_SEARCH_POPUP);
 	m_searchMatchCount.Create(_T("0/0"), WS_CHILD | SS_CENTER | SS_CENTERIMAGE,
 		CRect(0, 0, 58, 34), this, IDC_SEARCH_MATCH_COUNT);
@@ -2012,10 +2014,12 @@ void CXiaoGongPDFDlg::OnPaint()
 	{
 		CDialogEx::OnPaint();
 
-		// Draw the application icon in the title-bar area.
 		CDC* pTitleDC = GetDC();
 		if (pTitleDC)
 		{
+			// 填充图标区域背景（标签栏左侧 0~56 x 0~42 区域）
+			pTitleDC->FillSolidRect(0, 0, 56, 42,
+				m_readingMode == READING_NIGHT ? RGB(36, 39, 43) : RGB(230, 238, 253));
 			::DrawIconEx(pTitleDC->GetSafeHdc(), 16, 9,
 				m_hTitleIcon ? m_hTitleIcon : m_hIcon,
 				24, 24, 0, nullptr, DI_NORMAL);
@@ -2052,7 +2056,7 @@ BOOL CXiaoGongPDFDlg::OnEraseBkgnd(CDC* pDC)
 	CRect rect;
 	GetClientRect(&rect);
 
-	CBrush brush(m_readingMode == READING_NIGHT ? RGB(30, 33, 36) : PDF_VIEW_BACKGROUND);
+	CBrush brush(ViewBgColor());
 	pDC->FillRect(&rect, &brush);
 	pDC->FillSolidRect(0, 0, rect.Width(), 42,
 		m_readingMode == READING_NIGHT ? RGB(36, 39, 43) : RGB(230, 238, 253));
@@ -2085,11 +2089,16 @@ HBRUSH CXiaoGongPDFDlg::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor)
 		pDC->SetTextColor(dark ? text : RGB(75, 88, 102));
 		return m_toolbarBrush;
 	}
+	if (pWnd->GetSafeHwnd() == m_searchPopup.GetSafeHwnd())
+	{
+		return m_searchPopupBrush;
+	}
 	if (pWnd->GetSafeHwnd() == m_searchMatchCount.GetSafeHwnd())
 	{
-		pDC->SetBkColor(RGB(255, 255, 255));
-		pDC->SetTextColor(RGB(75, 88, 102));
-		return ::GetSysColorBrush(COLOR_WINDOW);
+		const COLORREF popupBg = dark ? RGB(50, 54, 58) : RGB(255, 255, 255);
+		pDC->SetBkColor(popupBg);
+		pDC->SetTextColor(dark ? RGB(180, 185, 190) : RGB(75, 88, 102));
+		return m_searchPopupBrush;
 	}
 	if (pWnd->GetSafeHwnd() == m_searchResultsHeader.GetSafeHwnd())
 	{
@@ -2110,16 +2119,17 @@ HBRUSH CXiaoGongPDFDlg::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor)
 		return m_toolbarBrush;
 	}
 
-	// 工具栏内的编辑框（页码输入、搜索框）：白色背景，深色文字
+	// 工具栏内的编辑框（页码输入、搜索框）
 	if (nCtlColor == CTLCOLOR_EDIT &&
 		(pWnd->GetSafeHwnd() == m_editCurrent.GetSafeHwnd() ||
 		 pWnd->GetSafeHwnd() == m_editSearch.GetSafeHwnd()))
 	{
 		const bool searchEdit = pWnd->GetSafeHwnd() == m_editSearch.GetSafeHwnd();
-		pDC->SetBkColor(searchEdit ? RGB(255, 255, 255) : toolbar);
-		pDC->SetTextColor(searchEdit ? RGB(32, 33, 36) : text);
+		const COLORREF editBg = searchEdit ? (dark ? RGB(50, 54, 58) : RGB(255, 255, 255)) : toolbar;
+		pDC->SetBkColor(editBg);
+		pDC->SetTextColor(text);
 		if (searchEdit)
-			return ::GetSysColorBrush(COLOR_WINDOW);
+			return m_searchPopupBrush;
 		return m_toolbarBrush;
 	}
 
@@ -2461,8 +2471,8 @@ bool CXiaoGongPDFDlg::RenderPage(int pageNumber)
 					HBITMAP hOldBmp1 = (HBITMAP)memDC.SelectObject(m_hCurrentBitmap);
 					HBITMAP hOldBmp2 = (HBITMAP)targetDC.SelectObject(hNewBitmap);
 
-					// 填充浅灰色背景（让白色PDF页面更明显）
-					targetDC.FillSolidRect(0, 0, viewWidth, viewHeight, PDF_VIEW_BACKGROUND);
+					// 填充背景
+					targetDC.FillSolidRect(0, 0, viewWidth, viewHeight, ViewBgColor());
 
 					// ★★★ 使用实际位图尺寸计算居中位置（带偏移）
 					int xPos = (viewWidth - actualWidth) / 2 + m_panOffset.x;
@@ -2477,7 +2487,8 @@ bool CXiaoGongPDFDlg::RenderPage(int pageNumber)
 					targetDC.BitBlt(xPos, yPos, actualWidth, actualHeight, &memDC, 0, 0, SRCCOPY);
 
 					// ★★★ 绘制页面边框（深灰色，使用实际位图尺寸）
-					CPen borderPen(PS_SOLID, 1, RGB(128, 128, 128));
+					CPen borderPen(PS_SOLID, 1, m_readingMode == READING_NIGHT ?
+						RGB(60, 63, 66) : RGB(128, 128, 128));
 					CPen* pOldPen = targetDC.SelectObject(&borderPen);
 					targetDC.SelectStockObject(NULL_BRUSH);  // 不填充
 					targetDC.Rectangle(xPos - 1, yPos - 1, xPos + actualWidth + 1, yPos + actualHeight + 1);
@@ -2815,14 +2826,14 @@ bool CXiaoGongPDFDlg::RenderThumbnail(int pageNumber)
 
 			if (hBitmap && pbBits)
 			{
-				// 先用浅灰色填充整个位图（作为边框的背景色）
+				// 先用灰色填充整个位图（作为边框的背景色）
 				int stride = (thumbWidth * 3 + 3) & ~3;
-				// 使用浅灰色 RGB(240, 240, 240) 作为背景
+				const BYTE borderGray = m_readingMode == READING_NIGHT ? (BYTE)55 : (BYTE)240;
 				for (int y = 0; y < thumbHeight; y++) {
 					for (int x = 0; x < thumbWidth; x++) {
-						pbBits[y * stride + x * 3 + 0] = 240;  // B
-						pbBits[y * stride + x * 3 + 1] = 240;  // G
-						pbBits[y * stride + x * 3 + 2] = 240;  // R
+						pbBits[y * stride + x * 3 + 0] = borderGray;  // B
+						pbBits[y * stride + x * 3 + 1] = borderGray;  // G
+						pbBits[y * stride + x * 3 + 2] = borderGray;  // R
 					}
 				}
 
@@ -5392,11 +5403,14 @@ void CXiaoGongPDFDlg::ApplyReadingMode(ReadingMode mode)
 	const COLORREF hover = dark ? RGB(55, 65, 72) : RGB(236, 244, 255);
 	const COLORREF pressed = dark ? RGB(69, 82, 91) : RGB(219, 235, 255);
 	const COLORREF text = dark ? RGB(226, 231, 235) : RGB(32, 33, 36);
+	const COLORREF searchPopupBg = dark ? RGB(50, 54, 58) : RGB(255, 255, 255);
 
 	m_whiteBrush.DeleteObject();
 	m_whiteBrush.CreateSolidBrush(tab);
 	m_toolbarBrush.DeleteObject();
 	m_toolbarBrush.CreateSolidBrush(toolbar);
+	m_searchPopupBrush.DeleteObject();
+	m_searchPopupBrush.CreateSolidBrush(searchPopupBg);
 	m_tabCtrl.SetColors(tab, dark ? RGB(49, 54, 59) : RGB(240, 246, 255),
 		dark ? toolbar : RGB(250, 252, 255));
 	if (m_outlineTree.GetSafeHwnd())
@@ -5427,8 +5441,10 @@ void CXiaoGongPDFDlg::ApplyReadingMode(ReadingMode mode)
 	CCustomButton* popupButtons[] = { &m_btnPrevMatch, &m_btnNextMatch, &m_btnCloseSearchPopup };
 	for (CCustomButton* pButton : popupButtons)
 	{
-		pButton->SetColors(RGB(255, 255, 255), RGB(232, 241, 252), RGB(211, 229, 250));
-		pButton->SetTextColor(RGB(32, 33, 36));
+		pButton->SetColors(dark ? RGB(50, 54, 58) : RGB(255, 255, 255),
+			dark ? RGB(65, 72, 80) : RGB(232, 241, 252),
+			dark ? RGB(78, 86, 95) : RGB(211, 229, 250));
+		pButton->SetTextColor(text);
 	}
 	UpdateOutlineButtonColors();
 	CCustomButton* titleButtons[] = { &m_btnMinimize, &m_btnMaximize };
@@ -5453,6 +5469,8 @@ void CXiaoGongPDFDlg::ApplyReadingMode(ReadingMode mode)
 	if (m_searchResultsHeader.GetSafeHwnd()) m_searchResultsHeader.Invalidate(FALSE);
 	if (m_editCurrent.GetSafeHwnd()) m_editCurrent.Invalidate(FALSE);
 	if (m_editSearch.GetSafeHwnd()) m_editSearch.Invalidate(FALSE);
+	if (m_searchPopup.GetSafeHwnd()) m_searchPopup.Invalidate(FALSE);
+	if (m_searchMatchCount.GetSafeHwnd()) m_searchMatchCount.Invalidate(FALSE);
 	if (m_pdfScrollCorner.GetSafeHwnd()) m_pdfScrollCorner.Invalidate(FALSE);
 }
 
@@ -7542,8 +7560,8 @@ void CXiaoGongPDFDlg::OnMouseMove(UINT nFlags, CPoint point)
 				HBITMAP hOldBmp1 = (HBITMAP)memDC.SelectObject(m_hPanPageBitmap);
 				HBITMAP hOldBmp2 = (HBITMAP)targetDC.SelectObject(hNewBitmap);
 
-				// 填充浅灰色背景（让白色PDF页面更明显）
-				targetDC.FillSolidRect(0, 0, viewWidth, viewHeight, PDF_VIEW_BACKGROUND);
+				// 填充背景
+				targetDC.FillSolidRect(0, 0, viewWidth, viewHeight, ViewBgColor());
 
 				// 计算居中位置（带偏移）
 				int xPos = (viewWidth - bm.bmWidth) / 2 + m_panOffset.x;
@@ -7552,8 +7570,9 @@ void CXiaoGongPDFDlg::OnMouseMove(UINT nFlags, CPoint point)
 				// 快速绘制PDF页面
 				targetDC.BitBlt(xPos, yPos, bm.bmWidth, bm.bmHeight, &memDC, 0, 0, SRCCOPY);
 
-				// ★★★ 绘制页面边框（深灰色）
-				CPen borderPen(PS_SOLID, 1, RGB(128, 128, 128));
+				// ★★★ 绘制页面边框
+				CPen borderPen(PS_SOLID, 1, m_readingMode == READING_NIGHT ?
+					RGB(60, 63, 66) : RGB(128, 128, 128));
 				CPen* pOldPen = targetDC.SelectObject(&borderPen);
 				targetDC.SelectStockObject(NULL_BRUSH);  // 不填充
 				targetDC.Rectangle(xPos - 1, yPos - 1, xPos + bm.bmWidth + 1, yPos + bm.bmHeight + 1);
@@ -8499,8 +8518,8 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 	bmp.CreateCompatibleBitmap(pDC, viewWidth, viewHeight);
 	CBitmap* pOldBmp = memDC.SelectObject(&bmp);
 
-	// 填充背景色（灰色）
-	memDC.FillSolidRect(0, 0, viewWidth, viewHeight, PDF_VIEW_BACKGROUND);
+	// 填充背景色
+	memDC.FillSolidRect(0, 0, viewWidth, viewHeight, ViewBgColor());
 
 	auto firstVisibleIt = std::lower_bound(m_pageYPositions.begin(), m_pageYPositions.end(), visibleTop);
 	int firstVisibleIndex = (int)(firstVisibleIt - m_pageYPositions.begin());
