@@ -127,6 +127,7 @@ public:
 	void SaveCurrentPageZoomState();
 	void RestorePageZoomState(int pageNumber);
 	PageZoomState GetPageZoomState(int pageNumber);
+	void ClearPageZoomStates() { m_pageZoomStates.clear(); }
 
 	CPoint GetPanOffset() const { return m_panOffset; }
 	void SetPanOffset(CPoint offset) { m_panOffset = offset; }

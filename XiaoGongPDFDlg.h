@@ -85,6 +85,8 @@ protected:
 	void ForwardMouseMessage(UINT message, UINT nFlags, CPoint point);
 	afx_msg void OnLButtonDown(UINT nFlags, CPoint point);
 	afx_msg void OnLButtonUp(UINT nFlags, CPoint point);
+	afx_msg void OnMButtonDown(UINT nFlags, CPoint point);
+	afx_msg void OnMButtonUp(UINT nFlags, CPoint point);
 	afx_msg void OnMouseMove(UINT nFlags, CPoint point);
 	afx_msg void OnRButtonUp(UINT nFlags, CPoint point);
 	afx_msg BOOL OnEraseBkgnd(CDC* pDC);
@@ -343,6 +345,8 @@ private:
 	HCURSOR m_hHandCursorGrab;  // 抓取光标
 	HBITMAP m_hPanPageBitmap;   // 拖拽时缓存的PDF页面位图（不含偏移）
 	bool m_canDrag;             // ★★★ 缓存：当前页面是否可以拖动（避免频繁计算）
+	bool m_spaceKeyDown = false; // 空格键是否按下（临时抓手）
+	bool m_tempHandDrag = false; // 当前拖拽是否为临时抓手（空格/中键触发）
 
 	// 文本选择相关
 	bool m_selectionMode;       // true = 文本选择模式, false = 拖拽模式
@@ -506,6 +510,8 @@ protected:
 	void UpdateOutlineButtonColors();
 	COLORREF ViewBgColor() const { return m_readingMode == READING_NIGHT ? DARK_VIEW_BACKGROUND : PDF_VIEW_BACKGROUND; }
 	afx_msg void OnReadingMode(UINT nID);
+	afx_msg void OnViewMode(UINT nID);
+	void SetContinuousScrollMode(bool continuous);
     void UpdatePageControls();
     void UpdateStatusBar();    // 更新状态栏
 	void UpdateZoomStatus();
@@ -629,10 +635,15 @@ protected:
     // 鼠标拖拽平移相关
     afx_msg void OnLButtonDown(UINT nFlags, CPoint point);
     afx_msg void OnLButtonUp(UINT nFlags, CPoint point);
+    afx_msg void OnMButtonDown(UINT nFlags, CPoint point);
+    afx_msg void OnMButtonUp(UINT nFlags, CPoint point);
     afx_msg void OnMouseMove(UINT nFlags, CPoint point);
     afx_msg void OnContextMenu(CWnd* pWnd, CPoint point);
     afx_msg BOOL OnSetCursor(CWnd* pWnd, UINT nHitTest, UINT message);
     void ResetPanOffset();  // 重置平移偏移量
+    bool IsEditControlFocused() const;
+    bool IsHandPanModeActive() const;
+    bool StartPanDrag(CPoint pdfViewPoint, bool temporaryPan);
 
     // 连续滚动模式相关函数
     void CalculatePagePositions(bool recalcScale = true);  // 计算所有页面的位置和高度；recalcScale=false时保持现有m_uniformScale不变

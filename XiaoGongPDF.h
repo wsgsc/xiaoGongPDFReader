@@ -12,6 +12,9 @@
 
 #include <mupdf/fitz.h>
 
+// 主窗口唯一识别属性名（避免通过标题匹配误伤 IDE/资源管理器窗口）
+constexpr LPCTSTR XIAOGONG_MAINWND_PROP = _T("XiaoGongPDF_MainWnd_Prop_2024");
+
 // CXiaoGongPDFApp:
 // 有关此类的实现，请参阅 XiaoGongPDF.cpp
 //

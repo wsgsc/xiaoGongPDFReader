@@ -162,10 +162,113 @@ namespace
 		buttonBitmap.UnlockBits(&pixels);
 	}
 
-	bool SaveValidatedPdf(fz_context* ctx, pdf_document* pdf, const CString& targetPath,
-		int expectedPages, const pdf_write_options& options,
+	CString NormalizePathForCompare(const CString& path)
+	{
+		if (path.IsEmpty())
+			return CString();
+		DWORD needed = ::GetFullPathName(path, 0, nullptr, nullptr);
+		if (needed == 0)
+			return path;
+		std::vector<TCHAR> buffer(needed + 1, 0);
+		if (::GetFullPathName(path, needed + 1, buffer.data(), nullptr) == 0)
+			return path;
+		return CString(buffer.data());
+	}
+
+	bool IsImageFilePath(const CString& filePath)
+	{
+		int dot = filePath.ReverseFind(_T('.'));
+		if (dot < 0)
+			return false;
+		CString ext = filePath.Mid(dot);
+		ext.MakeLower();
+		return ext == _T(".jpg") || ext == _T(".jpeg") || ext == _T(".png") || ext == _T(".bmp");
+	}
+
+	void InsertImagePageToPdf(fz_context* ctx, pdf_document* targetPdf, int insertIndex,
+		const CString& imagePath)
+	{
+		CW2A imagePathA(imagePath, CP_UTF8);
+		fz_image* image = nullptr;
+		fz_buffer* contents_buf = nullptr;
+		fz_var(image);
+		fz_var(contents_buf);
+
+		fz_try(ctx)
+		{
+			image = fz_new_image_from_file(ctx, imagePathA);
+			if (!image || image->w <= 0 || image->h <= 0)
+				fz_throw(ctx, FZ_ERROR_GENERIC, "无效的图片尺寸");
+
+			const int imgWidth = image->w;
+			const int imgHeight = image->h;
+
+			// 按未旋转的原始宽高比选择 A4 纵向/横向页面；
+			// 页面旋转统一由后续 /Rotate 属性完成，避免二次旋转和比例压缩变形。
+			const fz_rect mediabox = (imgWidth > imgHeight) ?
+				fz_make_rect(0, 0, 842, 595) :
+				fz_make_rect(0, 0, 595, 842);
+
+			pdf_obj* page_obj = pdf_add_page(ctx, targetPdf, mediabox, 0, nullptr, nullptr);
+			pdf_insert_page(ctx, targetPdf, insertIndex, page_obj);
+
+			const float pageWidth = mediabox.x1 - mediabox.x0;
+			const float pageHeight = mediabox.y1 - mediabox.y0;
+			const float scale = fmin(pageWidth / static_cast<float>(imgWidth),
+				pageHeight / static_cast<float>(imgHeight));
+			const float w = imgWidth * scale;
+			const float h = imgHeight * scale;
+			const float x = (pageWidth - w) / 2.0f;
+			const float y = (pageHeight - h) / 2.0f;
+
+			pdf_obj* image_obj = pdf_add_image(ctx, targetPdf, image);
+			pdf_obj* resources = pdf_dict_get(ctx, page_obj, PDF_NAME(Resources));
+			if (!resources)
+			{
+				resources = pdf_new_dict(ctx, targetPdf, 1);
+				pdf_dict_put(ctx, page_obj, PDF_NAME(Resources), resources);
+				pdf_drop_obj(ctx, resources);
+				resources = pdf_dict_get(ctx, page_obj, PDF_NAME(Resources));
+			}
+
+			pdf_obj* xobj_dict = pdf_dict_get(ctx, resources, PDF_NAME(XObject));
+			if (!xobj_dict)
+			{
+				xobj_dict = pdf_new_dict(ctx, targetPdf, 1);
+				pdf_dict_put(ctx, resources, PDF_NAME(XObject), xobj_dict);
+				pdf_drop_obj(ctx, xobj_dict);
+				xobj_dict = pdf_dict_get(ctx, resources, PDF_NAME(XObject));
+			}
+
+			pdf_dict_puts(ctx, xobj_dict, "Im0", image_obj);
+			pdf_drop_obj(ctx, image_obj);
+
+			contents_buf = fz_new_buffer(ctx, 256);
+			fz_append_printf(ctx, contents_buf, "q\n%g 0 0 %g %g %g cm\n/Im0 Do\nQ\n",
+				w, h, x, y);
+
+			pdf_obj* contents = pdf_add_stream(ctx, targetPdf, contents_buf, nullptr, 0);
+			pdf_dict_put(ctx, page_obj, PDF_NAME(Contents), contents);
+			pdf_drop_obj(ctx, contents);
+		}
+		fz_always(ctx)
+		{
+			if (contents_buf)
+				fz_drop_buffer(ctx, contents_buf);
+			if (image)
+				fz_drop_image(ctx, image);
+		}
+		fz_catch(ctx)
+		{
+			fz_rethrow(ctx);
+		}
+	}
+
+	bool WriteAndValidateTempPdf(fz_context* ctx, pdf_document* pdf, const CString& targetPath,
+		int expectedPages, const pdf_write_options& options, CString& outTempPath,
 		const std::vector<char>* password = nullptr)
 	{
+		outTempPath.Empty();
 		if (expectedPages < 1 || pdf_count_pages(ctx, pdf) != expectedPages)
 			return false;
 
@@ -199,12 +302,30 @@ namespace
 			valid = false;
 		}
 
-		if (valid)
-			valid = MoveFileEx(tempName, targetPath,
-				MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
 		if (!valid)
+		{
 			DeleteFile(tempName);
-		return valid;
+			return false;
+		}
+		outTempPath = tempName;
+		return true;
+	}
+
+	bool FinalizeValidatedPdf(const CString& tempPath, const CString& targetPath,
+		const std::function<void(const CString&)>& onBeforeReplace,
+		const std::function<void(const CString&, bool)>& onAfterReplace)
+	{
+		if (tempPath.IsEmpty())
+			return false;
+		if (onBeforeReplace)
+			onBeforeReplace(targetPath);
+		const bool moved = MoveFileEx(tempPath, targetPath,
+			MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+		if (!moved)
+			DeleteFile(tempPath);
+		if (onAfterReplace)
+			onAfterReplace(targetPath, moved);
+		return moved;
 	}
 }
 
@@ -2050,6 +2171,13 @@ void CPDFEditDialog::ExtractSelectedPages()
 		return;
 
 	CString outputPath = saveDlg.GetPathName();
+	if (!m_filePath.IsEmpty() &&
+		NormalizePathForCompare(outputPath).CompareNoCase(NormalizePathForCompare(m_filePath)) == 0)
+	{
+		MessageBox(_T("提取页面时不能直接覆盖当前正在编辑的原文件。\n请选择其他文件名，或使用底部“保存”按钮覆盖原文件。"),
+			_T("提示"), MB_OK | MB_ICONWARNING);
+		return;
+	}
 
 	// 收集要提取的页面信息
 	std::vector<PageInfo> pagesToExtract;
@@ -2078,8 +2206,10 @@ void CPDFEditDialog::ExtractSelectedPages()
 	pdf_write_options opts = pdf_default_write_options;
 	opts.do_garbage = 1;
 
-	bool success = false;
+	bool tempReady = false;
+	CString tempFilePath;
 	pdf_document* newPdf = nullptr;
+	fz_var(newPdf);
 	std::map<CString, fz_document*> openDocs;
 
 	fz_try(m_ctx)
@@ -2090,48 +2220,48 @@ void CPDFEditDialog::ExtractSelectedPages()
 		// 遍历要提取的页面
 		for (const auto& pageInfo : pagesToExtract)
 		{
-			fz_document* sourceDoc = nullptr;
-
-			// 检查是否已经打开过这个文档
-			auto it = openDocs.find(pageInfo.sourceFile);
-			if (it != openDocs.end()) {
-				sourceDoc = it->second;
+			if (IsImageFilePath(pageInfo.sourceFile))
+			{
+				InsertImagePageToPdf(m_ctx, newPdf, -1, pageInfo.sourceFile);
 			}
-			else {
-				// 打开源文档
-				sourceDoc = OpenAuthenticatedSource(pageInfo.sourceFile);
-				openDocs[pageInfo.sourceFile] = sourceDoc;
+			else
+			{
+				fz_document* sourceDoc = nullptr;
+
+				auto it = openDocs.find(pageInfo.sourceFile);
+				if (it != openDocs.end()) {
+					sourceDoc = it->second;
+				}
+				else {
+					sourceDoc = OpenAuthenticatedSource(pageInfo.sourceFile);
+					openDocs[pageInfo.sourceFile] = sourceDoc;
+				}
+
+				if (!sourceDoc)
+					continue;
+
+				pdf_document* sourcePdf = pdf_document_from_fz_document(m_ctx, sourceDoc);
+				if (!sourcePdf)
+					continue;
+
+				pdf_graft_page(m_ctx, newPdf, -1, sourcePdf, pageInfo.sourcePageIndex);
 			}
-
-			if (!sourceDoc)
-				continue;
-
-			// 转换为pdf_document
-			pdf_document* sourcePdf = pdf_document_from_fz_document(m_ctx, sourceDoc);
-			if (!sourcePdf)
-				continue;
-
-			// 从源文档复制页面到新文档
-			pdf_graft_page(m_ctx, newPdf, -1, sourcePdf, pageInfo.sourcePageIndex);
 
 			// 应用旋转（如果有）
 			if (pageInfo.rotationAngle != 0) {
 				int newPageIndex = pdf_count_pages(m_ctx, newPdf) - 1;
 				pdf_obj* pageObj = pdf_lookup_page_obj(m_ctx, newPdf, newPageIndex);
 				if (pageObj) {
-					// 获取原始旋转角度
 					int originalRotate = pdf_to_int(m_ctx, pdf_dict_get(m_ctx, pageObj, PDF_NAME(Rotate)));
-					// 计算新的旋转角度
 					int newRotate = (originalRotate + pageInfo.rotationAngle) % 360;
-					// 设置旋转
 					pdf_dict_put_int(m_ctx, pageObj, PDF_NAME(Rotate), newRotate);
 				}
 			}
 		}
 
-		// 先验证页数，再写临时文件并验证；失败时保留原目标文件。
-		success = SaveValidatedPdf(m_ctx, newPdf, outputPath,
-			static_cast<int>(pagesToExtract.size()), opts);
+		// 先验证页数并写入临时文件；待 fz_always 释放源文件句柄后再替换目标文件。
+		tempReady = WriteAndValidateTempPdf(m_ctx, newPdf, outputPath,
+			static_cast<int>(pagesToExtract.size()), opts, tempFilePath);
 	}
 	fz_always(m_ctx)
 	{
@@ -2151,8 +2281,11 @@ void CPDFEditDialog::ExtractSelectedPages()
 	}
 	fz_catch(m_ctx)
 	{
-		success = false;
+		tempReady = false;
 	}
+
+	const bool success = tempReady && FinalizeValidatedPdf(
+		tempFilePath, outputPath, m_onBeforeReplaceTarget, m_onAfterReplaceTarget);
 	MessageBox(success ? _T("页面提取成功！") :
 		_T("页面提取失败。请检查源文件、页面数量及保存位置。"),
 		success ? _T("提示") : _T("错误"),
@@ -2541,10 +2674,11 @@ void CPDFEditDialog::OnBnClickedBtnReset()
 // 保存
 void CPDFEditDialog::OnBnClickedBtnSave()
 {
-	// 弹出文件保存对话框
-	CFileDialog saveDlg(FALSE, _T("pdf"), _T("edited.pdf"),
+	// 弹出文件保存对话框（默认定位到当前文件路径，支持直接覆盖保存或另存为）
+	LPCTSTR defaultPath = m_filePath.IsEmpty() ? _T("edited.pdf") : static_cast<LPCTSTR>(m_filePath);
+	CFileDialog saveDlg(FALSE, _T("pdf"), defaultPath,
 		OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST,
-		_T("PDF文件 (*.pdf)|*.pdf||"));
+		_T("PDF文件 (*.pdf)|*.pdf||"), this);
 
 	if (saveDlg.DoModal() != IDOK)
 		return;
@@ -2572,9 +2706,12 @@ bool CPDFEditDialog::SaveToNewFile(const CString& newFilePath)
 	pdf_write_options opts = pdf_default_write_options;
 	opts.do_garbage = 1;
 
-	bool success = false;
+	bool tempReady = false;
+	CString tempFilePath;
 	pdf_document* newPdf = nullptr;
 	pdf_obj* catalogMetadata = nullptr;
+	fz_var(newPdf);
+	fz_var(catalogMetadata);
 	std::map<CString, fz_document*> openDocs;
 	CString errorMsg;
 
@@ -2587,7 +2724,15 @@ bool CPDFEditDialog::SaveToNewFile(const CString& newFilePath)
 			if (!page.isDeleted && page.sourceFile.CompareNoCase(m_filePath) == 0)
 				originalPages.push_back(page.sourcePageIndex);
 		}
-		newPdf = pdf_document_from_fz_document(m_ctx, OpenAuthenticatedSource(m_filePath));
+		fz_document* baseDoc = OpenAuthenticatedSource(m_filePath);
+		if (!baseDoc)
+			fz_throw(m_ctx, FZ_ERROR_GENERIC, "无法打开源PDF文档");
+		newPdf = pdf_document_from_fz_document(m_ctx, baseDoc);
+		if (!newPdf)
+		{
+			fz_drop_document(m_ctx, baseDoc);
+			fz_throw(m_ctx, FZ_ERROR_GENERIC, "源文档不是有效的PDF格式");
+		}
 		pdf_obj* oldRoot = pdf_dict_get(m_ctx, pdf_trailer(m_ctx, newPdf), PDF_NAME(Root));
 		catalogMetadata = pdf_keep_obj(m_ctx, pdf_dict_get(m_ctx, oldRoot, PDF_NAME(Metadata)));
 		pdf_rearrange_pages(m_ctx, newPdf, static_cast<int>(originalPages.size()),
@@ -2609,144 +2754,33 @@ bool CPDFEditDialog::SaveToNewFile(const CString& newFilePath)
 			pageCount++;
 			if (page.sourceFile.CompareNoCase(m_filePath) == 0)
 				continue;
-			CString debugMsg;
-			debugMsg.Format(_T("正在处理第 %d 页：%s\n"), pageCount, page.sourceFile);
-			OutputDebugString(debugMsg);
 
-			// 判断源文件类型
-			CString ext = page.sourceFile.Right(4);
-			ext.MakeLower();
-			CString ext5 = page.sourceFile.Right(5);
-			ext5.MakeLower();
-
-			bool isImage = (ext == _T(".jpg") || ext == _T(".png") || ext == _T(".bmp") || ext5 == _T(".jpeg"));
-
-			if (isImage) {
-				// 处理图片文件
-				CW2A imagePathA(page.sourceFile, CP_UTF8);
-				fz_image* image = nullptr;
-				fz_buffer* contents_buf = nullptr;
-
-				fz_try(m_ctx) {
-					OutputDebugString(_T("  加载图片...\n"));
-					image = fz_new_image_from_file(m_ctx, imagePathA);
-
-					// 获取图片尺寸
-					int imgWidth = image->w;
-					int imgHeight = image->h;
-
-					CString sizeMsg;
-					sizeMsg.Format(_T("  图片尺寸：%d x %d\n"), imgWidth, imgHeight);
-					OutputDebugString(sizeMsg);
-
-					// 考虑旋转角度调整尺寸判断
-					int effectiveWidth = imgWidth;
-					int effectiveHeight = imgHeight;
-					if (page.rotationAngle == 90 || page.rotationAngle == 270) {
-						// 90度或270度旋转时，宽高互换
-						effectiveWidth = imgHeight;
-						effectiveHeight = imgWidth;
-					}
-
-					// 创建合适的页面尺寸（基于图片比例和旋转）
-					fz_rect mediabox;
-					if (effectiveWidth > effectiveHeight) {
-						mediabox = fz_make_rect(0, 0, 842, 595);  // A4横向
-					}
-					else {
-						mediabox = fz_make_rect(0, 0, 595, 842);  // A4纵向
-					}
-
-					OutputDebugString(_T("  创建PDF页面...\n"));
-					// 创建页面对象，设置旋转属性
-					pdf_obj* page_obj = pdf_add_page(m_ctx, newPdf, mediabox, 0, nullptr, nullptr);
-
-					pdf_insert_page(m_ctx, newPdf, insertIndex, page_obj);
-
-					// 计算缩放和位置（让图片在页面上居中显示）
-					float pageWidth = mediabox.x1 - mediabox.x0;
-					float pageHeight = mediabox.y1 - mediabox.y0;
-					float scale = fmin(pageWidth / imgWidth, pageHeight / imgHeight);
-					float w = imgWidth * scale;
-					float h = imgHeight * scale;
-					float x = (pageWidth - w) / 2;
-					float y = (pageHeight - h) / 2;
-
-					OutputDebugString(_T("  添加图片资源...\n"));
-					// 添加图片到PDF文档
-					pdf_obj* image_obj = pdf_add_image(m_ctx, newPdf, image);
-
-					// 获取或创建页面的Resources字典
-					pdf_obj* resources = pdf_dict_get(m_ctx, page_obj, PDF_NAME(Resources));
-					if (!resources) {
-						resources = pdf_new_dict(m_ctx, newPdf, 1);
-						pdf_dict_put(m_ctx, page_obj, PDF_NAME(Resources), resources);
-						pdf_drop_obj(m_ctx, resources);  // pdf_dict_put增加了引用计数
-						resources = pdf_dict_get(m_ctx, page_obj, PDF_NAME(Resources));
-					}
-
-					// 获取或创建XObject字典
-					pdf_obj* xobj_dict = pdf_dict_get(m_ctx, resources, PDF_NAME(XObject));
-					if (!xobj_dict) {
-						xobj_dict = pdf_new_dict(m_ctx, newPdf, 1);
-						pdf_dict_put(m_ctx, resources, PDF_NAME(XObject), xobj_dict);
-						pdf_drop_obj(m_ctx, xobj_dict);
-						xobj_dict = pdf_dict_get(m_ctx, resources, PDF_NAME(XObject));
-					}
-
-					// 将图片添加到XObject字典中
-					pdf_dict_puts(m_ctx, xobj_dict, "Im0", image_obj);
-					pdf_drop_obj(m_ctx, image_obj);
-
-					OutputDebugString(_T("  生成内容流...\n"));
-					// 创建内容流（绘制图片）
-					contents_buf = fz_new_buffer(m_ctx, 256);
-					fz_append_printf(m_ctx, contents_buf, "q\n");
-					fz_append_printf(m_ctx, contents_buf, "%g 0 0 %g %g %g cm\n", w, h, x, y);
-					fz_append_printf(m_ctx, contents_buf, "/Im0 Do\n");
-					fz_append_printf(m_ctx, contents_buf, "Q\n");
-
-					// 将内容流添加到页面
-					pdf_obj* contents = pdf_add_stream(m_ctx, newPdf, contents_buf, nullptr, 0);
-					pdf_dict_put(m_ctx, page_obj, PDF_NAME(Contents), contents);
-					pdf_drop_obj(m_ctx, contents);
-
-					OutputDebugString(_T("  图片页面处理完成\n"));
+			if (IsImageFilePath(page.sourceFile))
+			{
+				fz_try(m_ctx)
+				{
+					InsertImagePageToPdf(m_ctx, newPdf, insertIndex, page.sourceFile);
 				}
-				fz_always(m_ctx) {
-					// 清理资源
-					if (contents_buf) {
-						fz_drop_buffer(m_ctx, contents_buf);
-						contents_buf = nullptr;
-					}
-					if (image) {
-						fz_drop_image(m_ctx, image);
-						image = nullptr;
-					}
-				}
-				fz_catch(m_ctx) {
-					// 图片处理失败
+				fz_catch(m_ctx)
+				{
 					const char* err = fz_caught_message(m_ctx);
+					CString errText = err ? CString(CA2W(err, CP_UTF8)) : _T("未知错误");
 					CString msg;
-					msg.Format(_T("  错误：无法处理图片页面 %s\n  MuPDF错误: %S\n"), page.sourceFile, err);
-					OutputDebugString(msg);
+					msg.Format(_T("  错误：无法处理图片页面 %s\n  MuPDF错误: %s\n"),
+						static_cast<LPCTSTR>(page.sourceFile), static_cast<LPCTSTR>(errText));
 					errorMsg += msg;
-					// 图片失败则抛出异常，不继续
 					fz_rethrow(m_ctx);
 				}
 			}
-			else {
-				// 处理PDF文件
-				OutputDebugString(_T("  处理PDF页面...\n"));
+			else
+			{
 				fz_document* sourceDoc = nullptr;
 
-				// 检查是否已经打开过这个文档
 				auto it = openDocs.find(page.sourceFile);
 				if (it != openDocs.end()) {
 					sourceDoc = it->second;
 				}
 				else {
-					// 打开源文档
 					sourceDoc = OpenAuthenticatedSource(page.sourceFile);
 					openDocs[page.sourceFile] = sourceDoc;
 				}
@@ -2754,15 +2788,11 @@ bool CPDFEditDialog::SaveToNewFile(const CString& newFilePath)
 				if (!sourceDoc)
 					continue;
 
-				// 转换为pdf_document
 				pdf_document* sourcePdf = pdf_document_from_fz_document(m_ctx, sourceDoc);
 				if (!sourcePdf)
 					continue;
 
-				// 从源文档复制页面到新文档
 				pdf_graft_page(m_ctx, newPdf, insertIndex, sourcePdf, page.sourcePageIndex);
-
-				OutputDebugString(_T("  PDF页面处理完成\n"));
 			}
 		}
 		int outputIndex = 0;
@@ -2780,23 +2810,17 @@ bool CPDFEditDialog::SaveToNewFile(const CString& newFilePath)
 			++outputIndex;
 		}
 
-		// 验证页面数
-		int finalPageCount = pdf_count_pages(m_ctx, newPdf);
-		CString countMsg;
-		countMsg.Format(_T("新PDF总页数：%d（预期：%d）\n"), finalPageCount, pageCount);
-		OutputDebugString(countMsg);
-
-		// 缺页时拒绝保存；临时文件验证通过后才替换目标文件。
-			success = SaveValidatedPdf(m_ctx, newPdf, newFilePath, pageCount, opts,
-				&m_password);
-		if (!success)
-			errorMsg = _T("页面数量不符，或无法完成文件写入与验证。\n");
+		// 先写入临时文件并校验页数；待 fz_always 关闭所有源文件句柄后再执行覆盖替换。
+		tempReady = WriteAndValidateTempPdf(m_ctx, newPdf, newFilePath, pageCount, opts,
+			tempFilePath, &m_password);
+		if (!tempReady)
+			errorMsg = _T("页面数量不符，或无法完成临时文件写入与验证。\n");
 	}
 	fz_always(m_ctx)
 	{
 		if (catalogMetadata)
 			pdf_drop_obj(m_ctx, catalogMetadata);
-		// 清理：关闭所有打开的源文档
+		// 清理：关闭所有打开的源文档（包括当前被覆盖的源文档句柄）
 		for (auto& pair : openDocs) {
 			if (pair.second) {
 				fz_drop_document(m_ctx, pair.second);
@@ -2804,7 +2828,7 @@ bool CPDFEditDialog::SaveToNewFile(const CString& newFilePath)
 		}
 		openDocs.clear();
 
-		// 清理新文档
+		// 清理新文档（同时释放 OpenAuthenticatedSource(m_filePath) 持有的文件流）
 		if (newPdf) {
 			pdf_drop_document(m_ctx, newPdf);
 			newPdf = nullptr;
@@ -2812,14 +2836,23 @@ bool CPDFEditDialog::SaveToNewFile(const CString& newFilePath)
 	}
 	fz_catch(m_ctx)
 	{
-		// 捕获错误信息
 		const char* errMsg = fz_caught_message(m_ctx);
+		CString errText = errMsg ? CString(CA2W(errMsg, CP_UTF8)) : _T("未知错误");
 		CString caughtMsg;
-		caughtMsg.Format(_T("MuPDF错误: %S\n"), errMsg);
+		caughtMsg.Format(_T("MuPDF错误: %s\n"), static_cast<LPCTSTR>(errText));
 		OutputDebugString(caughtMsg);
 		errorMsg += caughtMsg;
 
-		success = false;
+		tempReady = false;
+	}
+
+	bool success = false;
+	if (tempReady)
+	{
+		success = FinalizeValidatedPdf(
+			tempFilePath, newFilePath, m_onBeforeReplaceTarget, m_onAfterReplaceTarget);
+		if (!success && errorMsg.IsEmpty())
+			errorMsg = _T("目标文件正在被其他程序占用或无写入权限，无法覆盖保存。\n");
 	}
 
 	// 如果失败且有错误信息，显示给用户
@@ -2953,28 +2986,18 @@ bool CPDFEditDialog::ImportPDF(const CString& pdfPath)
 // 导入文件（根据扩展名路由到PDF或图片导入）
 bool CPDFEditDialog::ImportFile(const CString& filePath)
 {
-	// 获取文件扩展名
 	CString ext = filePath.Right(4);
 	ext.MakeLower();
 
-	// 判断是PDF还是图片
 	if (ext == _T(".pdf")) {
 		return ImportPDF(filePath);
 	}
-	else if (ext == _T(".jpg") || ext == _T("jpeg") || ext == _T(".png") || ext == _T(".bmp")) {
+	if (IsImageFilePath(filePath)) {
 		return ImportImage(filePath);
 	}
-	else {
-		// 对于.jpeg，需要特殊处理（5个字符）
-		CString ext5 = filePath.Right(5);
-		ext5.MakeLower();
-		if (ext5 == _T(".jpeg")) {
-			return ImportImage(filePath);
-		}
 
-		MessageBox(_T("不支持的文件格式！"), _T("错误"), MB_OK | MB_ICONERROR);
-		return false;
-	}
+	MessageBox(_T("不支持的文件格式！"), _T("错误"), MB_OK | MB_ICONERROR);
+	return false;
 }
 
 // 导入图片文件
@@ -2986,45 +3009,20 @@ bool CPDFEditDialog::ImportImage(const CString& imagePath)
 	fz_pixmap* pixmap = nullptr;
 	fz_pixmap* tempPixmap = nullptr;
 	HBITMAP hBitmap = nullptr;
+	bool storedBitmap = false;
+	fz_var(image);
+	fz_var(pixmap);
+	fz_var(tempPixmap);
+	fz_var(hBitmap);
+	fz_var(storedBitmap);
 
 	fz_try(m_ctx) {
-		// 输出调试信息
-		CString debugMsg;
-		debugMsg.Format(_T("正在加载图片：%s\n"), imagePath);
-		OutputDebugString(debugMsg);
-
 		// 加载图片
 		CW2A imagePathA(imagePath, CP_UTF8);
-		OutputDebugString(_T("  路径转换为UTF-8...\n"));
 		image = fz_new_image_from_file(m_ctx, imagePathA);
-		OutputDebugString(_T("  图片加载成功\n"));
-
-		if (!image) {
-			MessageBox(_T("无法加载图片文件！"), _T("错误"), MB_OK | MB_ICONERROR);
-			return false;
+		if (!image || image->w <= 0 || image->h <= 0) {
+			fz_throw(m_ctx, FZ_ERROR_GENERIC, "无法加载图片文件或图片尺寸无效");
 		}
-
-		// 输出图片详细信息
-		CString imgInfo;
-		imgInfo.Format(_T("  图片信息：宽度=%d, 高度=%d, bpc=%d, n=%d, imagemask=%d\n"),
-			image->w, image->h, image->bpc, image->n, image->imagemask);
-		OutputDebugString(imgInfo);
-
-		// 检查图片的颜色空间
-		if (image->colorspace) {
-			const char* csName = fz_colorspace_name(m_ctx, image->colorspace);
-			CString csInfo;
-			csInfo.Format(_T("  颜色空间：%S, 组件数=%d\n"), csName, fz_colorspace_n(m_ctx, image->colorspace));
-			OutputDebugString(csInfo);
-		} else {
-			OutputDebugString(_T("  颜色空间：无\n"));
-		}
-
-		// 转换为pixmap - 使用RGB颜色空间，无alpha通道
-		OutputDebugString(_T("  转换为pixmap...\n"));
-
-		// 先获取原始pixmap
-		OutputDebugString(_T("  调用 fz_get_pixmap_from_image...\n"));
 
 		// 尝试获取 pixmap，如果失败会抛出异常到 fz_catch
 		tempPixmap = fz_get_pixmap_from_image(m_ctx, image, NULL, NULL, NULL, NULL);
@@ -3151,31 +3149,27 @@ bool CPDFEditDialog::ImportImage(const CString& imagePath)
 		newPage.hThumbnail = hBitmap;
 
 		m_pages.push_back(newPage);
+		storedBitmap = true;
 		m_totalPages++;
 
 		// 清理
 		fz_drop_pixmap(m_ctx, pixmap);
+		pixmap = nullptr;
 		fz_drop_image(m_ctx, image);
+		image = nullptr;
 	}
 	fz_catch(m_ctx) {
+		if (!storedBitmap && hBitmap) DeleteObject(hBitmap);
 		if (tempPixmap) fz_drop_pixmap(m_ctx, tempPixmap);
 		if (pixmap) fz_drop_pixmap(m_ctx, pixmap);
-		if (image) {
-			// 输出图片信息以便调试
-			CString debugInfo;
-			debugInfo.Format(_T("  失败时图片信息：w=%d, h=%d, bpc=%d, n=%d\n"),
-				image->w, image->h, image->bpc, image->n);
-			OutputDebugString(debugInfo);
+		if (image) fz_drop_image(m_ctx, image);
 
-			fz_drop_image(m_ctx, image);
-		}
-
-		// 获取详细错误信息
 		const char* errMsg = fz_caught_message(m_ctx);
+		CString errText = errMsg ? CString(CA2W(errMsg, CP_UTF8)) : _T("未知错误");
 		int errCode = fz_caught(m_ctx);
 		CString errorDetails;
-		errorDetails.Format(_T("导入图片失败！\n\n文件路径：%s\n\nMuPDF错误代码：%d\nMuPDF错误：%S\n\n建议：\n1. 该PNG图片可能使用了特殊的编码格式\n2. 尝试用画图工具重新保存图片\n3. 或转换为JPG格式"),
-			imagePath, errCode, errMsg);
+		errorDetails.Format(_T("导入图片失败！\n\n文件路径：%s\n\nMuPDF错误代码：%d\nMuPDF错误：%s\n\n建议：\n1. 该PNG图片可能使用了特殊的编码格式\n2. 尝试用画图工具重新保存图片\n3. 或转换为JPG格式"),
+			static_cast<LPCTSTR>(imagePath), errCode, static_cast<LPCTSTR>(errText));
 
 		OutputDebugString(errorDetails);
 		MessageBox(errorDetails, _T("错误"), MB_OK | MB_ICONERROR);

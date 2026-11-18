@@ -356,8 +356,6 @@ void CPDFDocument::RestorePageZoomState(int pageNumber)
 	}
 	else
 	{
-		m_zoomMode = ZOOM_CUSTOM;
-		m_customZoom = 1.0f;
 		m_panOffset = CPoint(0, 0);
 	}
 }

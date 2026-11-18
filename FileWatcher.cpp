@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "FileWatcher.h"
+#include <vector>
 
 CFileWatcher::CFileWatcher()
     : m_running(false)
@@ -67,6 +68,8 @@ void CFileWatcher::RemoveWatch(const CString& filePath)
     dirPath.MakeLower();
     fileName.MakeLower();
 
+    DirWatchInfo* pToCleanup = nullptr;
+
     EnterCriticalSection(&m_cs);
 
     auto it = m_dirWatchers.find(dirPath);
@@ -75,13 +78,19 @@ void CFileWatcher::RemoveWatch(const CString& filePath)
         it->second->watchedFiles.erase(fileName);
         if (it->second->watchedFiles.empty())
         {
-            StopDirWatch(it->second);
-            delete it->second;
+            pToCleanup = it->second;
+            if (pToCleanup->hStopEvent)
+                SetEvent(pToCleanup->hStopEvent);
             m_dirWatchers.erase(it);
         }
     }
 
     LeaveCriticalSection(&m_cs);
+
+    if (pToCleanup)
+    {
+        CleanupDirWatch(pToCleanup);
+    }
 }
 
 void CFileWatcher::Start()
@@ -103,6 +112,8 @@ void CFileWatcher::Start()
 
 void CFileWatcher::Stop()
 {
+    std::vector<DirWatchInfo*> watchers;
+
     EnterCriticalSection(&m_cs);
     if (!m_running)
     {
@@ -111,31 +122,18 @@ void CFileWatcher::Stop()
     }
     m_running = false;
 
+    watchers.reserve(m_dirWatchers.size());
     for (auto& pair : m_dirWatchers)
     {
         if (pair.second->hStopEvent)
             SetEvent(pair.second->hStopEvent);
+        watchers.push_back(pair.second);
     }
     LeaveCriticalSection(&m_cs);
 
-    for (auto& pair : m_dirWatchers)
+    for (DirWatchInfo* pInfo : watchers)
     {
-        if (pair.second->hThread)
-        {
-            WaitForSingleObject(pair.second->hThread, 3000);
-            CloseHandle(pair.second->hThread);
-            pair.second->hThread = NULL;
-        }
-        if (pair.second->hStopEvent)
-        {
-            CloseHandle(pair.second->hStopEvent);
-            pair.second->hStopEvent = NULL;
-        }
-        if (pair.second->hDir != INVALID_HANDLE_VALUE)
-        {
-            CloseHandle(pair.second->hDir);
-            pair.second->hDir = INVALID_HANDLE_VALUE;
-        }
+        StopDirWatch(pInfo);
     }
 }
 
@@ -186,7 +184,7 @@ void CFileWatcher::StopDirWatch(DirWatchInfo* pInfo)
 
     if (pInfo->hThread)
     {
-        WaitForSingleObject(pInfo->hThread, 3000);
+        WaitForSingleObject(pInfo->hThread, INFINITE);
         CloseHandle(pInfo->hThread);
         pInfo->hThread = NULL;
     }
@@ -285,7 +283,8 @@ DWORD WINAPI CFileWatcher::WatchThreadProc(LPVOID pParam)
 
             if (matched)
             {
-                Sleep(500);
+                if (WaitForSingleObject(pInfo->hStopEvent, 500) == WAIT_OBJECT_0)
+                    break;
                 CString* pPath = new CString(fullPath);
                 if (!PostMessage(pInfo->hNotifyWnd, WM_FILE_CHANGED, 0, reinterpret_cast<LPARAM>(pPath)))
                     delete pPath;
@@ -296,6 +295,8 @@ DWORD WINAPI CFileWatcher::WatchThreadProc(LPVOID pParam)
             pNotify = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(
                 reinterpret_cast<BYTE*>(pNotify) + pNotify->NextEntryOffset);
         }
+        if (WaitForSingleObject(pInfo->hStopEvent, 0) == WAIT_OBJECT_0)
+            break;
     }
 
     CloseHandle(overlapped.hEvent);

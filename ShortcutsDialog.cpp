@@ -60,10 +60,9 @@ void CShortcutsDialog::InitializeShortcutsList()
 	m_shortcutsList.InsertColumn(1, _T("功能说明"), LVCFMT_LEFT, 300);
 
 	// 设置字体
-	CFont font;
-	font.CreatePointFont(95, _T("微软雅黑"));
-	m_shortcutsList.SetFont(&font);
-	font.Detach();
+	if (!m_listFont.GetSafeHandle())
+		m_listFont.CreatePointFont(95, _T("微软雅黑"));
+	m_shortcutsList.SetFont(&m_listFont);
 
 	// 添加快捷键
 	AddShortcut(_T("← / →"), _T("上一页 / 下一页"));
@@ -71,6 +70,7 @@ void CShortcutsDialog::InitializeShortcutsList()
 	AddShortcut(_T(""), _T(""));
 
 	AddShortcut(_T("鼠标滚轮"), _T("向上滚动页面/向下滚动页面"));
+	AddShortcut(_T("空格 + 左键拖拽 / 中键拖拽"), _T("临时抓手拖动页面"));
 	AddShortcut(_T(""), _T(""));
 
 	AddShortcut(_T("Ctrl + F"), _T("打开搜索"));

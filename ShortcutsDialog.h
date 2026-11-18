@@ -27,6 +27,7 @@ protected:
 
 private:
 	CListCtrl m_shortcutsList;  // 快捷键列表控件
+	CFont m_listFont;           // 列表字体
 
 	void InitializeShortcutsList();  // 初始化快捷键列表
 	void AddShortcut(const CString& key, const CString& description);  // 添加快捷键项

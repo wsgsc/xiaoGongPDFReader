@@ -109,6 +109,8 @@
 #define ID_MENU_READING_NORMAL          32792
 #define ID_MENU_READING_NIGHT           32793
 #define ID_MENU_READING_EYE             32794
+#define ID_MENU_VIEW_CONTINUOUS         32795
+#define ID_MENU_VIEW_SINGLE_PAGE        32796
 
 #define WM_PDF_LOAD_COMPLETE   (WM_USER + 104)
 #define WM_PDF_LOAD_CANCELLED  (WM_USER + 105)
@@ -116,11 +118,11 @@
 #define WM_SEARCH_COMPLETE     (WM_USER + 107)
 #define WM_SEARCH_PROGRESS     (WM_USER + 108)
 // Next default values for new objects
-// 
+//
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        137
-#define _APS_NEXT_COMMAND_VALUE         32795
+#define _APS_NEXT_COMMAND_VALUE         32797
 #define _APS_NEXT_CONTROL_VALUE         1084
 #define _APS_NEXT_SYMED_VALUE           101
 #endif

@@ -5,6 +5,7 @@
 #include "afxdialogex.h"
 #include "resource.h"
 #include <mupdf/fitz.h>
+#include <functional>
 #include <vector>
 #include <map>
 
@@ -48,6 +49,14 @@ public:
 	enum { IDD = IDD_PDF_EDIT_DIALOG };
 
 	CString GetSavedFilePath() const { return m_savedFilePath; }
+	void SetTargetFileHandlers(
+		std::function<void(const CString&)> onBeforeReplace,
+		std::function<void(const CString&, bool)> onAfterReplace)
+	{
+		m_onBeforeReplaceTarget = std::move(onBeforeReplace);
+		m_onAfterReplaceTarget = std::move(onAfterReplace);
+	}
+	void RebindBorrowedDocument(fz_document* doc) { m_doc = doc; }
 
 protected:
 	virtual void DoDataExchange(CDataExchange* pDX);
@@ -128,6 +137,8 @@ private:
 
 	// 保存结果
 	CString m_savedFilePath;
+	std::function<void(const CString&)> m_onBeforeReplaceTarget;
+	std::function<void(const CString&, bool)> m_onAfterReplaceTarget;
 
 	// ImageList
 	CImageList m_imageList;

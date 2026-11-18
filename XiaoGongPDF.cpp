@@ -7,6 +7,7 @@
 #include "XiaoGongPDF.h"
 #include "XiaoGongPDFDlg.h"
 #include <memory>
+#include <shlwapi.h>
 
 
 #ifdef _DEBUG
@@ -75,13 +76,14 @@ BOOL CALLBACK EnumWindowsProc(HWND hWnd, LPARAM lParam)
 	if (GetParent(hWnd) != NULL)
 		return TRUE;
 
-	// 获取窗口标题
-	TCHAR szTitle[256] = { 0 };
-	int titleLen = GetWindowText(hWnd, szTitle, 256);
+	// 排除当前新启动进程自身的窗口
+	DWORD wndProcessId = 0;
+	GetWindowThreadProcessId(hWnd, &wndProcessId);
+	if (wndProcessId == 0 || wndProcessId == pData->processId)
+		return TRUE;
 
-	// 检查窗口标题是否包含 "XiaoGongPDF" 或 "小龚PDF阅读器"
-	CString title(szTitle);
-	if (title.Find(_T("XiaoGongPDF")) >= 0 || title.Find(_T("小龚PDF阅读器")) >= 0)
+	// 通过主窗口专属属性精确匹配，避免误匹配标题含 XiaoGongPDF 的 IDE 或资源管理器窗口
+	if (::GetProp(hWnd, XIAOGONG_MAINWND_PROP) != NULL)
 	{
 		pData->hWnd = hWnd;
 		return FALSE;  // 停止枚举
@@ -209,14 +211,38 @@ BOOL CXiaoGongPDFApp::InitInstance()
 	// 激活"Windows Native"视觉管理器，以便在 MFC 控件中启用主题
 	CMFCVisualManager::SetDefaultManager(RUNTIME_CLASS(CMFCVisualManagerWindows));
 
-	// 标准初始化
-	// 如果未使用这些功能并希望减小
-	// 最终可执行文件的大小，则应移除下列
-	// 不需要的特定初始化例程
-	// 更改用于存储设置的注册表项
-	// TODO: 应适当修改该字符串，
-	// 例如修改为公司或组织名
-	SetRegistryKey(_T("应用程序向导生成的本地应用程序"));
+	// 统一应用注册表根路径到 HKCU\Software\XiaoGongPDF，并自动迁移旧版向导默认路径下的配置
+	{
+		constexpr LPCTSTR kLegacyAppKey = _T("Software\\应用程序向导生成的本地应用程序\\XiaoGongPDF");
+		constexpr LPCTSTR kLegacyParentKey = _T("Software\\应用程序向导生成的本地应用程序");
+		constexpr LPCTSTR kUnifiedAppKey = _T("Software\\XiaoGongPDF\\XiaoGongPDF");
+		HKEY hExistingNewKey = NULL;
+		if (::RegOpenKeyEx(HKEY_CURRENT_USER, kUnifiedAppKey, 0, KEY_READ, &hExistingNewKey) == ERROR_SUCCESS)
+		{
+			::RegCloseKey(hExistingNewKey);
+		}
+		else
+		{
+			HKEY hLegacyKey = NULL;
+			if (::RegOpenKeyEx(HKEY_CURRENT_USER, kLegacyAppKey, 0, KEY_READ, &hLegacyKey) == ERROR_SUCCESS)
+			{
+				::RegCloseKey(hLegacyKey);
+				HKEY hDestKey = NULL;
+				if (::RegCreateKeyEx(HKEY_CURRENT_USER, kUnifiedAppKey, 0, NULL,
+					REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hDestKey, NULL) == ERROR_SUCCESS)
+				{
+					if (::SHCopyKey(HKEY_CURRENT_USER, kLegacyAppKey, hDestKey, 0) == ERROR_SUCCESS)
+					{
+						::SHDeleteKey(HKEY_CURRENT_USER, kLegacyAppKey);
+						// 若旧父键已无其他子项则一并清理（非空时 RegDeleteKey 安全失败）
+						::RegDeleteKey(HKEY_CURRENT_USER, kLegacyParentKey);
+					}
+					::RegCloseKey(hDestKey);
+				}
+			}
+		}
+	}
+	SetRegistryKey(_T("XiaoGongPDF"));
 
 	// 获取命令行参数
 	CString cmdLine = m_lpCmdLine;
