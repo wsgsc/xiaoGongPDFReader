@@ -992,17 +992,15 @@ void CXiaoGongPDFDlg::SaveDialogStateToDocument(CPDFDocument* pDoc, bool transfe
 
 	if (m_hCurrentBitmap)
 	{
-		BITMAP bm;
-		if (::GetObject(m_hCurrentBitmap, sizeof(BITMAP), &bm) != 0)
-			pDoc->SetCurrentBitmap(m_hCurrentBitmap);
+		// 无条件把所有权交给文档：即使 GetObject 校验失败也必须转交，
+		// 否则句柄既没被保存也没被删除，直接造成泄漏。
+		pDoc->SetCurrentBitmap(m_hCurrentBitmap);
 		m_hCurrentBitmap = NULL;
 	}
 
 	if (m_hPanPageBitmap)
 	{
-		BITMAP bm;
-		if (::GetObject(m_hPanPageBitmap, sizeof(BITMAP), &bm) != 0)
-			pDoc->SetPanPageBitmap(m_hPanPageBitmap);
+		pDoc->SetPanPageBitmap(m_hPanPageBitmap);
 		m_hPanPageBitmap = NULL;
 	}
 }
@@ -1130,21 +1128,27 @@ void CXiaoGongPDFDlg::RestoreOpenTabs()
 		if (!path.IsEmpty() && PathFileExists(path))
 			m_sessionRestorePaths.push_back(path);
 	}
-	if (!m_initialFilePath.IsEmpty())
+	// 命令行/关联打开的文件：全部排入恢复队列，首个作为活动标签。
+	if (m_initialFilePaths.empty() && !m_initialFilePath.IsEmpty())
+		m_initialFilePaths.push_back(m_initialFilePath);
+	if (!m_initialFilePaths.empty())
 	{
-		m_sessionActivePath = m_initialFilePath;
-		bool alreadyQueued = false;
-		for (const CString& path : m_sessionRestorePaths)
+		m_sessionActivePath = m_initialFilePaths.front();
+		for (const CString& initialPath : m_initialFilePaths)
 		{
-			if (FullPathForComparison(path).CompareNoCase(
-				FullPathForComparison(m_initialFilePath)) == 0)
+			bool alreadyQueued = false;
+			for (const CString& path : m_sessionRestorePaths)
 			{
-				alreadyQueued = true;
-				break;
+				if (FullPathForComparison(path).CompareNoCase(
+					FullPathForComparison(initialPath)) == 0)
+				{
+					alreadyQueued = true;
+					break;
+				}
 			}
+			if (!alreadyQueued)
+				m_sessionRestorePaths.push_back(initialPath);
 		}
-		if (!alreadyQueued)
-			m_sessionRestorePaths.push_back(m_initialFilePath);
 	}
 }
 
@@ -1183,6 +1187,7 @@ void CXiaoGongPDFDlg::OpenNextRestoredTab()
 		}
 	}
 	m_sessionRestorePaths.clear();
+	m_sessionRestoreIndex = 0;  // 重置游标，否则下一批入队路径会被跳过
 	m_sessionActivePath.Empty();
 }
 
@@ -1236,13 +1241,9 @@ void CXiaoGongPDFDlg::CleanupBitmap()
 {
 	if (m_hCurrentBitmap)
 	{
-		// 验证是否是有效的 GDI 对象
-		BITMAP bm;
-		if (::GetObject(m_hCurrentBitmap, sizeof(BITMAP), &bm) != 0)
-		{
-			// 是有效的位图，可以安全删除
-			DeleteObject(m_hCurrentBitmap);
-		}
+		// 直接释放，不再用 GetObject 做前置校验：
+		// 校验失败时跳过 DeleteObject 会把句柄彻底丢失，转而造成泄漏。
+		DeleteObject(m_hCurrentBitmap);
 		m_hCurrentBitmap = NULL;
 	}
 
@@ -2245,11 +2246,23 @@ bool CXiaoGongPDFDlg::RenderPage(int pageNumber)
 	PageCacheKey key{ pageNumber, renderWidth, renderHeight, rotation };
 
 	// ★★★ 检查缓存是否存在（拖拽时有偏移量，不使用缓存）
+	// 缓存中保存的是"干净"的页面位图（不含搜索高亮/选择高亮），
+	// 每次命中都复制一份再叠加高亮，避免高亮被烘焙进缓存后无法清除。
 	bool hasPanOffset = (m_panOffset.x != 0 || m_panOffset.y != 0);
-	auto it = m_pageCache.find(key);
-	if (it != m_pageCache.end() && !hasPanOffset) {
-		TRACE(_T("[CACHE] 命中页面 %d @ %dx%d, 旋转=%d°\n"), pageNumber, renderWidth, renderHeight, rotation);
+	HBITMAP hCachedCopy = nullptr;
+	if (!hasPanOffset)
+	{
+		auto cacheIt = m_pageCache.find(key);
+		if (cacheIt != m_pageCache.end())
+		{
+			TRACE(_T("[CACHE] 命中页面 %d @ %dx%d, 旋转=%d°\n"), pageNumber, renderWidth, renderHeight, rotation);
+			hCachedCopy = (HBITMAP)CopyImage(cacheIt->second.hBitmap, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
+			if (!hCachedCopy)
+				TRACE(_T("[CACHE] 复制缓存位图失败，改为重新渲染页面 %d\n"), pageNumber);
+		}
+	}
 
+	if (hCachedCopy) {
 		// ★★★ 重要：即使使用缓存，也要更新 m_currentPageObj
 		// 因为拖拽功能依赖 m_currentPageObj 来渲染当前页
 		CSingleLock lock(&m_renderLock, TRUE);
@@ -2281,46 +2294,30 @@ bool CXiaoGongPDFDlg::RenderPage(int pageNumber)
 			}
 		}
 
-		// ★★★ 重要：先释放旧的 m_hCurrentBitmap，因为我们要从缓存中使用位图
-		if (m_hCurrentBitmap)
+		// ★★★ 交换位图：先设置新位图到控件，再释放旧位图，避免中间态绘制已删除句柄
+		HBITMAP hOldBitmap = m_hCurrentBitmap;
+		m_hCurrentBitmap = hCachedCopy;
+		m_pdfView.SetDisplayBitmap(m_hCurrentBitmap);
+		SafeDeleteBitmap(hOldBitmap);
+
+		// 在位图上绘制搜索高亮（如果有搜索结果）
+		if (!m_searchMatches.empty() && m_hCurrentBitmap)
 		{
-			DeleteObject(m_hCurrentBitmap);
-			m_hCurrentBitmap = NULL;
-		}
+			CDC* pDC = m_pdfView.GetDC();
+			CDC memDCHighlight;
+			memDCHighlight.CreateCompatibleDC(pDC);
+			HBITMAP hOldBmpHighlight = (HBITMAP)memDCHighlight.SelectObject(m_hCurrentBitmap);
 
-		// ★★★ 复制缓存中的位图到 m_hCurrentBitmap，保持 m_hCurrentBitmap 的所有权语义
-		m_hCurrentBitmap = (HBITMAP)CopyImage(it->second.hBitmap, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
+			// 调用高亮绘制函数
+			HighlightSearchMatches(&memDCHighlight, pageNumber);
 
-		if (!m_hCurrentBitmap)
-		{
-			// 如果复制失败，直接使用缓存中的位图（虽然不理想，但至少能显示）
-			m_pdfView.SetDisplayBitmap(it->second.hBitmap);
-		}
-		else
-		{
-			// 在位图上绘制搜索高亮（如果有搜索结果）
-			if (!m_searchMatches.empty() && m_hCurrentBitmap)
-			{
-				CDC* pDC = m_pdfView.GetDC();
-				CDC memDCHighlight;
-				memDCHighlight.CreateCompatibleDC(pDC);
-				HBITMAP hOldBmpHighlight = (HBITMAP)memDCHighlight.SelectObject(m_hCurrentBitmap);
-
-				// 调用高亮绘制函数
-				HighlightSearchMatches(&memDCHighlight, pageNumber);
-
-				memDCHighlight.SelectObject(hOldBmpHighlight);
-				m_pdfView.ReleaseDC(pDC);
-			}
-
-			// 设置复制后的位图到控件
-			m_pdfView.SetDisplayBitmap(m_hCurrentBitmap);
+			memDCHighlight.SelectObject(hOldBmpHighlight);
+			m_pdfView.ReleaseDC(pDC);
 		}
 
 		// 强制刷新控件显示
-		HBITMAP hDisplayed = m_hCurrentBitmap ? m_hCurrentBitmap : it->second.hBitmap;
 		BITMAP cachedBm = { 0 };
-		if (hDisplayed && ::GetObject(hDisplayed, sizeof(cachedBm), &cachedBm))
+		if (m_hCurrentBitmap && ::GetObject(m_hCurrentBitmap, sizeof(cachedBm), &cachedBm))
 		{
 			m_totalScrollWidth = cachedBm.bmWidth;
 			m_totalScrollHeight = cachedBm.bmHeight;
@@ -2562,6 +2559,26 @@ bool CXiaoGongPDFDlg::RenderPage(int pageNumber)
 				}
 			}
 
+			// ★★★ 先缓存"干净"的页面位图，再叠加搜索高亮。
+			// 缓存必须不含高亮，否则清除/更换搜索后旧高亮会残留到缓存失效为止。
+			if (m_hCurrentBitmap && !hasPanOffset)
+			{
+				HBITMAP hCopy = (HBITMAP)CopyImage(
+					m_hCurrentBitmap, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
+
+				if (hCopy)
+				{
+					PageCacheItem item{ hCopy };
+					m_pageCache[key] = item;
+					m_cacheOrder.push_front(key);
+					TrimBitmapCache(m_pageCache, m_cacheOrder, false,
+						PAGE_CACHE_BUDGET, CACHE_LIMIT);
+
+					TRACE(_T("[CACHE] 新增页面 %d @ %dx%d, 旋转=%d°\n"),
+						pageNumber, renderWidth, renderHeight, rotation);
+				}
+			}
+
 			// 在位图上绘制搜索高亮（如果有搜索结果）
 			if (!m_searchMatches.empty() && m_hCurrentBitmap)
 			{
@@ -2594,30 +2611,6 @@ bool CXiaoGongPDFDlg::RenderPage(int pageNumber)
 		UpdatePageControls();
 
 		HighlightCurrentThumbnail();
-
-
-		// 增加页面渲染缓存机制 start
-		// 按分辨率缓存，进行优化，避免大界面小图片缓存
-		// ★★★ 只在没有平移偏移量时才缓存
-		if (m_hCurrentBitmap && !hasPanOffset)
-		{
-			// 拷贝当前页的位图（防止后续被释放）
-			HBITMAP hCopy = (HBITMAP)CopyImage(
-				m_hCurrentBitmap, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
-
-			if (hCopy)
-			{
-				PageCacheItem item{ hCopy };
-				m_pageCache[key] = item;
-				m_cacheOrder.push_front(key);
-				TrimBitmapCache(m_pageCache, m_cacheOrder, false,
-					PAGE_CACHE_BUDGET, CACHE_LIMIT);
-
-				TRACE(_T("[CACHE] 新增页面 %d @ %dx%d, 旋转=%d°\n"),
-					pageNumber, renderWidth, renderHeight, rotation);
-			}
-		}
-		// end
 	}
 	fz_catch(m_ctx)
 	{
@@ -6333,19 +6326,28 @@ void CXiaoGongPDFDlg::OnDropFiles(HDROP hDropInfo)
 
 	if (fileCount > 0)
 	{
-		// 只处理第一个文件
-		TCHAR filePath[MAX_PATH];
-		DragQueryFile(hDropInfo, 0, filePath, MAX_PATH);
-
-		// 检查是否是PDF文件
-		CString strPath(filePath);
-		strPath.MakeLower();
-		if (strPath.Right(4) == _T(".pdf"))
+		std::vector<CString> pdfPaths;
+		int rejectedCount = 0;
+		for (UINT i = 0; i < fileCount; ++i)
 		{
-			// 在新标签页中打开PDF
-			OpenPDFInNewTab(CString(filePath));
+			TCHAR filePath[MAX_PATH] = { 0 };
+			if (DragQueryFile(hDropInfo, i, filePath, MAX_PATH) == 0)
+				continue;
+			CString path(filePath);
+			CString ext = path.Right(4);
+			ext.MakeLower();
+			if (ext == _T(".pdf"))
+				pdfPaths.push_back(path);
+			else
+				++rejectedCount;
 		}
-		else
+
+		if (!pdfPaths.empty())
+		{
+			// 全部拖入的 PDF 都打开：首个正常加载，其余排队进入新标签页
+			OpenMultiplePdfFiles(pdfPaths);
+		}
+		else if (rejectedCount > 0)
 		{
 			MessageBox(_T("请拖放PDF文件"), _T("提示"), MB_OK | MB_ICONINFORMATION);
 		}
@@ -6358,29 +6360,70 @@ void CXiaoGongPDFDlg::OnDropFiles(HDROP hDropInfo)
 
 BOOL CXiaoGongPDFDlg::OnCopyData(CWnd* pWnd, COPYDATASTRUCT* pCopyDataStruct)
 {
-	if (pCopyDataStruct && pCopyDataStruct->dwData == 1 &&
-		pCopyDataStruct->lpData != nullptr && pCopyDataStruct->cbData >= sizeof(TCHAR))
+	// dwData == 1：单个以 '\0' 结尾的路径（兼容旧实例）
+	// dwData == 2：多字符串，每个路径以 '\0' 结尾，整体再以一个 '\0' 收尾
+	if (pCopyDataStruct && pCopyDataStruct->lpData != nullptr &&
+		pCopyDataStruct->cbData >= sizeof(TCHAR) &&
+		(pCopyDataStruct->dwData == 1 || pCopyDataStruct->dwData == 2))
 	{
-		// dwData == 1 表示打开PDF文件（严格按 cbData 限制读取长度，避免越界）
-		const LPCTSTR rawChars = static_cast<LPCTSTR>(pCopyDataStruct->lpData);
-		const size_t maxChars = pCopyDataStruct->cbData / sizeof(TCHAR);
-		size_t actualLen = 0;
-		while (actualLen < maxChars && rawChars[actualLen] != _T('\0'))
-			++actualLen;
-		CString filePath(rawChars, static_cast<int>(actualLen));
-		filePath.Trim();
+		const TCHAR* rawChars = static_cast<const TCHAR*>(pCopyDataStruct->lpData);
+		const size_t totalChars = pCopyDataStruct->cbData / sizeof(TCHAR);
 
-		// 检查文件是否存在
-		if (!filePath.IsEmpty() && PathFileExists(filePath))
+		std::vector<CString> paths;
+		size_t index = 0;
+		while (index < totalChars)
 		{
-			// 在新标签页中打开PDF
-			OpenPDFInNewTab(filePath);
+			size_t length = 0;
+			while (index + length < totalChars && rawChars[index + length] != _T('\0'))
+				++length;
+			if (length == 0)
+				break;  // 空字符串：多字符串列表结束
+
+			CString filePath(rawChars + index, static_cast<int>(length));
+			filePath.Trim();
+			if (!filePath.IsEmpty() && PathFileExists(filePath))
+				paths.push_back(filePath);
+
+			index += length + 1;
+			if (pCopyDataStruct->dwData == 1)
+				break;  // 单路径格式只取第一个
 		}
 
-		return TRUE;
+		if (!paths.empty())
+		{
+			OpenMultiplePdfFiles(paths);
+			return TRUE;
+		}
 	}
 
 	return CDialogEx::OnCopyData(pWnd, pCopyDataStruct);
+}
+
+// 批量打开：第一个文件走正常加载流程（显示进度窗口），
+// 其余排入标签页恢复队列，由 OpenNextRestoredTab 在线程完成时逐个启动。
+void CXiaoGongPDFDlg::OpenMultiplePdfFiles(const std::vector<CString>& paths)
+{
+	if (paths.empty() || m_closePending)
+		return;
+
+	OpenPDFInNewTab(paths.front());
+	if (paths.size() == 1)
+		return;
+
+	// 上一轮恢复队列已消费完（游标停在末尾）时必须重置，
+	// 否则新入队路径落在游标之前，永远不会被 OpenNextRestoredTab 取到。
+	if (m_sessionRestoreIndex >= m_sessionRestorePaths.size())
+	{
+		m_sessionRestorePaths.clear();
+		m_sessionRestoreIndex = 0;
+		m_sessionActivePath.Empty();
+	}
+
+	// 规范化后再入队：OpenPDFInNewTab 内部按规范化路径去重，
+	// 避免同一文件以不同写法被并发加载两次。
+	for (size_t i = 1; i < paths.size(); ++i)
+		m_sessionRestorePaths.push_back(FullPathForComparison(paths[i]));
+	OpenNextRestoredTab();
 }
 
 // ============ 多文档标签页管理功能 ============
@@ -9380,6 +9423,11 @@ void CXiaoGongPDFDlg::OnCloseSearchResults()
 
 void CXiaoGongPDFDlg::OnCloseSearchPopup()
 {
+	// 关闭搜索框视为退出搜索：先停掉进行中的搜索，再清除匹配项，
+	// 否则关闭后页面上的文字仍保持标黄，且后台结果返回时还会重新高亮。
+	StopSearch();
+	ClearSearchResults();
+
 	m_searchToolsVisible = false;
 	m_searchPopup.ShowWindow(SW_HIDE);
 	m_editSearch.ShowWindow(SW_HIDE);

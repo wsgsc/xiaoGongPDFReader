@@ -1,4 +1,4 @@
-#include "pch.h"
+﻿#include "pch.h"
 #include "FileWatcher.h"
 #include <vector>
 
@@ -212,7 +212,9 @@ DWORD WINAPI CFileWatcher::WatchThreadProc(LPVOID pParam)
     if (!pInfo || pInfo->hDir == INVALID_HANDLE_VALUE)
         return 1;
 
-    BYTE buffer[4096];
+    // 4KB 缓冲在另存/批量改名时会溢出，导致内核返回 ERROR_MORE_DATA。
+    // 放大到 64KB 显著降低溢出概率；溢出时仍按已收到的条目处理并继续监听。
+    std::vector<BYTE> buffer(64 * 1024);
     OVERLAPPED overlapped = {};
     overlapped.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (!overlapped.hEvent)
@@ -227,8 +229,8 @@ DWORD WINAPI CFileWatcher::WatchThreadProc(LPVOID pParam)
 
         BOOL ok = ReadDirectoryChangesW(
             pInfo->hDir,
-            buffer,
-            sizeof(buffer),
+            buffer.data(),
+            static_cast<DWORD>(buffer.size()),
             FALSE,
             FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME,
             &bytesReturned,
@@ -255,13 +257,22 @@ DWORD WINAPI CFileWatcher::WatchThreadProc(LPVOID pParam)
         if (waitResult != WAIT_OBJECT_0)
             break;
 
+        // ERROR_MORE_DATA：缓冲区溢出，但 bytesReturned 内的条目仍然有效，
+        // 处理完继续监听。不能 break，否则该目录会永久失去变化通知。
         if (!GetOverlappedResult(pInfo->hDir, &overlapped, &bytesReturned, FALSE))
-            break;
+        {
+            const DWORD err = GetLastError();
+            if (err != ERROR_MORE_DATA)
+            {
+                TRACE(_T("FileWatcher: GetOverlappedResult 失败, 错误=%d\n"), err);
+                break;
+            }
+        }
 
         if (bytesReturned == 0)
             continue;
 
-        FILE_NOTIFY_INFORMATION* pNotify = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(buffer);
+        FILE_NOTIFY_INFORMATION* pNotify = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(buffer.data());
         while (true)
         {
             CString changedName(pNotify->FileName, pNotify->FileNameLength / sizeof(WCHAR));

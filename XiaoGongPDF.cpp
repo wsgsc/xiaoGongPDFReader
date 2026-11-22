@@ -7,7 +7,9 @@
 #include "XiaoGongPDF.h"
 #include "XiaoGongPDFDlg.h"
 #include <memory>
+#include <vector>
 #include <shlwapi.h>
+#include <shellapi.h>
 
 
 #ifdef _DEBUG
@@ -122,6 +124,32 @@ void ActivateXiaoGongPDFWindow(HWND hWnd)
 	SetForegroundWindow(hWnd);
 }
 
+// 解析命令行中的 PDF 路径（argv[0] 为程序自身；支持带引号、含空格的多个路径）
+static std::vector<CString> CommandLinePdfPaths()
+{
+	std::vector<CString> paths;
+	int argc = 0;
+	LPWSTR* argv = ::CommandLineToArgvW(::GetCommandLineW(), &argc);
+	if (!argv)
+		return paths;
+
+	for (int i = 1; i < argc; ++i)
+	{
+		CString path(argv[i]);
+		path.Trim();
+		if (path.IsEmpty() || !PathFileExists(path))
+			continue;
+
+		CString ext = path.Right(4);
+		ext.MakeLower();
+		if (ext == _T(".pdf"))
+			paths.push_back(path);
+	}
+
+	::LocalFree(argv);
+	return paths;
+}
+
 // CXiaoGongPDFApp 初始化
 
 BOOL CXiaoGongPDFApp::InitInstance()
@@ -147,54 +175,35 @@ BOOL CXiaoGongPDFApp::InitInstance()
 
 	if (dwError == ERROR_ALREADY_EXISTS)
 	{
-		// 已有实例在运行
-		CString cmdLine = m_lpCmdLine;
-		cmdLine.Trim();
+		// 已有实例在运行：把命令行中的全部 PDF 转发给它
+		const std::vector<CString> paths = CommandLinePdfPaths();
+		HWND hWnd = FindXiaoGongPDFWindow();
 
-		// 去除引号(支持多种引号格式)
-		if (!cmdLine.IsEmpty())
+		if (hWnd)
 		{
-			// 去除开头的引号
-			while (!cmdLine.IsEmpty() && (cmdLine[0] == _T('"') || cmdLine[0] == _T('\'')))
+			ActivateXiaoGongPDFWindow(hWnd);
+
+			if (!paths.empty())
 			{
-				cmdLine = cmdLine.Mid(1);
+				// 多字符串格式：每个路径以 '\0' 结尾，整体再补一个 '\0'
+				CString payload;
+				for (const CString& path : paths)
+				{
+					payload += path;
+					payload.AppendChar(_T('\0'));
+				}
+				payload.AppendChar(_T('\0'));
+
+				COPYDATASTRUCT cds = {};
+				cds.dwData = paths.size() > 1 ? 2 : 1;  // 1=单路径（兼容旧格式），2=多字符串
+				cds.cbData = static_cast<DWORD>((payload.GetLength() + 1) * sizeof(TCHAR));
+				cds.lpData = const_cast<LPTSTR>(static_cast<LPCTSTR>(payload));
+
+				SendMessage(hWnd, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&cds));
 			}
-			// 去除结尾的引号
-			while (!cmdLine.IsEmpty() && (cmdLine[cmdLine.GetLength() - 1] == _T('"') || cmdLine[cmdLine.GetLength() - 1] == _T('\'')))
-			{
-				cmdLine = cmdLine.Left(cmdLine.GetLength() - 1);
-			}
-			cmdLine.Trim();
-		}
 
-		// 如果有要打开的文件，发送给已存在的实例
-		if (!cmdLine.IsEmpty() && PathFileExists(cmdLine))
-		{
-			// 查找已运行的 XiaoGongPDF 窗口
-			HWND hWnd = FindXiaoGongPDFWindow();
-
-			if (hWnd)
-			{
-				ActivateXiaoGongPDFWindow(hWnd);
-
-				// 使用 WM_COPYDATA 消息发送文件路径
-				COPYDATASTRUCT cds;
-				cds.dwData = 1;  // 自定义数据标识，1 表示打开PDF文件
-				cds.cbData = (cmdLine.GetLength() + 1) * sizeof(TCHAR);
-				cds.lpData = (PVOID)(LPCTSTR)cmdLine;
-
-				SendMessage(hWnd, WM_COPYDATA, 0, (LPARAM)&cds);
-
-				// 加载窗口可能在处理消息时获得焦点，再激活主窗口。
-				ActivateXiaoGongPDFWindow(hWnd);
-			}
-		}
-		else
-		{
-			// 没有文件参数，只是激活已存在的窗口
-			HWND hWnd = FindXiaoGongPDFWindow();
-			if (hWnd)
-				ActivateXiaoGongPDFWindow(hWnd);
+			// 加载窗口可能在处理消息时获得焦点，再激活主窗口。
+			ActivateXiaoGongPDFWindow(hWnd);
 		}
 
 		// 退出当前实例
@@ -244,44 +253,15 @@ BOOL CXiaoGongPDFApp::InitInstance()
 	}
 	SetRegistryKey(_T("XiaoGongPDF"));
 
-	// 获取命令行参数
-	CString cmdLine = m_lpCmdLine;
-	cmdLine.Trim();
-
-	// 去除命令行参数中的引号(支持多种引号格式)
-	if (!cmdLine.IsEmpty())
-	{
-		// 去除开头的引号
-		while (!cmdLine.IsEmpty() && (cmdLine[0] == _T('"') || cmdLine[0] == _T('\'')))
-		{
-			cmdLine = cmdLine.Mid(1);
-		}
-		// 去除结尾的引号
-		while (!cmdLine.IsEmpty() && (cmdLine[cmdLine.GetLength() - 1] == _T('"') || cmdLine[cmdLine.GetLength() - 1] == _T('\'')))
-		{
-			cmdLine = cmdLine.Left(cmdLine.GetLength() - 1);
-		}
-		cmdLine.Trim();
-	}
-
 	CXiaoGongPDFDlg dlg;
 	m_pMainWnd = &dlg;
 
-	// 检查文件是否为PDF格式并存在
-	if (!cmdLine.IsEmpty())
+	// 命令行中的全部 PDF（支持一次传入多个文件；首个作为活动标签页）
+	const std::vector<CString> startupPaths = CommandLinePdfPaths();
+	if (!startupPaths.empty())
 	{
-		// 先检查文件是否存在
-		if (PathFileExists(cmdLine))
-		{
-			// 检查是否是PDF文件
-			CString ext = cmdLine.Right(4);
-			ext.MakeLower();
-			if (ext == _T(".pdf"))
-			{
-				// 将文件路径传递给对话框
-				dlg.m_initialFilePath = cmdLine;
-			}
-		}
+		dlg.m_initialFilePaths = startupPaths;
+		dlg.m_initialFilePath = startupPaths.front();
 	}
 
 	INT_PTR nResponse = dlg.DoModal();

@@ -1,4 +1,4 @@
-#include "pch.h"
+﻿#include "pch.h"
 #include <mupdf/pdf.h>
 #include "PDFDocument.h"
 #include <cstring>
@@ -488,11 +488,8 @@ void CPDFDocument::CleanupBitmap()
 {
 	if (m_hCurrentBitmap)
 	{
-		BITMAP bm;
-		if (::GetObject(m_hCurrentBitmap, sizeof(BITMAP), &bm) != 0)
-		{
-			DeleteObject(m_hCurrentBitmap);
-		}
+		// 无条件删除：用 GetObject 做前置校验只会在校验失败时丢掉句柄并泄漏。
+		DeleteObject(m_hCurrentBitmap);
 		m_hCurrentBitmap = NULL;
 	}
 }

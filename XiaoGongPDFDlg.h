@@ -167,6 +167,8 @@ public:
 
 	// 初始文件路径（从命令行参数传入）
 	CString m_initialFilePath;
+	// 命令行拖入/关联打开的全部 PDF（第一个作为活动标签，其余排队恢复）
+	std::vector<CString> m_initialFilePaths;
 
 // 对话框数据
 #ifdef AFX_DESIGN_TIME
@@ -618,6 +620,7 @@ protected:
 
     // 进程间通信
     afx_msg BOOL OnCopyData(CWnd* pWnd, COPYDATASTRUCT* pCopyDataStruct);
+    void OpenMultiplePdfFiles(const std::vector<CString>& paths);  // 批量打开 PDF
 
     // 多文档标签页管理
     void InitializeTabControl();  // 初始化标签页控件
