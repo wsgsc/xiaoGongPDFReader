@@ -140,10 +140,23 @@ private:
 	std::function<void(const CString&)> m_onBeforeReplaceTarget;
 	std::function<void(const CString&, bool)> m_onAfterReplaceTarget;
 
-	// ImageList
+	// ImageList 与缩略图槽位 LRU 复用池（槽位 0 固定为占位图）
 	CImageList m_imageList;
+	static const int THUMBNAIL_SLOT_LIMIT = 80;
+	struct ThumbnailSlot
+	{
+		int displayIndex;
+		unsigned long long lastUsed;
+		ThumbnailSlot() : displayIndex(-1), lastUsed(0) {}
+	};
+	std::vector<ThumbnailSlot> m_thumbnailSlots;
+	unsigned long long m_thumbnailUseTick;
 
 	// 初始化和渲染
+	bool IsCurrentSourceFile(const CString& sourceFile) const;
+	HBITMAP RenderPageCardBitmap(fz_document* doc, int pageIndex, int rotationAngle);
+	int AcquireThumbnailImageSlot(int displayIndex, HBITMAP hActionBitmap, int firstVisible,
+		int lastVisible, std::vector<PageInfo*>& visiblePages);
 	void InitializeThumbnailList();
 	void LayoutThumbnailItems();
 	void LoadAllThumbnails();
@@ -164,12 +177,15 @@ private:
 	afx_msg void OnMouseMove(UINT nFlags, CPoint point);
 	afx_msg void OnLButtonUp(UINT nFlags, CPoint point);
 	afx_msg void OnLButtonDown(UINT nFlags, CPoint point);
+	afx_msg void OnCaptureChanged(CWnd* pWnd);
+	afx_msg void OnCancelMode();
 	afx_msg void OnTimer(UINT_PTR nIDEvent);
 	afx_msg void OnNMRClick(NMHDR* pNMHDR, LRESULT* pResult);
 
 	// 拖拽辅助函数
 	void BeginDragOperation();
 	void EndDragOperation();
+	void CancelDragOperation();
 	int CalculateInsertIndex(CPoint point);
 	void UpdateInsertIndex(CPoint point);
 	void HandleAutoScroll(CPoint point);
