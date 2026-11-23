@@ -6,6 +6,55 @@
 namespace
 {
 	constexpr size_t MUPDF_STORE_LIMIT = 256u * 1024u * 1024u;
+
+	struct MuPDFLocksHolder
+	{
+		CRITICAL_SECTION locks[FZ_LOCK_MAX];
+		fz_locks_context context;
+
+		MuPDFLocksHolder()
+		{
+			for (int i = 0; i < FZ_LOCK_MAX; ++i)
+			{
+				InitializeCriticalSection(&locks[i]);
+			}
+			context.user = this;
+			context.lock = &MuPDFLocksHolder::Lock;
+			context.unlock = &MuPDFLocksHolder::Unlock;
+		}
+
+		~MuPDFLocksHolder()
+		{
+			for (int i = 0; i < FZ_LOCK_MAX; ++i)
+			{
+				DeleteCriticalSection(&locks[i]);
+			}
+		}
+
+		static void Lock(void* user, int lock)
+		{
+			if (lock >= 0 && lock < FZ_LOCK_MAX)
+			{
+				auto* holder = static_cast<MuPDFLocksHolder*>(user);
+				EnterCriticalSection(&holder->locks[lock]);
+			}
+		}
+
+		static void Unlock(void* user, int lock)
+		{
+			if (lock >= 0 && lock < FZ_LOCK_MAX)
+			{
+				auto* holder = static_cast<MuPDFLocksHolder*>(user);
+				LeaveCriticalSection(&holder->locks[lock]);
+			}
+		}
+	};
+}
+
+const fz_locks_context* GetMuPDFLocksContext()
+{
+	static MuPDFLocksHolder holder;
+	return &holder.context;
 }
 
 CPDFDocument::CPDFDocument()
@@ -30,7 +79,7 @@ CPDFDocument::CPDFDocument()
 	, m_maxPageWidth(0.0f)
 {
 	m_lastWriteTime = {0, 0};
-	m_ctx = fz_new_context(nullptr, nullptr, MUPDF_STORE_LIMIT);
+	m_ctx = fz_new_context(nullptr, GetMuPDFLocksContext(), MUPDF_STORE_LIMIT);
 	if (m_ctx)
 	{
 		fz_try(m_ctx)

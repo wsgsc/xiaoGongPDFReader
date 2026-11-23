@@ -80,6 +80,8 @@ struct PageBounds {
 	}
 };
 
+const fz_locks_context* GetMuPDFLocksContext();
+
 class CPDFDocument
 {
 public:

@@ -25,6 +25,8 @@ void CFileWatcher::AddWatch(const CString& filePath, HWND hNotifyWnd)
         return;
 
     CString dirPath = fullPath.Left(lastSlash);
+    if (dirPath.GetLength() == 2 && dirPath[1] == _T(':'))
+        dirPath += _T('\\');
     CString fileName = fullPath.Mid(lastSlash + 1);
     dirPath.MakeLower();
     fileName.MakeLower();
@@ -64,6 +66,8 @@ void CFileWatcher::RemoveWatch(const CString& filePath)
         return;
 
     CString dirPath = fullPath.Left(lastSlash);
+    if (dirPath.GetLength() == 2 && dirPath[1] == _T(':'))
+        dirPath += _T('\\');
     CString fileName = fullPath.Mid(lastSlash + 1);
     dirPath.MakeLower();
     fileName.MakeLower();
@@ -232,7 +236,7 @@ DWORD WINAPI CFileWatcher::WatchThreadProc(LPVOID pParam)
             buffer.data(),
             static_cast<DWORD>(buffer.size()),
             FALSE,
-            FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME,
+            FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_FILE_NAME,
             &bytesReturned,
             &overlapped,
             NULL);
@@ -242,20 +246,23 @@ DWORD WINAPI CFileWatcher::WatchThreadProc(LPVOID pParam)
             DWORD err = GetLastError();
             if (err == ERROR_OPERATION_ABORTED)
                 break;
+#ifdef _DEBUG
             TRACE(_T("FileWatcher: ReadDirectoryChangesW 失败, 错误=%d\n"), err);
+#endif
             break;
         }
 
         DWORD waitResult = WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE);
 
-        if (waitResult == WAIT_OBJECT_0 + 1)
+        if (waitResult != WAIT_OBJECT_0)
         {
+            // CancelIo is asynchronous; wait until the pending overlapped I/O completes
+            // before destroying the stack OVERLAPPED and heap buffer.
             CancelIo(pInfo->hDir);
+            DWORD cancelledBytes = 0;
+            GetOverlappedResult(pInfo->hDir, &overlapped, &cancelledBytes, TRUE);
             break;
         }
-
-        if (waitResult != WAIT_OBJECT_0)
-            break;
 
         // ERROR_MORE_DATA：缓冲区溢出，但 bytesReturned 内的条目仍然有效，
         // 处理完继续监听。不能 break，否则该目录会永久失去变化通知。
@@ -264,7 +271,9 @@ DWORD WINAPI CFileWatcher::WatchThreadProc(LPVOID pParam)
             const DWORD err = GetLastError();
             if (err != ERROR_MORE_DATA)
             {
+#ifdef _DEBUG
                 TRACE(_T("FileWatcher: GetOverlappedResult 失败, 错误=%d\n"), err);
+#endif
                 break;
             }
         }
@@ -272,39 +281,52 @@ DWORD WINAPI CFileWatcher::WatchThreadProc(LPVOID pParam)
         if (bytesReturned == 0)
             continue;
 
+        std::set<CString> matchedPaths;
+        HWND hNotifyWnd = NULL;
+
         FILE_NOTIFY_INFORMATION* pNotify = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(buffer.data());
         while (true)
         {
-            CString changedName(pNotify->FileName, pNotify->FileNameLength / sizeof(WCHAR));
-            int slash = max(changedName.ReverseFind(_T('\\')), changedName.ReverseFind(_T('/')));
-            if (slash >= 0)
-                changedName = changedName.Mid(slash + 1);
-            changedName.MakeLower();
-
-            bool matched = false;
-            CString fullPath;
-
-            EnterCriticalSection(&pInfo->pOwner->m_cs);
-            if (pInfo->watchedFiles.find(changedName) != pInfo->watchedFiles.end())
+            if (pNotify->Action != FILE_ACTION_REMOVED &&
+                pNotify->Action != FILE_ACTION_RENAMED_OLD_NAME)
             {
-                matched = true;
-                fullPath = pInfo->dirPath + _T("\\") + changedName;
-            }
-            LeaveCriticalSection(&pInfo->pOwner->m_cs);
+                CString changedName(pNotify->FileName, pNotify->FileNameLength / sizeof(WCHAR));
+                int slash = max(changedName.ReverseFind(_T('\\')), changedName.ReverseFind(_T('/')));
+                if (slash >= 0)
+                    changedName = changedName.Mid(slash + 1);
+                changedName.MakeLower();
 
-            if (matched)
-            {
-                if (WaitForSingleObject(pInfo->hStopEvent, 500) == WAIT_OBJECT_0)
-                    break;
-                CString* pPath = new CString(fullPath);
-                if (!PostMessage(pInfo->hNotifyWnd, WM_FILE_CHANGED, 0, reinterpret_cast<LPARAM>(pPath)))
-                    delete pPath;
+                EnterCriticalSection(&pInfo->pOwner->m_cs);
+                if (pInfo->watchedFiles.find(changedName) != pInfo->watchedFiles.end())
+                {
+                    CString fullPath;
+                    if (!pInfo->dirPath.IsEmpty() &&
+                        pInfo->dirPath[pInfo->dirPath.GetLength() - 1] == _T('\\'))
+                        fullPath = pInfo->dirPath + changedName;
+                    else
+                        fullPath = pInfo->dirPath + _T("\\") + changedName;
+                    matchedPaths.insert(fullPath);
+                    hNotifyWnd = pInfo->hNotifyWnd;
+                }
+                LeaveCriticalSection(&pInfo->pOwner->m_cs);
             }
 
             if (pNotify->NextEntryOffset == 0)
                 break;
             pNotify = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(
                 reinterpret_cast<BYTE*>(pNotify) + pNotify->NextEntryOffset);
+        }
+
+        if (!matchedPaths.empty() && hNotifyWnd)
+        {
+            if (WaitForSingleObject(pInfo->hStopEvent, 500) == WAIT_OBJECT_0)
+                break;
+            for (const CString& fullPath : matchedPaths)
+            {
+                CString* pPath = new CString(fullPath);
+                if (!PostMessage(hNotifyWnd, WM_FILE_CHANGED, 0, reinterpret_cast<LPARAM>(pPath)))
+                    delete pPath;
+            }
         }
         if (WaitForSingleObject(pInfo->hStopEvent, 0) == WAIT_OBJECT_0)
             break;

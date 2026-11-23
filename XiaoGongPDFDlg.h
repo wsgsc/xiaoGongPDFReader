@@ -437,8 +437,9 @@ private:
 		bool failed;
 		std::vector<SearchMatch> results;
 		std::atomic<bool> cancelled;
+		CWinThread* pThread;
 		SearchParams() : notifyWnd(nullptr), pDoc(nullptr), taskId(0),
-			caseSensitive(false), failed(false), cancelled(false) {}
+			caseSensitive(false), failed(false), cancelled(false), pThread(nullptr) {}
 		~SearchParams()
 		{
 			if (!utf8Password.empty())
@@ -451,6 +452,8 @@ private:
 	UINT_PTR m_searchTaskId;
 	static UINT SearchThreadProc(LPVOID pParam);
 	void StopSearch();
+	void ReleaseSearchThread(SearchParams* pParams);
+	void CleanupSearches();
 	void FinishPendingClose();
 	void RefreshSearchResultsList();
 	void NavigateToSearchMatch(int index);
@@ -461,6 +464,23 @@ private:
 
 	// 文件变化监听
 	CFileWatcher m_fileWatcher;
+	int m_fileWatchSuspendCount = 0;
+	std::vector<CString> m_deferredFileChanges;
+	struct ScopedFileWatchSuspend
+	{
+		CXiaoGongPDFDlg* pDlg;
+		explicit ScopedFileWatchSuspend(CXiaoGongPDFDlg* dlg) : pDlg(dlg)
+		{
+			if (pDlg)
+				++pDlg->m_fileWatchSuspendCount;
+		}
+		~ScopedFileWatchSuspend()
+		{
+			if (pDlg && --pDlg->m_fileWatchSuspendCount == 0)
+				pDlg->FlushDeferredFileChanges();
+		}
+	};
+	void FlushDeferredFileChanges();
 	afx_msg LRESULT OnFileChanged(WPARAM wParam, LPARAM lParam);
 	void ReloadDocument(CPDFDocument* pDoc);
 
@@ -491,6 +511,7 @@ protected:
     bool RenderThumbnail(int pageNumber);
     void UpdateThumbnails();
     void CleanupThumbnails();
+    void DestroyThumbnailImageList();
     void HighlightCurrentThumbnail();
 	void RenderVisibleThumbnails();  // 渲染可见区域的缩略图（按需加载）
     afx_msg void OnThumbnailItemChanged(NMHDR* pNMHDR, LRESULT* pResult);

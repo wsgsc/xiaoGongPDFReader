@@ -190,12 +190,14 @@ namespace
 	void InsertImagePageToPdf(fz_context* ctx, pdf_document* targetPdf, int insertIndex,
 		const CString& imagePath)
 	{
-		CW2A imagePathA(imagePath, CP_UTF8);
+		const int utf8Len = WideCharToMultiByte(CP_UTF8, 0, imagePath, -1, nullptr, 0, nullptr, nullptr);
+		char* utf8Path = nullptr;
 		fz_image* image = nullptr;
 		fz_buffer* contents_buf = nullptr;
 		pdf_obj* page_obj = nullptr;
 		pdf_obj* image_obj = nullptr;
 		pdf_obj* contents = nullptr;
+		fz_var(utf8Path);
 		fz_var(image);
 		fz_var(contents_buf);
 		fz_var(page_obj);
@@ -204,7 +206,13 @@ namespace
 
 		fz_try(ctx)
 		{
-			image = fz_new_image_from_file(ctx, imagePathA);
+			if (utf8Len <= 0)
+				fz_throw(ctx, FZ_ERROR_GENERIC, "无效的图片路径");
+			utf8Path = static_cast<char*>(fz_malloc(ctx, static_cast<size_t>(utf8Len)));
+			if (WideCharToMultiByte(CP_UTF8, 0, imagePath, -1, utf8Path, utf8Len, nullptr, nullptr) <= 0)
+				fz_throw(ctx, FZ_ERROR_GENERIC, "无效的图片路径");
+
+			image = fz_new_image_from_file(ctx, utf8Path);
 			if (!image || image->w <= 0 || image->h <= 0)
 				fz_throw(ctx, FZ_ERROR_GENERIC, "无效的图片尺寸");
 
@@ -267,6 +275,8 @@ namespace
 				fz_drop_buffer(ctx, contents_buf);
 			if (image)
 				fz_drop_image(ctx, image);
+			if (utf8Path)
+				fz_free(ctx, utf8Path);
 		}
 		fz_catch(ctx)
 		{
@@ -426,24 +436,38 @@ bool CPDFEditDialog::IsCurrentSourceFile(const CString& sourceFile) const
 
 fz_document* CPDFEditDialog::OpenAuthenticatedSource(const CString& path)
 {
-	CW2A utf8Path(path, CP_UTF8);
+	const std::vector<char>* password = &m_password;
+	if (!IsCurrentSourceFile(path))
+	{
+		auto it = m_importPasswords.find(path);
+		password = it == m_importPasswords.end() ? nullptr : &it->second;
+	}
+
+	const int utf8Len = WideCharToMultiByte(CP_UTF8, 0, path, -1, nullptr, 0, nullptr, nullptr);
+	char* utf8Path = nullptr;
 	fz_document* source = nullptr;
+	fz_var(utf8Path);
 	fz_var(source);
 	fz_try(m_ctx)
 	{
+		if (utf8Len <= 0)
+			fz_throw(m_ctx, FZ_ERROR_GENERIC, "Invalid PDF path");
+		utf8Path = static_cast<char*>(fz_malloc(m_ctx, static_cast<size_t>(utf8Len)));
+		if (WideCharToMultiByte(CP_UTF8, 0, path, -1, utf8Path, utf8Len, nullptr, nullptr) <= 0)
+			fz_throw(m_ctx, FZ_ERROR_GENERIC, "Invalid PDF path");
+
 		source = fz_open_document(m_ctx, utf8Path);
 		if (fz_needs_password(m_ctx, source))
 		{
-			const std::vector<char>* password = &m_password;
-			if (!IsCurrentSourceFile(path))
-			{
-				auto it = m_importPasswords.find(path);
-				password = it == m_importPasswords.end() ? nullptr : &it->second;
-			}
 			if (!password || password->empty() ||
 				!fz_authenticate_password(m_ctx, source, password->data()))
 				fz_throw(m_ctx, FZ_ERROR_GENERIC, "PDF password is required");
 		}
+	}
+	fz_always(m_ctx)
+	{
+		if (utf8Path)
+			fz_free(m_ctx, utf8Path);
 	}
 	fz_catch(m_ctx)
 	{
