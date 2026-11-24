@@ -2,6 +2,7 @@
 #include "framework.h"
 #include <commctrl.h>
 #include <dwmapi.h>
+#include <shlobj.h>
 #include <shlwapi.h>
 #include <WinUser.h>
 #include <mupdf/fitz.h>
@@ -829,7 +830,9 @@ BEGIN_MESSAGE_MAP(CXiaoGongPDFDlg, CDialogEx)
 	ON_NOTIFY(TVN_SELCHANGED, IDC_OUTLINE_TREE, &CXiaoGongPDFDlg::OnOutlineSelectionChanged)
 	ON_NOTIFY(LVN_ITEMCHANGED, IDC_SEARCH_RESULTS_LIST, &CXiaoGongPDFDlg::OnSearchResultSelected)
 	ON_NOTIFY(TCN_SELCHANGE, IDC_TAB_CONTROL, &CXiaoGongPDFDlg::OnTabSelChange)
-	ON_MESSAGE(WM_APP + 100, &CXiaoGongPDFDlg::OnTabCloseButton)  // 标签页关闭按钮消息
+	ON_MESSAGE(WM_TAB_CLOSE_REQUEST, &CXiaoGongPDFDlg::OnTabCloseButton)  // 标签页关闭消息
+	ON_MESSAGE(WM_TAB_REORDER_REQUEST, &CXiaoGongPDFDlg::OnTabReorder)    // 标签页拖拽重排消息
+	ON_MESSAGE(WM_TAB_CONTEXT_MENU, &CXiaoGongPDFDlg::OnTabContextMenu)   // 标签页右键菜单消息
 	ON_WM_SIZE()
 	ON_MESSAGE(WM_USER + 101, &CXiaoGongPDFDlg::OnOpenInitialFile)  // 延迟打开初始文件
 	ON_MESSAGE(WM_PDF_LOAD_COMPLETE, &CXiaoGongPDFDlg::OnPDFLoadComplete)  // PDF后台加载完成
@@ -2999,6 +3002,10 @@ BOOL CXiaoGongPDFDlg::PreTranslateMessage(MSG* pMsg)
 				StopSearch();
 				RefreshSearchResultsList();
 			}
+			else if (m_searchToolsVisible)
+			{
+				OnCloseSearchPopup();
+			}
 			else if (m_isFullscreen)
 				ExitFullscreen();
 			else if (m_hasSelection)
@@ -3007,6 +3014,82 @@ BOOL CXiaoGongPDFDlg::PreTranslateMessage(MSG* pMsg)
 				InvalidateSelection();
 			}
 			return TRUE;
+		}
+
+		const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+		const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+		const bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
+
+		// 处理 Ctrl + Q - 退出程序
+		if (ctrlDown && !altDown && !shiftDown && pMsg->wParam == 'Q')
+		{
+			onMenuExit();
+			return TRUE;
+		}
+
+		// 处理 Ctrl + W / Ctrl + F4 - 关闭当前标签页
+		if (ctrlDown && !altDown &&
+			((!shiftDown && pMsg->wParam == 'W') || pMsg->wParam == VK_F4))
+		{
+			if (!m_documents.empty())
+				CloseCurrentDocument();
+			return TRUE;
+		}
+
+		// 处理 Ctrl + Tab / Ctrl + Shift + Tab - 循环切换标签页
+		if (ctrlDown && !altDown && pMsg->wParam == VK_TAB)
+		{
+			const int docCount = static_cast<int>(m_documents.size());
+			if (docCount > 1)
+			{
+				const int cur = (m_activeDocIndex >= 0 && m_activeDocIndex < docCount) ?
+					m_activeDocIndex : 0;
+				const int next = shiftDown ?
+					((cur - 1 + docCount) % docCount) : ((cur + 1) % docCount);
+				if (m_tabCtrl.GetSafeHwnd())
+				{
+					m_tabCtrl.SetCurSel(next);
+					m_tabCtrl.UpdateWindow();
+				}
+				SwitchToDocument(next);
+			}
+			return TRUE;
+		}
+
+		// 处理 Ctrl + G - 聚焦顶部页码框快速跳页
+		if (ctrlDown && !altDown && !shiftDown && pMsg->wParam == 'G')
+		{
+			if (m_isFullscreen)
+				ExitFullscreen();
+			if (m_editCurrent.GetSafeHwnd() && m_editCurrent.IsWindowVisible())
+			{
+				m_editCurrent.SetFocus();
+				m_editCurrent.SetSel(0, -1);
+			}
+			return TRUE;
+		}
+
+		// 处理 Ctrl + (+ / - / 0) - 键盘放大、缩小、恢复适合宽度
+		if (ctrlDown && !altDown && !IsEditControlFocused())
+		{
+			if (pMsg->wParam == VK_OEM_PLUS || pMsg->wParam == VK_ADD)
+			{
+				if (m_doc && m_totalPages > 0)
+					OnBtnZoomIn();
+				return TRUE;
+			}
+			if (pMsg->wParam == VK_OEM_MINUS || pMsg->wParam == VK_SUBTRACT)
+			{
+				if (m_doc && m_totalPages > 0)
+					OnBtnZoomOut();
+				return TRUE;
+			}
+			if (!shiftDown && (pMsg->wParam == '0' || pMsg->wParam == VK_NUMPAD0))
+			{
+				if (m_doc && m_totalPages > 0)
+					OnBtnFitWidth();
+				return TRUE;
+			}
 		}
 
 		// 处理Ctrl+C - 复制选中文本
@@ -3949,28 +4032,48 @@ void CXiaoGongPDFDlg::onMenuRecentFile(UINT nID)
 	TRACE(_T("onMenuRecentFile() : ID=%d\n"), nID);
 #endif
 
-	// 计算文件索引
-	int index = nID - ID_MENU_RECENT_FILE_1;
+	OpenRecentFileAt(static_cast<int>(nID - ID_MENU_RECENT_FILE_1));
+}
 
-	if (index >= 0 && index < (int)m_recentFiles.size())
+void CXiaoGongPDFDlg::OpenRecentFileAt(int index)
+{
+	if (index < 0 || index >= static_cast<int>(m_recentFiles.size()))
+		return;
+
+	const CString filePath = m_recentFiles[index];
+	if (!PathFileExists(filePath))
 	{
-		CString filePath = m_recentFiles[index];
-
-		// 检查文件是否存在
-		if (!PathFileExists(filePath))
-		{
-			MessageBox(_T("文件不存在或已被删除"), _T("错误"), MB_OK | MB_ICONERROR);
-
-			// 从列表中移除
-			m_recentFiles.erase(m_recentFiles.begin() + index);
-			SaveRecentFiles();
-			return;
-		}
-
-		 
-		// 使用新的多文档模式打开
-		OpenPDFInNewTab(filePath);
+		MessageBox(_T("文件不存在或已被删除"), _T("错误"), MB_OK | MB_ICONERROR);
+		m_recentFiles.erase(m_recentFiles.begin() + index);
+		SaveRecentFiles();
+		if (m_documents.empty() && m_pdfView.GetSafeHwnd())
+			m_pdfView.Invalidate(FALSE);
+		return;
 	}
+
+	OpenPDFInNewTab(filePath);
+}
+
+void CXiaoGongPDFDlg::RemoveRecentFileAt(int index)
+{
+	if (index < 0 || index >= static_cast<int>(m_recentFiles.size()))
+		return;
+
+	m_recentFiles.erase(m_recentFiles.begin() + index);
+	SaveRecentFiles();
+	if (m_documents.empty() && m_pdfView.GetSafeHwnd())
+		m_pdfView.Invalidate(FALSE);
+}
+
+void CXiaoGongPDFDlg::ClearRecentFiles()
+{
+	if (m_recentFiles.empty())
+		return;
+
+	m_recentFiles.clear();
+	SaveRecentFiles();
+	if (m_documents.empty() && m_pdfView.GetSafeHwnd())
+		m_pdfView.Invalidate(FALSE);
 }
 
 
@@ -4698,13 +4801,30 @@ void CXiaoGongPDFDlg::CloseCurrentDocument()
 
 void CXiaoGongPDFDlg::UpdateTabControl()
 {
-	// 更新所有标签页的标题
+	if (!m_tabCtrl.GetSafeHwnd())
+		return;
+
+	// 更新所有标签页的标题（去掉 .pdf 后缀）与文档指针关联
 	for (int i = 0; i < (int)m_documents.size(); i++)
 	{
-		TCITEM tci = {0};
-		tci.mask = TCIF_TEXT;
-		CString tabTitle = m_documents[i]->GetFileName();
+		CPDFDocument* pDoc = m_documents[i];
+		if (!pDoc)
+			continue;
+
+		CString tabTitle = pDoc->GetFileName();
+		const int dotPos = tabTitle.ReverseFind(_T('.'));
+		if (dotPos != -1)
+		{
+			CString ext = tabTitle.Mid(dotPos);
+			ext.MakeLower();
+			if (ext == _T(".pdf"))
+				tabTitle = tabTitle.Left(dotPos);
+		}
+
+		TCITEM tci = { 0 };
+		tci.mask = TCIF_TEXT | TCIF_PARAM;
 		tci.pszText = (LPTSTR)(LPCTSTR)tabTitle;
+		tci.lParam = reinterpret_cast<LPARAM>(pDoc);
 		m_tabCtrl.SetItem(i, &tci);
 	}
 }
@@ -4841,6 +4961,7 @@ void CXiaoGongPDFDlg::OnTabSelChange(NMHDR* pNMHDR, LRESULT* pResult)
 // 处理标签页关闭按钮点击事件
 LRESULT CXiaoGongPDFDlg::OnTabCloseButton(WPARAM wParam, LPARAM lParam)
 {
+	UNREFERENCED_PARAMETER(lParam);
 	int index = (int)wParam;
 
 #ifdef _DEBUG
@@ -4848,9 +4969,155 @@ LRESULT CXiaoGongPDFDlg::OnTabCloseButton(WPARAM wParam, LPARAM lParam)
 #endif
 
 	// 关闭指定索引的文档
-	if (index >= 0 && index < (int)m_documents.size()) 
-	{ 
+	if (index >= 0 && index < (int)m_documents.size())
+	{
 		CloseDocument(index);
+	}
+
+	return 0;
+}
+
+// 处理标签页左右拖拽重排事件
+LRESULT CXiaoGongPDFDlg::OnTabReorder(WPARAM wParam, LPARAM lParam)
+{
+	const int fromIndex = static_cast<int>(wParam);
+	const int toIndex = static_cast<int>(lParam);
+	const int count = static_cast<int>(m_documents.size());
+	if (fromIndex < 0 || fromIndex >= count ||
+		toIndex < 0 || toIndex >= count || fromIndex == toIndex)
+	{
+		return 0;
+	}
+
+	CPDFDocument* pActiveDoc = GetActiveDocument();
+	CPDFDocument* pMovedDoc = m_documents[fromIndex];
+	m_documents.erase(m_documents.begin() + fromIndex);
+	m_documents.insert(m_documents.begin() + toIndex, pMovedDoc);
+
+	if (pActiveDoc)
+	{
+		auto it = std::find(m_documents.begin(), m_documents.end(), pActiveDoc);
+		if (it != m_documents.end())
+			m_activeDocIndex = static_cast<int>(it - m_documents.begin());
+	}
+
+	UpdateTabControl();
+	if (m_tabCtrl.GetSafeHwnd() && m_activeDocIndex >= 0)
+	{
+		m_tabCtrl.SetCurSel(m_activeDocIndex);
+		m_tabCtrl.Invalidate(FALSE);
+	}
+	SaveOpenTabs();
+	return 0;
+}
+
+// 处理标签页右键菜单事件
+LRESULT CXiaoGongPDFDlg::OnTabContextMenu(WPARAM wParam, LPARAM lParam)
+{
+	const int tabIndex = static_cast<int>(wParam);
+	if (tabIndex < 0 || tabIndex >= static_cast<int>(m_documents.size()))
+		return 0;
+
+	CPDFDocument* pTargetDoc = m_documents[tabIndex];
+	if (!pTargetDoc)
+		return 0;
+
+	enum TabMenuCmd
+	{
+		CMD_TAB_CLOSE = 1,
+		CMD_TAB_CLOSE_OTHERS,
+		CMD_TAB_CLOSE_RIGHT,
+		CMD_TAB_COPY_PATH,
+		CMD_TAB_OPEN_FOLDER
+	};
+
+	CMenu menu;
+	if (!menu.CreatePopupMenu())
+		return 0;
+
+	const int docCount = static_cast<int>(m_documents.size());
+	menu.AppendMenu(MF_STRING, CMD_TAB_CLOSE, _T("关闭标签页\tCtrl+W"));
+	menu.AppendMenu(MF_STRING | (docCount > 1 ? 0 : MF_GRAYED),
+		CMD_TAB_CLOSE_OTHERS, _T("关闭其他标签页"));
+	menu.AppendMenu(MF_STRING | (tabIndex < docCount - 1 ? 0 : MF_GRAYED),
+		CMD_TAB_CLOSE_RIGHT, _T("关闭右侧标签页"));
+	menu.AppendMenu(MF_SEPARATOR);
+	menu.AppendMenu(MF_STRING, CMD_TAB_COPY_PATH, _T("复制完整路径"));
+	menu.AppendMenu(MF_STRING, CMD_TAB_OPEN_FOLDER, _T("打开文件所在位置"));
+
+	const CPoint screenPt(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+	const UINT cmd = static_cast<UINT>(menu.TrackPopupMenu(
+		TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+		screenPt.x, screenPt.y, this));
+
+	// TrackPopupMenu 期间可能有外部事件改变标签列表，重新定位目标文档
+	auto curIt = std::find(m_documents.begin(), m_documents.end(), pTargetDoc);
+	if (curIt == m_documents.end())
+		return 0;
+	const int curTabIndex = static_cast<int>(curIt - m_documents.begin());
+
+	switch (cmd)
+	{
+	case CMD_TAB_CLOSE:
+		CloseDocument(curTabIndex);
+		break;
+
+	case CMD_TAB_CLOSE_OTHERS:
+		if (m_activeDocIndex != curTabIndex)
+		{
+			if (m_tabCtrl.GetSafeHwnd())
+				m_tabCtrl.SetCurSel(curTabIndex);
+			SwitchToDocument(curTabIndex);
+		}
+		for (int i = static_cast<int>(m_documents.size()) - 1; i >= 0; --i)
+		{
+			if (m_documents[i] != pTargetDoc)
+				CloseDocument(i);
+		}
+		break;
+
+	case CMD_TAB_CLOSE_RIGHT:
+		if (m_activeDocIndex > curTabIndex)
+		{
+			if (m_tabCtrl.GetSafeHwnd())
+				m_tabCtrl.SetCurSel(curTabIndex);
+			SwitchToDocument(curTabIndex);
+		}
+		for (int i = static_cast<int>(m_documents.size()) - 1; i > curTabIndex; --i)
+		{
+			CloseDocument(i);
+		}
+		break;
+
+	case CMD_TAB_COPY_PATH:
+		if (CopyTextToClipboard(pTargetDoc->GetFilePath()))
+			SetStatusBarMessage(_T("已复制文件完整路径"));
+		break;
+
+	case CMD_TAB_OPEN_FOLDER:
+	{
+		const CString filePath = pTargetDoc->GetFilePath();
+		if (!filePath.IsEmpty())
+		{
+			PIDLIST_ABSOLUTE pidl = ::ILCreateFromPath(filePath);
+			if (pidl)
+			{
+				::SHOpenFolderAndSelectItems(pidl, 0, nullptr, 0);
+				::ILFree(pidl);
+			}
+			else
+			{
+				CString folder = filePath;
+				const int slash = max(folder.ReverseFind(_T('\\')), folder.ReverseFind(_T('/')));
+				if (slash >= 0)
+					folder = folder.Left(slash);
+				::ShellExecute(nullptr, _T("open"), folder, nullptr, nullptr, SW_SHOWNORMAL);
+			}
+		}
+		break;
+	}
+	default:
+		break;
 	}
 
 	return 0;
@@ -5491,6 +5758,12 @@ BOOL CXiaoGongPDFDlg::OnSetCursor(CWnd* pWnd, UINT nHitTest, UINT message)
 	if (!viewRect.PtInRect(point))
 	{
 		::SetCursor(::LoadCursor(nullptr, IDC_ARROW));
+		return TRUE;
+	}
+
+	if (!m_doc && m_documents.empty() && m_pdfView.IsHoveringWelcomeAction())
+	{
+		::SetCursor(m_hHandCursor ? m_hHandCursor : ::LoadCursor(nullptr, IDC_HAND));
 		return TRUE;
 	}
 
@@ -7210,18 +7483,17 @@ CString CXiaoGongPDFDlg::ExtractSelectedText()
 	return m_hasSelection ? m_selectedText : CString();
 }
 
-// 复制选中文本到剪贴板
-void CXiaoGongPDFDlg::CopySelectionToClipboard()
+bool CXiaoGongPDFDlg::CopyTextToClipboard(const CString& text)
 {
-	CString text = ExtractSelectedText();
 	if (text.IsEmpty())
-		return;
+		return false;
 
 	if (!::OpenClipboard(GetSafeHwnd()))
-		return;
+		return false;
 	::EmptyClipboard();
 
-	size_t byteSize = (text.GetLength() + 1) * sizeof(WCHAR);
+	bool copied = false;
+	const size_t byteSize = (text.GetLength() + 1) * sizeof(WCHAR);
 	HGLOBAL hGlobal = ::GlobalAlloc(GMEM_MOVEABLE, byteSize);
 	if (hGlobal)
 	{
@@ -7231,12 +7503,22 @@ void CXiaoGongPDFDlg::CopySelectionToClipboard()
 			memcpy(pData, (LPCTSTR)text, byteSize);
 			::GlobalUnlock(hGlobal);
 			if (::SetClipboardData(CF_UNICODETEXT, hGlobal))
+			{
 				hGlobal = nullptr;
+				copied = true;
+			}
 		}
 		if (hGlobal)
 			::GlobalFree(hGlobal);
 	}
 	::CloseClipboard();
+	return copied;
+}
+
+// 复制选中文本到剪贴板
+void CXiaoGongPDFDlg::CopySelectionToClipboard()
+{
+	CopyTextToClipboard(ExtractSelectedText());
 }
 
 // ============================================================================

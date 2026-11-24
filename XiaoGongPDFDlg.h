@@ -392,6 +392,9 @@ protected:
 	void LoadRecentFiles();
 	void SaveRecentFiles();
 	void AddRecentFile(const CString& filePath);
+	void OpenRecentFileAt(int index);
+	void RemoveRecentFileAt(int index);
+	void ClearRecentFiles();
 
 	// 拖拽与进程间通信
 	afx_msg void OnDropFiles(HDROP hDropInfo);
@@ -410,6 +413,8 @@ protected:
 	CPDFDocument* GetActiveDocument();
 	afx_msg void OnTabSelChange(NMHDR* pNMHDR, LRESULT* pResult);
 	afx_msg LRESULT OnTabCloseButton(WPARAM wParam, LPARAM lParam);
+	afx_msg LRESULT OnTabReorder(WPARAM wParam, LPARAM lParam);
+	afx_msg LRESULT OnTabContextMenu(WPARAM wParam, LPARAM lParam);
 
 	// 鼠标拖拽平移相关
 	afx_msg void OnLButtonDown(UINT nFlags, CPoint point);
@@ -455,6 +460,7 @@ protected:
 
 	// 文本选择相关函数
 	CString ExtractSelectedText();
+	bool CopyTextToClipboard(const CString& text);
 	void CopySelectionToClipboard();
 	bool ScreenPointToPdfCoords(CPoint viewPt, int pageNumber, float& pdfX, float& pdfY);
 	bool HitTestInternalLink(CPoint viewPt, int& targetPage, float& targetX, float& targetY);

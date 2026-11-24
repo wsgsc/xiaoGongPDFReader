@@ -2,6 +2,7 @@
 
 #include <afxwin.h>
 #include <gdiplus.h>
+#include <vector>
 
 class CXiaoGongPDFDlg;
 
@@ -19,6 +20,11 @@ public:
 		, m_readingMode(READING_NORMAL)
 		, m_pWelcomeBitmap(nullptr)
 		, m_pWelcomeStream(nullptr)
+		, m_welcomeHoverTarget(WELCOME_HIT_NONE)
+		, m_welcomeHoverIndex(-1)
+		, m_welcomePressedTarget(WELCOME_HIT_NONE)
+		, m_welcomePressedIndex(-1)
+		, m_welcomeTracking(FALSE)
 	{
 	}
 	~CPDFViewCtrl() override;
@@ -31,14 +37,42 @@ public:
 			Invalidate(FALSE);
 	}
 	void SetDisplayBitmap(HBITMAP hBitmap);
+	bool IsHoveringWelcomeAction() const { return m_welcomeHoverTarget != WELCOME_HIT_NONE; }
 
 protected:
+	enum WelcomeHitTarget
+	{
+		WELCOME_HIT_NONE = 0,
+		WELCOME_HIT_OPEN_BTN,
+		WELCOME_HIT_CLEAR_BTN,
+		WELCOME_HIT_RECENT_ROW,
+		WELCOME_HIT_RECENT_REMOVE
+	};
+
 	CXiaoGongPDFDlg* m_pParentDlg;
 	HBITMAP m_hDisplayBitmap;
 	ReadingMode m_readingMode;
 	Gdiplus::Bitmap* m_pWelcomeBitmap;
 	IStream* m_pWelcomeStream;
+	CRect m_openBtnRect;
+	CRect m_clearRecentRect;
+	std::vector<CRect> m_recentRowRects;
+	std::vector<CRect> m_recentRemoveRects;
+	WelcomeHitTarget m_welcomeHoverTarget;
+	int m_welcomeHoverIndex;
+	WelcomeHitTarget m_welcomePressedTarget;
+	int m_welcomePressedIndex;
+	BOOL m_welcomeTracking;
+	CFont m_welcomeTitleFont;
+	CFont m_welcomeBtnFont;
+	CFont m_welcomeSectionFont;
+	CFont m_welcomeItemTitleFont;
+	CFont m_welcomeItemPathFont;
+	CFont m_welcomeBadgeFont;
 
+	bool isWelcomePageActive() const;
+	void ensureWelcomeFonts();
+	void hitTestWelcomePage(CPoint point, WelcomeHitTarget& outTarget, int& outIndex) const;
 	void DrawWelcomeImage(CDC& dc, const CRect& clientRect);
 	void ForwardMouseMessage(UINT message, UINT nFlags, CPoint point);
 	afx_msg void OnLButtonDown(UINT nFlags, CPoint point);
@@ -46,6 +80,7 @@ protected:
 	afx_msg void OnMButtonDown(UINT nFlags, CPoint point);
 	afx_msg void OnMButtonUp(UINT nFlags, CPoint point);
 	afx_msg void OnMouseMove(UINT nFlags, CPoint point);
+	afx_msg void OnMouseLeave();
 	afx_msg void OnRButtonUp(UINT nFlags, CPoint point);
 	afx_msg BOOL OnEraseBkgnd(CDC* pDC);
 	afx_msg void OnVScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar);

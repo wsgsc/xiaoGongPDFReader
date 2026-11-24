@@ -1,12 +1,19 @@
 #pragma once
 
+#include <afxcmn.h>
+
+// 标签页与主窗口交互消息
+constexpr UINT WM_TAB_CLOSE_REQUEST   = WM_APP + 100; // wParam: tabIndex
+constexpr UINT WM_TAB_REORDER_REQUEST = WM_APP + 101; // wParam: fromIndex, lParam: toIndex
+constexpr UINT WM_TAB_CONTEXT_MENU    = WM_APP + 102; // wParam: tabIndex, lParam: MAKELPARAM(screenX, screenY)
+
 // 现代化Tab Control控件
 // 提供美观的标签页外观，包括：
 // - 圆角边框
 // - 渐变背景
-// - 悬停效果
-// - 清晰的选中状态
-// - 可选的关闭按钮
+// - 悬停效果与完整路径提示
+// - 清晰的选中状态与左右拖拽排序
+// - 可选的关闭按钮、中键关闭与右键菜单
 
 class CModernTabCtrl : public CTabCtrl
 {
@@ -24,6 +31,7 @@ public:
 	void SetTabHeight(int height);                // 设置标签页高度
 	void SetColors(COLORREF normal, COLORREF hover, COLORREF selected);  // 设置颜色
 	void HideOverflowButtons();
+	virtual BOOL PreTranslateMessage(MSG* pMsg);
 
 protected:
 	DECLARE_MESSAGE_MAP()
@@ -35,10 +43,15 @@ protected:
 	afx_msg void OnLButtonDown(UINT nFlags, CPoint point);
 	afx_msg void OnLButtonUp(UINT nFlags, CPoint point);
 	afx_msg void OnLButtonDblClk(UINT nFlags, CPoint point);
+	afx_msg void OnMButtonDown(UINT nFlags, CPoint point);
+	afx_msg void OnMButtonUp(UINT nFlags, CPoint point);
+	afx_msg void OnRButtonDown(UINT nFlags, CPoint point);
+	afx_msg void OnRButtonUp(UINT nFlags, CPoint point);
 	afx_msg void OnCaptureChanged(CWnd* pWnd);
 	afx_msg void OnCancelMode();
 	afx_msg BOOL OnEraseBkgnd(CDC* pDC);
 	afx_msg void OnDestroy();
+	afx_msg LRESULT OnSetCurSelMsg(WPARAM wParam, LPARAM lParam);
 
 private:
 	// 绘制相关
@@ -53,6 +66,8 @@ private:
 	void EnsureTabVisible(int index);
 	void ResetDragState();
 	int HitTestTab(CPoint point);
+	CString GetTabToolTipText(int index) const;
+	void UpdateHoverToolTip();
 
 	// 状态跟踪
 	int m_hoverIndex;          // 当前悬停的标签页索引
@@ -61,12 +76,17 @@ private:
 	BOOL m_bTracking;          // 是否正在跟踪鼠标
 	BOOL m_tabDragArmed;
 	BOOL m_tabDragging;
+	BOOL m_tabReordering;      // 是否正在左右拖拽调整标签顺序
 	int m_tabPressedIndex;
+	int m_middlePressedIndex;  // 中键按下的标签索引
+	CPoint m_tabPressClientPt; // 按下时的客户区坐标
 	CPoint m_tabDragStartScreen;
 	CRect m_tabDragStartWindow;
 	int m_scrollOffset;        // 标签溢出时的水平滚动偏移
 	int m_lastEnsuredSel;      // 上次自动滚入可视区的选中标签
 	int m_wheelRemainder;      // 高精度触控板滚轮余数
+	CToolTipCtrl m_toolTip;    // 悬停完整路径/关闭按钮提示
+	CString m_lastToolTipText;
 
 	// 外观配置
 	int m_tabHeight;           // 标签页高度

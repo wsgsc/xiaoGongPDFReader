@@ -1,6 +1,7 @@
 #include "pch.h"
 #include <commctrl.h>
 #include "ModernTabCtrl.h"
+#include "PDFDocument.h"
 
 IMPLEMENT_DYNAMIC(CModernTabCtrl, CTabCtrl)
 
@@ -12,10 +13,15 @@ BEGIN_MESSAGE_MAP(CModernTabCtrl, CTabCtrl)
 	ON_WM_LBUTTONDOWN()
 	ON_WM_LBUTTONUP()
 	ON_WM_LBUTTONDBLCLK()
+	ON_WM_MBUTTONDOWN()
+	ON_WM_MBUTTONUP()
+	ON_WM_RBUTTONDOWN()
+	ON_WM_RBUTTONUP()
 	ON_WM_CAPTURECHANGED()
 	ON_WM_CANCELMODE()
 	ON_WM_ERASEBKGND()
 	ON_WM_DESTROY()
+	ON_MESSAGE(TCM_SETCURSEL, &CModernTabCtrl::OnSetCurSelMsg)
 END_MESSAGE_MAP()
 
 CModernTabCtrl::CModernTabCtrl()
@@ -25,7 +31,10 @@ CModernTabCtrl::CModernTabCtrl()
 	, m_bTracking(FALSE)
 	, m_tabDragArmed(FALSE)
 	, m_tabDragging(FALSE)
+	, m_tabReordering(FALSE)
 	, m_tabPressedIndex(-1)
+	, m_middlePressedIndex(-1)
+	, m_tabPressClientPt(0, 0)
 	, m_tabDragStartScreen(0, 0)
 	, m_tabDragStartWindow(0, 0, 0, 0)
 	, m_scrollOffset(0)
@@ -154,6 +163,19 @@ void CModernTabCtrl::HideOverflowButtons()
 	HWND hButtons = ::FindWindowEx(GetSafeHwnd(), nullptr, UPDOWN_CLASS, nullptr);
 	if (hButtons && ::IsWindowVisible(hButtons))
 		::ShowWindow(hButtons, SW_HIDE);
+}
+
+LRESULT CModernTabCtrl::OnSetCurSelMsg(WPARAM wParam, LPARAM lParam)
+{
+	// 原生 SysTabControl32 处理 TCM_SETCURSEL 时仅使内部按钮区域失效（不含底部 3px 选中蓝条），
+	// 且多标签溢出时坐标与自绘滚动偏移不一致，因此统一同步可视位置并整条无闪烁重绘。
+	const LRESULT prevSel = DefWindowProc(TCM_SETCURSEL, wParam, lParam);
+	const int curSel = static_cast<int>(DefWindowProc(TCM_GETCURSEL, 0, 0));
+	m_lastEnsuredSel = curSel;
+	EnsureTabVisible(curSel);
+	HideOverflowButtons();
+	Invalidate(FALSE);
+	return prevSel;
 }
 
 BOOL CModernTabCtrl::OnEraseBkgnd(CDC* pDC)
@@ -476,7 +498,76 @@ void CModernTabCtrl::ResetDragState()
 {
 	m_tabDragArmed = FALSE;
 	m_tabDragging = FALSE;
+	m_tabReordering = FALSE;
 	m_tabPressedIndex = -1;
+	m_middlePressedIndex = -1;
+}
+
+BOOL CModernTabCtrl::PreTranslateMessage(MSG* pMsg)
+{
+	if (m_toolTip.GetSafeHwnd())
+		m_toolTip.RelayEvent(pMsg);
+	return CTabCtrl::PreTranslateMessage(pMsg);
+}
+
+CString CModernTabCtrl::GetTabToolTipText(int index) const
+{
+	if (index < 0 || index >= GetItemCount())
+		return CString();
+
+	TCHAR szText[256] = { 0 };
+	TCITEM tci = {};
+	tci.mask = TCIF_PARAM | TCIF_TEXT;
+	tci.pszText = szText;
+	tci.cchTextMax = _countof(szText);
+	if (!GetItem(index, &tci))
+		return CString();
+
+	if (tci.lParam != 0)
+	{
+		const CPDFDocument* pDoc = reinterpret_cast<const CPDFDocument*>(tci.lParam);
+		if (pDoc && !pDoc->GetFilePath().IsEmpty())
+			return pDoc->GetFilePath();
+	}
+	return CString(szText);
+}
+
+void CModernTabCtrl::UpdateHoverToolTip()
+{
+	if (!GetSafeHwnd())
+		return;
+
+	if (m_hoverIndex < 0)
+	{
+		if (m_toolTip.GetSafeHwnd())
+		{
+			m_toolTip.Pop();
+			m_toolTip.Activate(FALSE);
+		}
+		m_lastToolTipText.Empty();
+		return;
+	}
+
+	CString tipText = (m_closeHoverIndex >= 0) ?
+		CString(_T("关闭标签页 (Ctrl+W / 鼠标中键)")) :
+		GetTabToolTipText(m_hoverIndex);
+	if (tipText.IsEmpty())
+		return;
+
+	if (!m_toolTip.GetSafeHwnd())
+	{
+		if (!m_toolTip.Create(this, TTS_ALWAYSTIP | TTS_NOPREFIX))
+			return;
+		m_toolTip.SetMaxTipWidth(640);
+		m_toolTip.AddTool(this, tipText);
+	}
+
+	if (tipText != m_lastToolTipText)
+	{
+		m_lastToolTipText = tipText;
+		m_toolTip.UpdateTipText(tipText, this);
+	}
+	m_toolTip.Activate(TRUE);
 }
 
 CRect CModernTabCtrl::GetTabRect(int index)
@@ -529,6 +620,60 @@ void CModernTabCtrl::OnMouseMove(UINT nFlags, CPoint point)
 			ResetDragState();
 			if (::GetCapture() == GetSafeHwnd())
 				::ReleaseCapture();
+		}
+		else if (m_tabPressedIndex >= 0 && GetItemCount() > 1)
+		{
+			// 多标签时，在标签上左右拖拽用于调整标签页顺序
+			const int dxClient = point.x - m_tabPressClientPt.x;
+			if (m_tabReordering || abs(dxClient) >= 8)
+			{
+				if (!m_tabReordering)
+				{
+					m_tabReordering = TRUE;
+					if (m_toolTip.GetSafeHwnd())
+					{
+						m_toolTip.Pop();
+						m_toolTip.Activate(FALSE);
+					}
+					if (GetCurSel() != m_tabPressedIndex)
+					{
+						SetCurSel(m_tabPressedIndex);
+						m_lastEnsuredSel = m_tabPressedIndex;
+						EnsureTabVisible(m_tabPressedIndex);
+						Invalidate(FALSE);
+						NMHDR notification = {};
+						notification.hwndFrom = GetSafeHwnd();
+						notification.idFrom = GetDlgCtrlID();
+						notification.code = TCN_SELCHANGE;
+						pParent->SendMessage(WM_NOTIFY, notification.idFrom,
+							reinterpret_cast<LPARAM>(&notification));
+					}
+				}
+
+				CRect clientRect;
+				GetClientRect(&clientRect);
+				const int tabCount = GetItemCount();
+				const int tabWidth = max(1, CalculateTabWidth(clientRect.Width(), tabCount));
+				const int rawTarget = max(0, min(tabCount - 1, (point.x + m_scrollOffset) / tabWidth));
+				if (rawTarget != m_tabPressedIndex)
+				{
+					const CRect targetRect = GetTabRect(rawTarget);
+					const int center = targetRect.CenterPoint().x;
+					const int threshold = tabWidth / 6;
+					const bool crossed = (rawTarget > m_tabPressedIndex) ?
+						(point.x >= center - threshold) : (point.x <= center + threshold);
+					if (crossed)
+					{
+						const int fromIndex = m_tabPressedIndex;
+						m_tabPressedIndex = rawTarget;
+						m_lastEnsuredSel = rawTarget;
+						pParent->SendMessage(WM_TAB_REORDER_REQUEST, fromIndex, rawTarget);
+						EnsureTabVisible(rawTarget);
+						Invalidate(FALSE);
+					}
+				}
+				return;
+			}
 		}
 		else
 		{
@@ -599,10 +744,11 @@ void CModernTabCtrl::OnMouseMove(UINT nFlags, CPoint point)
 		}
 	}
 
-	// 如果悬停状态改变，重绘
+	// 如果悬停状态改变，更新提示并重绘
 	if (oldHoverIndex != m_hoverIndex || oldCloseHoverIndex != m_closeHoverIndex)
 	{
-		Invalidate();
+		UpdateHoverToolTip();
+		Invalidate(FALSE);
 	}
 
 	CTabCtrl::OnMouseMove(nFlags, point);
@@ -663,7 +809,8 @@ void CModernTabCtrl::OnMouseLeave()
 	{
 		m_hoverIndex = -1;
 		m_closeHoverIndex = -1;
-		Invalidate();
+		UpdateHoverToolTip();
+		Invalidate(FALSE);
 	}
 
 	CTabCtrl::OnMouseLeave();
@@ -689,13 +836,13 @@ void CModernTabCtrl::OnLButtonDown(UINT nFlags, CPoint point)
 	{
 		m_hoverIndex = -1;
 		m_closeHoverIndex = -1;
-		// 发送自定义消息通知父窗口关闭标签页
-		// 使用WM_APP + 自定义偏移
+		UpdateHoverToolTip();
 		if (CWnd* pParent = GetParent())
-			pParent->SendMessage(WM_APP + 100, closeIndex, 0);
+			pParent->SendMessage(WM_TAB_CLOSE_REQUEST, closeIndex, 0);
 		return;
 	}
 	m_tabPressedIndex = HitTestTab(point);
+	m_tabPressClientPt = point;
 	::GetCursorPos(&m_tabDragStartScreen);
 	if (CWnd* pParent = GetParent())
 		pParent->GetWindowRect(&m_tabDragStartWindow);
@@ -707,7 +854,7 @@ void CModernTabCtrl::OnLButtonDown(UINT nFlags, CPoint point)
 
 void CModernTabCtrl::OnLButtonUp(UINT nFlags, CPoint point)
 {
-	const BOOL wasDragging = m_tabDragging;
+	const BOOL wasDragging = m_tabDragging || m_tabReordering;
 	const int pressedIndex = m_tabPressedIndex;
 	ResetDragState();
 	if (::GetCapture() == GetSafeHwnd())
@@ -729,6 +876,52 @@ void CModernTabCtrl::OnLButtonUp(UINT nFlags, CPoint point)
 				pParent->SendMessage(WM_NOTIFY, notification.idFrom,
 					reinterpret_cast<LPARAM>(&notification));
 			}
+		}
+	}
+}
+
+void CModernTabCtrl::OnMButtonDown(UINT /*nFlags*/, CPoint point)
+{
+	const int tabIndex = HitTestTab(point);
+	if (tabIndex >= 0)
+	{
+		m_middlePressedIndex = tabIndex;
+		SetCapture();
+	}
+}
+
+void CModernTabCtrl::OnMButtonUp(UINT /*nFlags*/, CPoint point)
+{
+	const int pressedIndex = m_middlePressedIndex;
+	m_middlePressedIndex = -1;
+	if (::GetCapture() == GetSafeHwnd())
+		::ReleaseCapture();
+	if (pressedIndex >= 0 && HitTestTab(point) == pressedIndex)
+	{
+		m_hoverIndex = -1;
+		m_closeHoverIndex = -1;
+		UpdateHoverToolTip();
+		if (CWnd* pParent = GetParent())
+			pParent->SendMessage(WM_TAB_CLOSE_REQUEST, pressedIndex, 0);
+	}
+}
+
+void CModernTabCtrl::OnRButtonDown(UINT /*nFlags*/, CPoint /*point*/)
+{
+	// 拦截默认右键按下行为，统一在右键抬起时弹出标签菜单
+}
+
+void CModernTabCtrl::OnRButtonUp(UINT /*nFlags*/, CPoint point)
+{
+	const int tabIndex = HitTestTab(point);
+	if (tabIndex >= 0)
+	{
+		CPoint screenPt = point;
+		ClientToScreen(&screenPt);
+		if (CWnd* pParent = GetParent())
+		{
+			pParent->SendMessage(WM_TAB_CONTEXT_MENU, tabIndex,
+				MAKELPARAM(screenPt.x, screenPt.y));
 		}
 	}
 }

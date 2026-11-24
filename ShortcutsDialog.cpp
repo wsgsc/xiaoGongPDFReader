@@ -56,8 +56,8 @@ void CShortcutsDialog::InitializeShortcutsList()
 	);
 
 	// 添加列
-	m_shortcutsList.InsertColumn(0, _T("快捷键"), LVCFMT_LEFT, 150);
-	m_shortcutsList.InsertColumn(1, _T("功能说明"), LVCFMT_LEFT, 300);
+	m_shortcutsList.InsertColumn(0, _T("快捷键"), LVCFMT_LEFT, 235);
+	m_shortcutsList.InsertColumn(1, _T("功能说明"), LVCFMT_LEFT, 245);
 
 	// 设置字体
 	if (!m_listFont.GetSafeHandle())
@@ -65,32 +65,33 @@ void CShortcutsDialog::InitializeShortcutsList()
 	m_shortcutsList.SetFont(&m_listFont);
 
 	// 添加快捷键
-	AddShortcut(_T("← / →"), _T("上一页 / 下一页"));
+	AddShortcut(_T("← / →, PageUp / PageDown"), _T("上一页 / 下一页"));
 	AddShortcut(_T("Home / End"), _T("首页 / 末页"));
+	AddShortcut(_T("Ctrl + G"), _T("快速输入页码跳转"));
 	AddShortcut(_T(""), _T(""));
 
-	AddShortcut(_T("鼠标滚轮"), _T("向上滚动页面/向下滚动页面"));
+	AddShortcut(_T("鼠标滚轮"), _T("向上滚动页面 / 向下滚动页面"));
+	AddShortcut(_T("Ctrl + 滚轮, Ctrl + + / -"), _T("放大 / 缩小页面"));
+	AddShortcut(_T("Ctrl + 0"), _T("恢复适合宽度缩放"));
 	AddShortcut(_T("空格 + 左键拖拽 / 中键拖拽"), _T("临时抓手拖动页面"));
+	AddShortcut(_T("Ctrl + C"), _T("复制选中的页面文本"));
 	AddShortcut(_T(""), _T(""));
 
-	AddShortcut(_T("Ctrl + F"), _T("打开搜索"));
+	AddShortcut(_T("Ctrl + F"), _T("打开文档搜索"));
 	AddShortcut(_T("Ctrl + Shift + F"), _T("切换搜索是否区分大小写"));
-	AddShortcut(_T("Esc"), _T("取消正在进行的搜索"));
-	AddShortcut(_T("F3"), _T("查找下一个"));
-	AddShortcut(_T("Shift + F3"), _T("查找上一个"));
+	AddShortcut(_T("F3 / Shift + F3"), _T("查找下一个 / 上一个匹配项"));
+	AddShortcut(_T("Esc"), _T("关闭搜索框 / 取消搜索 / 退出全屏"));
 	AddShortcut(_T(""), _T(""));
 
-	AddShortcut(_T("Ctrl + L"), _T("向左旋转（逆时针90度）"));
-	AddShortcut(_T("Ctrl + R"), _T("向右旋转（顺时针90度）"));
+	AddShortcut(_T("Ctrl + L / Ctrl + R"), _T("向左 / 向右旋转当前页 90 度"));
+	AddShortcut(_T("F9"), _T("显示 / 隐藏目录侧栏"));
+	AddShortcut(_T("F11"), _T("进入 / 退出全屏模式"));
 	AddShortcut(_T(""), _T(""));
 
-	AddShortcut(_T("F9"), _T("切换目录面板"));
-	AddShortcut(_T("F11"), _T("全屏模式"));
-	AddShortcut(_T("ESC"), _T("退出全屏"));
-	AddShortcut(_T(""), _T(""));
-
-	AddShortcut(_T("Ctrl + O"), _T("打开文件"));
-	AddShortcut(_T("Ctrl + P"), _T("打印"));
+	AddShortcut(_T("Ctrl + O"), _T("打开 PDF 文件"));
+	AddShortcut(_T("Ctrl + W / 鼠标中键点标签"), _T("关闭当前标签页"));
+	AddShortcut(_T("Ctrl + Tab / Ctrl + Shift + Tab"), _T("切换下一个 / 上一个标签页"));
+	AddShortcut(_T("Ctrl + P"), _T("打印当前文档"));
 	AddShortcut(_T("Ctrl + Q"), _T("退出程序"));
 }
 
