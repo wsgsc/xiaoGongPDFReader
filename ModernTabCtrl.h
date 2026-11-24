@@ -13,6 +13,9 @@ class CModernTabCtrl : public CTabCtrl
 	DECLARE_DYNAMIC(CModernTabCtrl)
 
 public:
+	static constexpr int MIN_TAB_WIDTH = 135;
+	static constexpr int MAX_TAB_WIDTH = 250;
+
 	CModernTabCtrl();
 	virtual ~CModernTabCtrl();
 
@@ -44,6 +47,7 @@ private:
 	BOOL IsCloseButtonVisible(int index);
 	CRect GetCloseButtonRect(int index);
 	CRect GetTabRect(int index);
+	int CalculateTabWidth(int availableWidth, int tabCount) const;
 	int GetMaxScrollOffset() const;
 	void ClampScrollOffset();
 	void EnsureTabVisible(int index);
@@ -71,6 +75,8 @@ private:
 	COLORREF m_selectedColor;  // 选中标签背景色
 
 	// GDI对象
-	CFont m_font;              // 标签字体
+	CFont m_font;              // 普通标签字体
+	CFont m_selectedFont;      // 选中标签字体（中等字重）
 	CFont m_compactFont;       // 紧凑标签字体
+	CFont m_badgeFont;         // PDF 图标角标字体
 };

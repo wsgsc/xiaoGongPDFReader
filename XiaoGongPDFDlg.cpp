@@ -25,6 +25,10 @@
 
 namespace
 {
+	constexpr int TITLE_BAR_HEIGHT = 46;
+	constexpr int TITLE_ICON_AREA_WIDTH = 56;
+	constexpr int TITLE_ICON_SIZE = 38;
+
 	HICON loadTitleIcon()
 	{
 		HINSTANCE hInstance = AfxGetInstanceHandle();
@@ -47,21 +51,39 @@ namespace
 			Gdiplus::Bitmap bitmap(pStream, FALSE);
 			if (bitmap.GetLastStatus() == Gdiplus::Ok && bitmap.GetWidth() > 0 && bitmap.GetHeight() > 0)
 			{
-				const int ICON_SIZE = 24;
-				const double scale = min(static_cast<double>(ICON_SIZE) / bitmap.GetWidth(),
-					static_cast<double>(ICON_SIZE) / bitmap.GetHeight());
-				const int width = max(1, static_cast<int>(bitmap.GetWidth() * scale));
-				const int height = max(1, static_cast<int>(bitmap.GetHeight() * scale));
-				Gdiplus::Bitmap iconBitmap(ICON_SIZE, ICON_SIZE, PixelFormat32bppARGB);
+				// 裁掉欢迎插画四周的大面积空白及底部提示文字，仅提取中央人物+PDF主体作为标题栏图标
+				int srcX = 0;
+				int srcY = 0;
+				int srcW = static_cast<int>(bitmap.GetWidth());
+				int srcH = static_cast<int>(bitmap.GetHeight());
+				if (srcW >= 1200 && srcH >= 800)
+				{
+					srcX = 505;
+					srcY = 66;
+					srcW = 536;
+					srcH = 588;
+				}
+
+				const double scale = min(static_cast<double>(TITLE_ICON_SIZE) / srcW,
+					static_cast<double>(TITLE_ICON_SIZE) / srcH);
+				const int width = max(1, static_cast<int>(srcW * scale + 0.5));
+				const int height = max(1, static_cast<int>(srcH * scale + 0.5));
+				Gdiplus::Bitmap iconBitmap(TITLE_ICON_SIZE, TITLE_ICON_SIZE, PixelFormat32bppARGB);
 				if (iconBitmap.GetLastStatus() == Gdiplus::Ok)
 				{
 					Gdiplus::Status drawStatus;
 					{
 						Gdiplus::Graphics graphics(&iconBitmap);
 						graphics.Clear(Gdiplus::Color(0, 0, 0, 0));
+						graphics.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
 						graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
-						drawStatus = graphics.DrawImage(&bitmap,
-							(ICON_SIZE - width) / 2, (ICON_SIZE - height) / 2, width, height);
+						graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+						Gdiplus::Rect destRect(
+							(TITLE_ICON_SIZE - width) / 2,
+							(TITLE_ICON_SIZE - height) / 2,
+							width, height);
+						drawStatus = graphics.DrawImage(&bitmap, destRect,
+							srcX, srcY, srcW, srcH, Gdiplus::UnitPixel);
 					}
 					if (drawStatus == Gdiplus::Ok)
 						iconBitmap.GetHICON(&hIcon);
@@ -1187,11 +1209,11 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	m_btnMore.Create(_T("更多"), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
 		CRect(0, 0, 34, 34), this, IDC_BTN_MORE);
 	m_btnMinimize.Create(_T("最小化"), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-		CRect(0, 0, 46, 42), this, IDC_BTN_MINIMIZE);
+		CRect(0, 0, 46, TITLE_BAR_HEIGHT), this, IDC_BTN_MINIMIZE);
 	m_btnMaximize.Create(_T("最大化"), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-		CRect(0, 0, 46, 42), this, IDC_BTN_MAXIMIZE);
+		CRect(0, 0, 46, TITLE_BAR_HEIGHT), this, IDC_BTN_MAXIMIZE);
 	m_btnCloseWindow.Create(_T("关闭"), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-		CRect(0, 0, 46, 42), this, IDC_BTN_CLOSE_WINDOW);
+		CRect(0, 0, 46, TITLE_BAR_HEIGHT), this, IDC_BTN_CLOSE_WINDOW);
 	m_btnMinimize.SetWindowControlStyle();
 	m_btnMaximize.SetWindowControlStyle();
 	m_btnCloseWindow.SetWindowControlStyle(true);
@@ -1312,12 +1334,14 @@ void CXiaoGongPDFDlg::OnPaint()
 		CDC* pTitleDC = GetDC();
 		if (pTitleDC)
 		{
-			// 填充图标区域背景（标签栏左侧 0~56 x 0~42 区域）
-			pTitleDC->FillSolidRect(0, 0, 56, 42,
+			// 填充左上角应用图标区域背景并居中绘制放大后的高清图标
+			pTitleDC->FillSolidRect(0, 0, TITLE_ICON_AREA_WIDTH, TITLE_BAR_HEIGHT,
 				m_readingMode == READING_NIGHT ? RGB(36, 39, 43) : RGB(230, 238, 253));
-			::DrawIconEx(pTitleDC->GetSafeHdc(), 16, 9,
+			::DrawIconEx(pTitleDC->GetSafeHdc(),
+				(TITLE_ICON_AREA_WIDTH - TITLE_ICON_SIZE) / 2,
+				(TITLE_BAR_HEIGHT - TITLE_ICON_SIZE) / 2,
 				m_hTitleIcon ? m_hTitleIcon : m_hIcon,
-				24, 24, 0, nullptr, DI_NORMAL);
+				TITLE_ICON_SIZE, TITLE_ICON_SIZE, 0, nullptr, DI_NORMAL);
 			ReleaseDC(pTitleDC);
 		}
 
@@ -1353,7 +1377,7 @@ BOOL CXiaoGongPDFDlg::OnEraseBkgnd(CDC* pDC)
 
 	CBrush brush(ViewBgColor());
 	pDC->FillRect(&rect, &brush);
-	pDC->FillSolidRect(0, 0, rect.Width(), 42,
+	pDC->FillSolidRect(0, 0, rect.Width(), TITLE_BAR_HEIGHT,
 		m_readingMode == READING_NIGHT ? RGB(36, 39, 43) : RGB(230, 238, 253));
 
 	return TRUE;  // 返回TRUE表示我们已经处理了背景擦除
@@ -1543,7 +1567,7 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		// ★★★ 禁止重绘，避免布局调整过程中的闪烁（高刷新率显示器优化）
 		SetRedraw(FALSE);
 		const int TOOLBAR_HEIGHT = 52;
-		const int TAB_HEIGHT = 42;
+		const int TAB_HEIGHT = TITLE_BAR_HEIGHT;
 		const int BTN_HEIGHT = 34;
 		const bool compactToolbar = cx < 1100;
 		const int ICON_WIDTH = compactToolbar ? 29 : 34;
@@ -1553,7 +1577,8 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 
 		if (m_tabCtrl.GetSafeHwnd())
 		{
-			m_tabCtrl.MoveWindow(56, 0, max(1, cx - 56 - 138), TAB_HEIGHT);
+			m_tabCtrl.MoveWindow(TITLE_ICON_AREA_WIDTH, 0,
+				max(1, cx - TITLE_ICON_AREA_WIDTH - 138), TAB_HEIGHT);
 			UpdateTabWidth();
 		}
 		m_btnMinimize.MoveWindow(cx - 138, 0, 46, TAB_HEIGHT);
@@ -3881,7 +3906,7 @@ void CXiaoGongPDFDlg::InitializeTabControl()
 
 	// 配置标签页控件
 	m_tabCtrl.EnableCloseButton(TRUE);  // 启用关闭按钮
-	m_tabCtrl.SetTabHeight(42);
+	m_tabCtrl.SetTabHeight(TITLE_BAR_HEIGHT);
 	m_tabCtrl.SetColors(RGB(240, 244, 248), RGB(225, 234, 244), RGB(255, 255, 255));
 
 	// 所有标签页使用相同宽度
@@ -3906,8 +3931,9 @@ void CXiaoGongPDFDlg::UpdateTabWidth()
 	m_tabCtrl.GetClientRect(&rect);
 	const int tabCount = max(1, m_tabCtrl.GetItemCount());
 	const int availableWidth = rect.Width() / tabCount;
-	const int tabWidth = min(218, max(60, availableWidth));
-	m_tabCtrl.SendMessage(TCM_SETITEMSIZE, 0, MAKELPARAM(tabWidth, 42));
+	const int tabWidth = min(CModernTabCtrl::MAX_TAB_WIDTH,
+		max(CModernTabCtrl::MIN_TAB_WIDTH, availableWidth));
+	m_tabCtrl.SendMessage(TCM_SETITEMSIZE, 0, MAKELPARAM(tabWidth, TITLE_BAR_HEIGHT));
 	m_tabCtrl.HideOverflowButtons();
 	m_tabCtrl.Invalidate(FALSE);
 }
@@ -4689,8 +4715,9 @@ void CXiaoGongPDFDlg::OnLButtonDown(UINT nFlags, CPoint point)
 	CRect clientRect;
 	GetClientRect(&clientRect);
 	const int dragRight = m_tabCtrl.GetSafeHwnd() && m_tabCtrl.IsWindowVisible() ?
-		56 : clientRect.Width() - 138;
-	if (!m_isFullscreen && point.x >= 0 && point.x < dragRight && point.y >= 0 && point.y < 42)
+		TITLE_ICON_AREA_WIDTH : clientRect.Width() - 138;
+	if (!m_isFullscreen && point.x >= 0 && point.x < dragRight &&
+		point.y >= 0 && point.y < TITLE_BAR_HEIGHT)
 	{
 		StartWindowDrag();
 		return;
@@ -5027,7 +5054,7 @@ void CXiaoGongPDFDlg::OnMouseMove(UINT nFlags, CPoint point)
 				m_windowDragStartRect.OffsetRect(
 					cursor.x - m_windowDragStartRect.left -
 					static_cast<int>(xRatio * m_windowDragStartRect.Width()),
-					cursor.y - m_windowDragStartRect.top - 21);
+					cursor.y - m_windowDragStartRect.top - TITLE_BAR_HEIGHT / 2);
 				m_windowDragStartScreen = cursor;
 			}
 			SetWindowPos(nullptr,

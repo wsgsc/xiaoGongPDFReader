@@ -265,7 +265,7 @@ void CCustomButton::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 	if (!m_iconFont.GetSafeHandle())
 		m_iconFont.CreatePointFont(140, _T("Segoe MDL2 Assets"));
 	if (m_windowControlStyle && !m_windowIconFont.GetSafeHandle())
-		m_windowIconFont.CreatePointFont(105, _T("Segoe MDL2 Assets"));
+		m_windowIconFont.CreatePointFont(115, _T("Segoe MDL2 Assets"));
 
 	const bool bDisabled = (state & ODS_DISABLED) != 0;
 	const bool bPressed = (state & ODS_SELECTED) != 0;

@@ -31,32 +31,39 @@ CModernTabCtrl::CModernTabCtrl()
 	, m_scrollOffset(0)
 	, m_lastEnsuredSel(-1)
 	, m_wheelRemainder(0)
-	, m_tabHeight(36)
+	, m_tabHeight(46)
 	, m_normalColor(RGB(240, 240, 240))      // 浅灰色背景
 	, m_hoverColor(RGB(230, 230, 230))       // 稍深的灰色（悬停）
 	, m_selectedColor(RGB(255, 255, 255))    // 白色（选中）
 {
-	// 创建标准字体
+	// 使用负值字高指定实际字符高度（与下方工具栏字号协调），并开启 ClearType 抗锯齿
 	VERIFY(m_font.CreateFont(
-		16,                        // 字体高度
-		0,                         // 字体宽度
-		0,                         // 文本倾斜角度
-		0,                         // 基线倾斜角度
-		FW_NORMAL,                 // 字体粗细
-		FALSE,                     // 斜体
-		FALSE,                     // 下划线
-		0,                         // 删除线
-		DEFAULT_CHARSET,           // 字符集
-		OUT_DEFAULT_PRECIS,        // 输出精度
-		CLIP_DEFAULT_PRECIS,       // 裁剪精度
-		DEFAULT_QUALITY,           // 输出质量
-		DEFAULT_PITCH | FF_SWISS,  // 字体间距和族
-		_T("微软雅黑")));            // 字体名称
-	VERIFY(m_compactFont.CreateFont(
-		14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, 0,
+		-15,                       // 字符高度 15px
+		0,
+		0,
+		0,
+		FW_NORMAL,
+		FALSE,
+		FALSE,
+		0,
+		DEFAULT_CHARSET,
+		OUT_DEFAULT_PRECIS,
+		CLIP_DEFAULT_PRECIS,
+		CLEARTYPE_QUALITY,
+		DEFAULT_PITCH | FF_SWISS,
+		_T("微软雅黑")));
+	VERIFY(m_selectedFont.CreateFont(
+		-15, 0, 0, 0, FW_MEDIUM, FALSE, FALSE, 0,
 		DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-		DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, _T("微软雅黑")));
-
+		CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, _T("微软雅黑")));
+	VERIFY(m_compactFont.CreateFont(
+		-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, 0,
+		DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+		CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, _T("微软雅黑")));
+	VERIFY(m_badgeFont.CreateFont(
+		-13, 0, 0, 0, FW_BOLD, FALSE, FALSE, 0,
+		DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+		CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, _T("Segoe UI")));
 }
 
 CModernTabCtrl::~CModernTabCtrl()
@@ -67,9 +74,17 @@ CModernTabCtrl::~CModernTabCtrl()
 	{
 		m_font.DeleteObject();
 	}
+	if (m_selectedFont.GetSafeHandle())
+	{
+		m_selectedFont.DeleteObject();
+	}
 	if (m_compactFont.GetSafeHandle())
 	{
 		m_compactFont.DeleteObject();
+	}
+	if (m_badgeFont.GetSafeHandle())
+	{
+		m_badgeFont.DeleteObject();
 	}
 }
 
@@ -80,9 +95,17 @@ void CModernTabCtrl::OnDestroy()
 	{
 		m_font.DeleteObject();
 	}
+	if (m_selectedFont.GetSafeHandle())
+	{
+		m_selectedFont.DeleteObject();
+	}
 	if (m_compactFont.GetSafeHandle())
 	{
 		m_compactFont.DeleteObject();
+	}
+	if (m_badgeFont.GetSafeHandle())
+	{
+		m_badgeFont.DeleteObject();
 	}
 
 	CTabCtrl::OnDestroy();
@@ -264,26 +287,49 @@ void CModernTabCtrl::DrawTab(CDC* pDC, int index, CRect rect, BOOL isSelected, B
 	if (!GetItem(index, &tci))
 		szText[0] = _T('\0');
 
-	const bool compact = GetTabRect(index).Width() < 124;
-	// 计算关闭按钮区域（如果启用）
-	CRect textRect = rect;
-	textRect.left += compact ? 14 : 32;
-	if (m_bCloseButtonEnabled)
-	{
-		textRect.right = GetCloseButtonRect(index).left - (compact ? 1 : 5);
-	}
+	const bool compact = GetTabRect(index).Width() < 145;
+	const BOOL showCloseBtn = IsCloseButtonVisible(index);
 
-	// 绘制文本
-	const int iconSize = compact ? 10 : 16;
-	const int iconLeft = rect.left + (compact ? 2 : 8);
+	// 绘制圆角蓝底 PDF 图标角标（20x20，紧凑模式 18x18）
+	const int iconSize = compact ? 18 : 20;
+	const int iconLeft = rect.left + (compact ? 7 : 10);
 	CRect iconRect(iconLeft, rect.top + (rect.Height() - iconSize) / 2,
 		iconLeft + iconSize, rect.top + (rect.Height() + iconSize) / 2);
-	pDC->FillSolidRect(iconRect, RGB(29, 124, 243));
-	CFont* pOldFont = pDC->SelectObject(compact ? &m_compactFont : &m_font);
+	{
+		Gdiplus::Graphics graphics(pDC->GetSafeHdc());
+		graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+		const Gdiplus::REAL r = 4.0f;
+		const Gdiplus::REAL d = r * 2.0f;
+		Gdiplus::RectF badgeRf(
+			static_cast<Gdiplus::REAL>(iconRect.left),
+			static_cast<Gdiplus::REAL>(iconRect.top),
+			static_cast<Gdiplus::REAL>(iconRect.Width()),
+			static_cast<Gdiplus::REAL>(iconRect.Height()));
+		Gdiplus::GraphicsPath badgePath;
+		badgePath.AddArc(badgeRf.X, badgeRf.Y, d, d, 180.0f, 90.0f);
+		badgePath.AddArc(badgeRf.GetRight() - d, badgeRf.Y, d, d, 270.0f, 90.0f);
+		badgePath.AddArc(badgeRf.GetRight() - d, badgeRf.GetBottom() - d, d, d, 0.0f, 90.0f);
+		badgePath.AddArc(badgeRf.X, badgeRf.GetBottom() - d, d, d, 90.0f, 90.0f);
+		badgePath.CloseFigure();
+		Gdiplus::SolidBrush badgeBrush(Gdiplus::Color(255, 29, 124, 243));
+		graphics.FillPath(&badgeBrush, &badgePath);
+	}
+	CFont* pOldFont = pDC->SelectObject(&m_badgeFont);
 	pDC->SetBkMode(TRANSPARENT);
 	pDC->SetTextColor(RGB(255, 255, 255));
 	pDC->DrawText(_T("P"), iconRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-	pDC->SetTextColor(dark ? RGB(226, 231, 235) : RGB(35, 45, 57));
+
+	// 计算文件名区域：非激活且未悬停的标签不预留关闭按钮空白，尽可能完整展示文件名
+	CRect textRect = rect;
+	textRect.left = iconRect.right + (compact ? 6 : 8);
+	if (showCloseBtn)
+		textRect.right = GetCloseButtonRect(index).left - 4;
+	else
+		textRect.right = rect.right - 8;
+
+	pDC->SelectObject(compact ? &m_compactFont : (isSelected ? &m_selectedFont : &m_font));
+	pDC->SetTextColor(dark ? RGB(226, 231, 235) :
+		(isSelected ? RGB(24, 32, 44) : RGB(45, 55, 68)));
 	pDC->SetBkMode(TRANSPARENT);
 
 	CString displayText = szText;
@@ -292,7 +338,7 @@ void CModernTabCtrl::DrawTab(CDC* pDC, int index, CRect rect, BOOL isSelected, B
 	pDC->SelectObject(pOldFont);
 
 	// 绘制关闭按钮
-	if (IsCloseButtonVisible(index))
+	if (showCloseBtn)
 	{
 		CRect closeRect = GetCloseButtonRect(index);
 		BOOL isCloseHovered = (index == m_closeHoverIndex);
@@ -302,53 +348,76 @@ void CModernTabCtrl::DrawTab(CDC* pDC, int index, CRect rect, BOOL isSelected, B
 
 void CModernTabCtrl::DrawCloseButton(CDC* pDC, CRect rect, BOOL isHovered)
 {
-	// 绘制关闭按钮背景
+	// 悬停时绘制圆角红色背景
 	if (isHovered)
 	{
-		CBrush brush;
-		brush.CreateSolidBrush(RGB(232, 17, 35)); // 红色背景（悬停时）
-		pDC->FillRect(rect, &brush);
-		// 让CBrush析构函数自动清理
+		Gdiplus::Graphics graphics(pDC->GetSafeHdc());
+		graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+		const Gdiplus::REAL r = 4.0f;
+		const Gdiplus::REAL d = r * 2.0f;
+		Gdiplus::RectF rf(
+			static_cast<Gdiplus::REAL>(rect.left),
+			static_cast<Gdiplus::REAL>(rect.top),
+			static_cast<Gdiplus::REAL>(rect.Width()),
+			static_cast<Gdiplus::REAL>(rect.Height()));
+		Gdiplus::GraphicsPath path;
+		path.AddArc(rf.X, rf.Y, d, d, 180.0f, 90.0f);
+		path.AddArc(rf.GetRight() - d, rf.Y, d, d, 270.0f, 90.0f);
+		path.AddArc(rf.GetRight() - d, rf.GetBottom() - d, d, d, 0.0f, 90.0f);
+		path.AddArc(rf.X, rf.GetBottom() - d, d, d, 90.0f, 90.0f);
+		path.CloseFigure();
+		Gdiplus::SolidBrush brush(Gdiplus::Color(255, 232, 17, 35));
+		graphics.FillPath(&brush, &path);
 	}
 
-	// 绘制 × 符号
-	CPen pen;
-	pen.CreatePen(PS_SOLID, 2, isHovered ? RGB(255, 255, 255) :
-		(GetRValue(m_normalColor) < 100 ? RGB(190, 198, 205) : RGB(100, 100, 100)));
-	CPen* pOldPen = pDC->SelectObject(&pen);
-
-	int margin = rect.Width() <= 10 ? 2 : 4;
-	pDC->MoveTo(rect.left + margin, rect.top + margin);
-	pDC->LineTo(rect.right - margin, rect.bottom - margin);
-	pDC->MoveTo(rect.right - margin, rect.top + margin);
-	pDC->LineTo(rect.left + margin, rect.bottom - margin);
-
-	pDC->SelectObject(pOldPen);
-	// 让CPen析构函数自动清理
+	// 绘制抗锯齿 × 符号
+	Gdiplus::Graphics graphics(pDC->GetSafeHdc());
+	graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+	const COLORREF lineColor = isHovered ? RGB(255, 255, 255) :
+		(GetRValue(m_normalColor) < 100 ? RGB(190, 198, 205) : RGB(96, 106, 118));
+	Gdiplus::Pen pen(Gdiplus::Color(255,
+		GetRValue(lineColor), GetGValue(lineColor), GetBValue(lineColor)), 1.6f);
+	const Gdiplus::REAL margin = rect.Width() <= 16 ? 4.5f : 5.0f;
+	graphics.DrawLine(&pen,
+		static_cast<Gdiplus::REAL>(rect.left) + margin,
+		static_cast<Gdiplus::REAL>(rect.top) + margin,
+		static_cast<Gdiplus::REAL>(rect.right) - margin,
+		static_cast<Gdiplus::REAL>(rect.bottom) - margin);
+	graphics.DrawLine(&pen,
+		static_cast<Gdiplus::REAL>(rect.right) - margin,
+		static_cast<Gdiplus::REAL>(rect.top) + margin,
+		static_cast<Gdiplus::REAL>(rect.left) + margin,
+		static_cast<Gdiplus::REAL>(rect.bottom) - margin);
 }
 
 CRect CModernTabCtrl::GetCloseButtonRect(int index)
 {
 	CRect tabRect = GetTabRect(index);
-	if (tabRect.Width() < 124)
-	{
-		const int top = tabRect.top + (tabRect.Height() - 10) / 2;
-		return CRect(tabRect.right - 14, top, tabRect.right - 4, top + 10);
-	}
-
-	// 关闭按钮位于标签右侧
-	CRect closeRect;
-	closeRect.left = tabRect.right - 22;
-	closeRect.right = tabRect.right - 6;
-	closeRect.top = tabRect.top + (tabRect.Height() - 16) / 2;
-	closeRect.bottom = closeRect.top + 16;
-
-	return closeRect;
+	const bool compact = tabRect.Width() < 145;
+	const int btnSize = compact ? 16 : 18;
+	const int contentTop = tabRect.top + 3;
+	const int contentHeight = max(btnSize, tabRect.Height() - 3);
+	const int top = contentTop + (contentHeight - btnSize) / 2;
+	const int rightMargin = compact ? 7 : 9;
+	return CRect(tabRect.right - rightMargin - btnSize, top,
+		tabRect.right - rightMargin, top + btnSize);
 }
 
 BOOL CModernTabCtrl::IsCloseButtonVisible(int index)
 {
 	return m_bCloseButtonEnabled && (index == GetCurSel() || index == m_hoverIndex);
+}
+
+int CModernTabCtrl::CalculateTabWidth(int availableWidth, int tabCount) const
+{
+	if (tabCount <= 0)
+		return MAX_TAB_WIDTH;
+	int tabWidth = availableWidth / tabCount;
+	if (tabWidth > MAX_TAB_WIDTH)
+		tabWidth = MAX_TAB_WIDTH;
+	if (tabWidth < MIN_TAB_WIDTH)
+		tabWidth = MIN_TAB_WIDTH;
+	return tabWidth;
 }
 
 int CModernTabCtrl::GetMaxScrollOffset() const
@@ -363,8 +432,8 @@ int CModernTabCtrl::GetMaxScrollOffset() const
 	if (availableWidth <= 0)
 		return 0;
 
-	const int minTabWidth = 60;
-	const int totalWidth = tabCount * minTabWidth;
+	const int tabWidth = CalculateTabWidth(availableWidth, tabCount);
+	const int totalWidth = tabCount * tabWidth;
 	return max(0, totalWidth - availableWidth);
 }
 
@@ -392,14 +461,7 @@ void CModernTabCtrl::EnsureTabVisible(int index)
 	if (availableWidth <= 0)
 		return;
 
-	const int maxTabWidth = 220;
-	const int minTabWidth = 60;
-	int tabWidth = availableWidth / tabCount;
-	if (tabWidth > maxTabWidth)
-		tabWidth = maxTabWidth;
-	if (tabWidth < minTabWidth)
-		tabWidth = minTabWidth;
-
+	const int tabWidth = CalculateTabWidth(availableWidth, tabCount);
 	const int tabLeft = index * tabWidth;
 	const int tabRight = tabLeft + tabWidth;
 	if (tabLeft < m_scrollOffset)
@@ -429,16 +491,7 @@ CRect CModernTabCtrl::GetTabRect(int index)
 
 	CRect clientRect;
 	GetClientRect(&clientRect);
-	int availableWidth = clientRect.Width();
-
-	const int maxTabWidth = 220;
-	const int minTabWidth = 60;
-
-	int tabWidth = availableWidth / tabCount;
-	if (tabWidth > maxTabWidth)
-		tabWidth = maxTabWidth;
-	if (tabWidth < minTabWidth)
-		tabWidth = minTabWidth;
+	const int tabWidth = CalculateTabWidth(clientRect.Width(), tabCount);
 
 	CRect rect;
 	rect.left = index * tabWidth - m_scrollOffset;
@@ -497,7 +550,7 @@ void CModernTabCtrl::OnMouseMove(UINT nFlags, CPoint point)
 					m_tabDragStartWindow.OffsetRect(
 						cursor.x - m_tabDragStartWindow.left -
 						static_cast<int>(xRatio * m_tabDragStartWindow.Width()),
-						cursor.y - m_tabDragStartWindow.top - 21);
+						cursor.y - m_tabDragStartWindow.top - m_tabHeight / 2);
 					m_tabDragStartScreen = cursor;
 				}
 				pParent->SetWindowPos(nullptr,
