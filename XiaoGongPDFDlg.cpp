@@ -705,14 +705,7 @@ void CXiaoGongPDFDlg::SetControlsVisible(bool visible)
 	{
 		CRect clientRect;
 		GetClientRect(&clientRect);
-		const bool showSecondary = clientRect.Width() >= 850;
-		m_btnPrint.ShowWindow(showSecondary ? SW_SHOW : SW_HIDE);
-		m_btnFirst.ShowWindow(showSecondary ? SW_SHOW : SW_HIDE);
-		m_btnLast.ShowWindow(showSecondary ? SW_SHOW : SW_HIDE);
-		for (int i = showSecondary ? 10 : 8; i < 10; ++i)
-			m_toolbarDividers[i].ShowWindow(SW_HIDE);
-		m_btnFitWidth.ShowWindow(SW_HIDE);
-		m_btnRotateLeft.ShowWindow(SW_HIDE);
+		layoutToolbar(clientRect.Width());
 		m_editSearch.ShowWindow(m_searchToolsVisible ? SW_SHOW : SW_HIDE);
 		m_searchPopup.ShowWindow(m_searchToolsVisible ? SW_SHOW : SW_HIDE);
 		m_searchMatchCount.ShowWindow(m_searchToolsVisible ? SW_SHOW : SW_HIDE);
@@ -1102,7 +1095,7 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 
 	// 标签栏承担标题区，保留系统窗口的缩放边框。
 	// SS_WHITERECT ignores WM_CTLCOLORSTATIC and always paints the toolbar white.
-	m_toolbar.ModifyStyle(SS_TYPEMASK, SS_LEFT, SWP_FRAMECHANGED);
+	m_toolbar.ModifyStyle(SS_TYPEMASK, SS_LEFT | WS_CLIPSIBLINGS, SWP_FRAMECHANGED);
 	ModifyStyle(0, WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN);
 	ModifyStyle(WS_CAPTION, 0, SWP_FRAMECHANGED);
 
@@ -1187,26 +1180,26 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	// MuPDF context 由每个 CPDFDocument 自己持有，主对话框只引用当前活动文档。
 
 	// 初始化工具栏
-	m_btnOpen.Create(_T("打开"), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+	m_btnOpen.Create(_T("打开"), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP | BS_OWNERDRAW,
 		CRect(0, 0, 72, 34), this, IDC_BTN_OPEN);
-	m_btnZoomOut.Create(_T("-"), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+	m_btnZoomOut.Create(_T("-"), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW,
 		CRect(0, 0, 34, 34), this, IDC_BTN_ZOOM_OUT);
-	m_btnFitWidth.Create(_T("适合宽度"), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+	m_btnFitWidth.Create(_T("适合宽度"), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW,
 		CRect(0, 0, 76, 34), this, IDC_BTN_FIT_WIDTH);
-	m_btnFitPage.Create(_T("适合页面"), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+	m_btnFitPage.Create(_T("适合页面"), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW,
 		CRect(0, 0, 76, 34), this, IDC_BTN_FIT_PAGE);
-	m_btnZoomIn.Create(_T("+"), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+	m_btnZoomIn.Create(_T("+"), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW,
 		CRect(0, 0, 34, 34), this, IDC_BTN_ZOOM_IN);
-	m_btnPrevPage.Create(_T("上一页"), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+	m_btnPrevPage.Create(_T("上一页"), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW,
 		CRect(0, 0, 34, 34), this, IDC_BTN_PREV);
-	m_btnNextPage.Create(_T("下一页"), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+	m_btnNextPage.Create(_T("下一页"), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW,
 		CRect(0, 0, 34, 34), this, IDC_BTN_NEXT);
-	m_btnPrint.Create(_T("打印"), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+	m_btnPrint.Create(_T("打印"), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW,
 		CRect(0, 0, 34, 34), this, IDC_BTN_PRINT);
 	for (auto& divider : m_toolbarDividers)
-		divider.Create(_T(""), WS_CHILD | WS_VISIBLE | SS_ETCHEDVERT,
+		divider.Create(_T(""), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_ETCHEDVERT,
 			CRect(0, 0, 2, 24), this);
-	m_btnMore.Create(_T("更多"), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+	m_btnMore.Create(_T("更多"), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW,
 		CRect(0, 0, 34, 34), this, IDC_BTN_MORE);
 	m_btnMinimize.Create(_T("最小化"), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
 		CRect(0, 0, 46, TITLE_BAR_HEIGHT), this, IDC_BTN_MINIMIZE);
@@ -1379,6 +1372,11 @@ BOOL CXiaoGongPDFDlg::OnEraseBkgnd(CDC* pDC)
 	pDC->FillRect(&rect, &brush);
 	pDC->FillSolidRect(0, 0, rect.Width(), TITLE_BAR_HEIGHT,
 		m_readingMode == READING_NIGHT ? RGB(36, 39, 43) : RGB(230, 238, 253));
+	if (!m_isFullscreen)
+	{
+		pDC->FillSolidRect(0, TITLE_BAR_HEIGHT, rect.Width(), 52,
+			m_readingMode == READING_NIGHT ? RGB(39, 43, 47) : RGB(255, 255, 255));
+	}
 
 	return TRUE;  // 返回TRUE表示我们已经处理了背景擦除
 }
@@ -1548,6 +1546,331 @@ void CXiaoGongPDFDlg::PerformResizeRender()
 	UpdateZoomStatus();
 }
 
+void CXiaoGongPDFDlg::layoutToolbar(int cx)
+{
+	if (!m_toolbar.GetSafeHwnd() || !m_btnOpen.GetSafeHwnd() || cx <= 0)
+		return;
+
+	const int TOOLBAR_HEIGHT = 52;
+	const int TAB_HEIGHT = TITLE_BAR_HEIGHT;
+	const int BTN_HEIGHT = 34;
+	const int btnY = TAB_HEIGHT + (TOOLBAR_HEIGHT - BTN_HEIGHT) / 2;
+
+	m_toolbar.MoveWindow(0, TAB_HEIGHT, cx, TOOLBAR_HEIGHT);
+
+	// 测量字体度量与总页数文本宽度，动态适配多位数页码并使输入框内数字垂直居中
+	int textHeight = 20;
+	int digitSampleWidth = 18;
+	int totalTextWidth = 28;
+	{
+		CClientDC dc(this);
+		CFont* pOldFont = m_buttonFont.GetSafeHandle() ? dc.SelectObject(&m_buttonFont) : nullptr;
+
+		TEXTMETRIC tm = {};
+		if (dc.GetTextMetrics(&tm) && tm.tmHeight > 0)
+			textHeight = tm.tmHeight;
+
+		int maxPages = max(1, m_totalPages);
+		int digits = 0;
+		while (maxPages > 0)
+		{
+			++digits;
+			maxPages /= 10;
+		}
+		CString sampleDigits(_T('8'), max(2, digits));
+		digitSampleWidth = dc.GetTextExtent(sampleDigits).cx;
+
+		CString totalText;
+		m_pageTotal.GetWindowText(totalText);
+		if (totalText.IsEmpty())
+			totalText = _T("/ 0");
+		totalTextWidth = dc.GetTextExtent(totalText).cx;
+
+		if (pOldFont)
+			dc.SelectObject(pOldFont);
+	}
+
+	const DWORD editExStyle = m_editCurrent.GetSafeHwnd() ? m_editCurrent.GetExStyle() : 0;
+	const int borderX = (editExStyle & WS_EX_CLIENTEDGE) ?
+		2 * GetSystemMetrics(SM_CXEDGE) : 2 * GetSystemMetrics(SM_CXBORDER);
+	const int borderY = (editExStyle & WS_EX_CLIENTEDGE) ?
+		2 * GetSystemMetrics(SM_CYEDGE) : 2 * GetSystemMetrics(SM_CYBORDER);
+	const int editHeight = min(BTN_HEIGHT, max(24, textHeight + borderY + 2));
+	const int editY = btnY + (BTN_HEIGHT - editHeight) / 2;
+
+	// 先评估标准尺寸下左右两侧是否能完整容纳全部按钮；若不能则切换为紧凑尺寸并按优先级隐藏
+	const int normPageWidth = max(42, digitSampleWidth + borderX + 12);
+	const int normTotalWidth = max(40, totalTextWidth + 8);
+	const int normInnerGap = 6;
+	const int normCenterWidth = 2 * 34 + 2 * 5 + normPageWidth + normInnerGap + normTotalWidth;
+	const int normCenterLeft = (cx - normCenterWidth) / 2;
+	const int normCenterRight = normCenterLeft + normCenterWidth;
+	const int normLeftBudget = normCenterLeft - 16 - 16;
+	const int normRightBudget = (cx - 16) - (normCenterRight + 16);
+	const int normFullLeftWidth = 3 * 82 + 2 * 14;
+	const int normFullRightWidth = (34 + 5 + 34 + 5 + 68) + 14 + 34 + 14 + 34 + 14 + 34 +
+		14 + (34 + 5 + 34) + 14 + 34 + 14 + 76;
+	const bool compact = (normLeftBudget < normFullLeftWidth || normRightBudget < normFullRightWidth);
+
+	const int sideMargin = compact ? 12 : 16;
+	const int minCenterGap = compact ? 12 : 16;
+	const int iconWidth = compact ? 30 : 34;
+	const int gap = compact ? 4 : 5;
+	const int actionTextWidth = compact ? 72 : 82;
+	const int fitWidth = compact ? 58 : 68;
+	const int moreTextWidth = compact ? 68 : 76;
+	const int pageWidth = compact ? max(38, digitSampleWidth + borderX + 10) : normPageWidth;
+	const int totalWidth = compact ? max(36, totalTextWidth + 6) : normTotalWidth;
+	const int innerPageGap = compact ? 4 : normInnerGap;
+
+	int groupGap = compact ? 8 : 14;
+	if (!compact && normRightBudget > normFullRightWidth)
+	{
+		groupGap = min(24, 14 + (normRightBudget - normFullRightWidth) / 12);
+	}
+
+	// 1. 中央区域：页码及总页码组永远相对工具栏水平与垂直居中绘制
+	const int centerWidth = 2 * iconWidth + 2 * gap + pageWidth + innerPageGap + totalWidth;
+	const int centerLeft = max(4, (cx - centerWidth) / 2);
+	const int centerRight = centerLeft + centerWidth;
+
+	const bool showCenter = (cx >= centerWidth + 8);
+	m_btnPrevPage.ShowWindow(showCenter ? SW_SHOW : SW_HIDE);
+	m_editCurrent.ShowWindow(showCenter ? SW_SHOW : SW_HIDE);
+	m_pageTotal.ShowWindow(showCenter ? SW_SHOW : SW_HIDE);
+	m_btnNextPage.ShowWindow(showCenter ? SW_SHOW : SW_HIDE);
+	if (showCenter)
+	{
+		int cxPos = centerLeft;
+		m_btnPrevPage.MoveWindow(cxPos, btnY, iconWidth, BTN_HEIGHT);
+		cxPos += iconWidth + gap;
+		m_editCurrent.MoveWindow(cxPos, editY, pageWidth, editHeight);
+		cxPos += pageWidth + innerPageGap;
+		m_pageTotal.MoveWindow(cxPos, btnY, totalWidth, BTN_HEIGHT);
+		cxPos += totalWidth + gap;
+		m_btnNextPage.MoveWindow(cxPos, btnY, iconWidth, BTN_HEIGHT);
+	}
+
+	const int leftBudget = max(0, centerLeft - sideMargin - minCenterGap);
+	const int rightBudget = max(0, (cx - sideMargin) - (centerRight + minCenterGap));
+
+	int dividerIndex = 0;
+	auto placeDivider = [&](int divX)
+	{
+		if (dividerIndex < static_cast<int>(_countof(m_toolbarDividers)))
+		{
+			m_toolbarDividers[dividerIndex].MoveWindow(
+				divX + (groupGap - 2) / 2, btnY + 5, 2, 24);
+			m_toolbarDividers[dividerIndex].ShowWindow(SW_SHOW);
+			++dividerIndex;
+		}
+	};
+
+	// 2. 左侧区域（打开 | 目录 | 查找）：左对齐，空间压缩时先缩为纯图标再逐个隐藏
+	bool showOpen = true;
+	bool showOutline = true;
+	bool showFind = true;
+	bool leftIconAndText = true;
+	auto calcLeftWidth = [&]() -> int
+	{
+		const int count = (showOpen ? 1 : 0) + (showOutline ? 1 : 0) + (showFind ? 1 : 0);
+		if (count == 0)
+			return 0;
+		const int btnW = leftIconAndText ? actionTextWidth : iconWidth;
+		return count * btnW + (count - 1) * groupGap;
+	};
+	if (calcLeftWidth() > leftBudget)
+		leftIconAndText = false;
+	if (calcLeftWidth() > leftBudget)
+		showFind = false;
+	if (calcLeftWidth() > leftBudget)
+		showOutline = false;
+	if (calcLeftWidth() > leftBudget)
+		showOpen = false;
+
+	m_btnOpen.SetIconAndText(leftIconAndText);
+	m_btnOutline.SetIconAndText(leftIconAndText);
+	m_btnFind.SetIconAndText(leftIconAndText);
+	m_btnOpen.ShowWindow(showOpen ? SW_SHOW : SW_HIDE);
+	m_btnOutline.ShowWindow(showOutline ? SW_SHOW : SW_HIDE);
+	m_btnFind.ShowWindow(showFind ? SW_SHOW : SW_HIDE);
+
+	const int leftBtnWidth = leftIconAndText ? actionTextWidth : iconWidth;
+	int leftX = sideMargin;
+	bool placedLeftGroup = false;
+	auto placeLeftBtn = [&](CCustomButton& btn, bool visible)
+	{
+		if (!visible)
+			return;
+		if (placedLeftGroup)
+		{
+			placeDivider(leftX);
+			leftX += groupGap;
+		}
+		btn.MoveWindow(leftX, btnY, leftBtnWidth, BTN_HEIGHT);
+		leftX += leftBtnWidth;
+		placedLeftGroup = true;
+	};
+	placeLeftBtn(m_btnOpen, showOpen);
+	placeLeftBtn(m_btnOutline, showOutline);
+	placeLeftBtn(m_btnFind, showFind);
+
+	// 3. 右侧区域（缩放 | 打印 | 右旋 | 编辑 | 首末页 | 全屏 | 更多）：右对齐，压缩时按优先级隐藏
+	bool showZoomStep = true;
+	bool showFitPage = true;
+	bool showPrint = true;
+	bool showRotate = true;
+	bool showEdit = true;
+	bool showFirstLast = true;
+	bool showFullscreen = true;
+	bool showMore = true;
+	bool moreIconAndText = true;
+
+	auto calcRightWidth = [&]() -> int
+	{
+		int total = 0;
+		int groups = 0;
+		auto addGroup = [&](int w)
+		{
+			if (w <= 0)
+				return;
+			if (groups > 0)
+				total += groupGap;
+			total += w;
+			++groups;
+		};
+
+		int zoomW = 0;
+		if (showZoomStep)
+			zoomW += 2 * iconWidth + gap;
+		if (showFitPage)
+			zoomW += (zoomW > 0 ? gap : 0) + fitWidth;
+		addGroup(zoomW);
+
+		if (showPrint)
+			addGroup(iconWidth);
+		if (showRotate)
+			addGroup(iconWidth);
+		if (showEdit)
+			addGroup(iconWidth);
+		if (showFirstLast)
+			addGroup(2 * iconWidth + gap);
+		if (showFullscreen)
+			addGroup(iconWidth);
+		if (showMore)
+			addGroup(moreIconAndText ? moreTextWidth : iconWidth);
+
+		return total;
+	};
+
+	if (calcRightWidth() > rightBudget)
+		showFirstLast = false;
+	if (calcRightWidth() > rightBudget)
+		showPrint = false;
+	if (calcRightWidth() > rightBudget)
+		showEdit = false;
+	if (calcRightWidth() > rightBudget)
+		showFullscreen = false;
+	if (calcRightWidth() > rightBudget)
+		showRotate = false;
+	if (calcRightWidth() > rightBudget)
+		moreIconAndText = false;
+	if (calcRightWidth() > rightBudget)
+		showFitPage = false;
+	if (calcRightWidth() > rightBudget)
+		showZoomStep = false;
+	if (calcRightWidth() > rightBudget)
+		showMore = false;
+
+	m_btnMore.SetIconAndText(moreIconAndText);
+	m_btnZoomOut.ShowWindow(showZoomStep ? SW_SHOW : SW_HIDE);
+	m_btnZoomIn.ShowWindow(showZoomStep ? SW_SHOW : SW_HIDE);
+	m_btnFitPage.ShowWindow(showFitPage ? SW_SHOW : SW_HIDE);
+	m_btnPrint.ShowWindow(showPrint ? SW_SHOW : SW_HIDE);
+	m_btnRotateRight.ShowWindow(showRotate ? SW_SHOW : SW_HIDE);
+	m_btnEdit.ShowWindow(showEdit ? SW_SHOW : SW_HIDE);
+	m_btnFirst.ShowWindow(showFirstLast ? SW_SHOW : SW_HIDE);
+	m_btnLast.ShowWindow(showFirstLast ? SW_SHOW : SW_HIDE);
+	m_btnFullscreen.ShowWindow(showFullscreen ? SW_SHOW : SW_HIDE);
+	m_btnMore.ShowWindow(showMore ? SW_SHOW : SW_HIDE);
+	m_btnFitWidth.ShowWindow(SW_HIDE);
+	m_btnRotateLeft.ShowWindow(SW_HIDE);
+
+	const int rightWidth = calcRightWidth();
+	int rightX = max(centerRight + minCenterGap, cx - sideMargin - rightWidth);
+	bool placedRightGroup = false;
+	auto beginRightGroup = [&]()
+	{
+		if (placedRightGroup)
+		{
+			placeDivider(rightX);
+			rightX += groupGap;
+		}
+		placedRightGroup = true;
+	};
+
+	if (showZoomStep || showFitPage)
+	{
+		beginRightGroup();
+		if (showZoomStep)
+		{
+			m_btnZoomOut.MoveWindow(rightX, btnY, iconWidth, BTN_HEIGHT);
+			rightX += iconWidth + gap;
+			m_btnZoomIn.MoveWindow(rightX, btnY, iconWidth, BTN_HEIGHT);
+			rightX += iconWidth;
+			if (showFitPage)
+				rightX += gap;
+		}
+		if (showFitPage)
+		{
+			m_btnFitPage.MoveWindow(rightX, btnY, fitWidth, BTN_HEIGHT);
+			rightX += fitWidth;
+		}
+	}
+	if (showPrint)
+	{
+		beginRightGroup();
+		m_btnPrint.MoveWindow(rightX, btnY, iconWidth, BTN_HEIGHT);
+		rightX += iconWidth;
+	}
+	if (showRotate)
+	{
+		beginRightGroup();
+		m_btnRotateRight.MoveWindow(rightX, btnY, iconWidth, BTN_HEIGHT);
+		rightX += iconWidth;
+	}
+	if (showEdit)
+	{
+		beginRightGroup();
+		m_btnEdit.MoveWindow(rightX, btnY, iconWidth, BTN_HEIGHT);
+		rightX += iconWidth;
+	}
+	if (showFirstLast)
+	{
+		beginRightGroup();
+		m_btnFirst.MoveWindow(rightX, btnY, iconWidth, BTN_HEIGHT);
+		rightX += iconWidth + gap;
+		m_btnLast.MoveWindow(rightX, btnY, iconWidth, BTN_HEIGHT);
+		rightX += iconWidth;
+	}
+	if (showFullscreen)
+	{
+		beginRightGroup();
+		m_btnFullscreen.MoveWindow(rightX, btnY, iconWidth, BTN_HEIGHT);
+		rightX += iconWidth;
+	}
+	if (showMore)
+	{
+		beginRightGroup();
+		const int moreW = moreIconAndText ? moreTextWidth : iconWidth;
+		m_btnMore.MoveWindow(rightX, btnY, moreW, BTN_HEIGHT);
+		rightX += moreW;
+	}
+
+	for (; dividerIndex < static_cast<int>(_countof(m_toolbarDividers)); ++dividerIndex)
+		m_toolbarDividers[dividerIndex].ShowWindow(SW_HIDE);
+}
+
 void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 {
 	CDialogEx::OnSize(nType, cx, cy);
@@ -1569,11 +1892,6 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		const int TOOLBAR_HEIGHT = 52;
 		const int TAB_HEIGHT = TITLE_BAR_HEIGHT;
 		const int BTN_HEIGHT = 34;
-		const bool compactToolbar = cx < 1100;
-		const int ICON_WIDTH = compactToolbar ? 29 : 34;
-		const int GAP = compactToolbar ? 3 : 5;
-		const int GROUP_GAP = compactToolbar ? 7 : min(50, max(12, (cx - 1100) / 10));
-		const int btnY = TAB_HEIGHT + (TOOLBAR_HEIGHT - BTN_HEIGHT) / 2;
 
 		if (m_tabCtrl.GetSafeHwnd())
 		{
@@ -1586,92 +1904,7 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		m_btnCloseWindow.MoveWindow(cx - 46, 0, 46, TAB_HEIGHT);
 		m_btnMaximize.SetIconGlyph(IsZoomed() ? 0xE923 : 0xE922);
 		m_btnMaximize.SetToolTipText(IsZoomed() ? _T("还原") : _T("最大化"));
-		m_toolbar.MoveWindow(0, TAB_HEIGHT, cx, TOOLBAR_HEIGHT);
-		const int actionWidth = compactToolbar ? 70 : 82;
-		const int fitWidth = compactToolbar ? 56 : 70;
-		const int moreWidth = compactToolbar ? 70 : 76;
-		const int pageWidth = compactToolbar ? 42 : 44;
-		const int totalWidth = compactToolbar ? 47 : 50;
-		const bool showSecondary = cx >= 850;
-		int x = 16;
-		int dividerIndex = 0;
-		auto nextGroup = [&]()
-		{
-			m_toolbarDividers[dividerIndex].MoveWindow(
-				x + (GROUP_GAP - 2) / 2, btnY + 5, 2, 24);
-			m_toolbarDividers[dividerIndex++].ShowWindow(SW_SHOW);
-			x += GROUP_GAP;
-		};
-		m_btnOpen.MoveWindow(x, btnY, actionWidth, BTN_HEIGHT);
-		x += actionWidth;
-		nextGroup();
-		m_btnOutline.MoveWindow(x, btnY, actionWidth, BTN_HEIGHT);
-		x += actionWidth;
-		nextGroup();
-		m_btnFind.MoveWindow(x, btnY, actionWidth, BTN_HEIGHT);
-		x += actionWidth;
-		nextGroup();
-
-		const int pageGroupWidth = 2 * ICON_WIDTH + pageWidth + totalWidth + 3 * GAP;
-		const int zoomGroupWidth = 2 * ICON_WIDTH + fitWidth + 2 * GAP;
-		int rightWidth = pageGroupWidth + GROUP_GAP + zoomGroupWidth;
-		if (showSecondary)
-			rightWidth += GROUP_GAP + ICON_WIDTH;
-		rightWidth += GROUP_GAP + ICON_WIDTH; // rotate
-		rightWidth += GROUP_GAP + ICON_WIDTH; // edit
-		if (showSecondary)
-			rightWidth += GROUP_GAP + 2 * ICON_WIDTH + GAP;
-		rightWidth += GROUP_GAP + ICON_WIDTH; // fullscreen
-		rightWidth += GROUP_GAP + moreWidth;
-		x = max(x, cx - 16 - rightWidth);
-
-		m_btnPrevPage.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
-		x += ICON_WIDTH + GAP;
-		m_editCurrent.MoveWindow(x, btnY, pageWidth, BTN_HEIGHT);
-		x += pageWidth + GAP;
-		m_pageTotal.MoveWindow(x, btnY + 5, totalWidth, BTN_HEIGHT - 10);
-		x += totalWidth + GAP;
-		m_btnNextPage.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
-		x += ICON_WIDTH;
-		nextGroup();
-		m_btnZoomOut.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
-		x += ICON_WIDTH + GAP;
-		m_btnZoomIn.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
-		x += ICON_WIDTH + GAP;
-		m_btnFitPage.MoveWindow(x, btnY, fitWidth, BTN_HEIGHT);
-		x += fitWidth;
-		nextGroup();
-		m_btnPrint.ShowWindow(showSecondary ? SW_SHOW : SW_HIDE);
-		if (showSecondary)
-		{
-			m_btnPrint.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
-			x += ICON_WIDTH;
-			nextGroup();
-		}
-		m_btnRotateRight.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
-		x += ICON_WIDTH;
-		nextGroup();
-		m_btnEdit.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
-		x += ICON_WIDTH;
-		nextGroup();
-		m_btnFirst.ShowWindow(showSecondary ? SW_SHOW : SW_HIDE);
-		m_btnLast.ShowWindow(showSecondary ? SW_SHOW : SW_HIDE);
-		if (showSecondary)
-		{
-			m_btnFirst.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
-			x += ICON_WIDTH + GAP;
-			m_btnLast.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
-			x += ICON_WIDTH;
-			nextGroup();
-		}
-		m_btnFullscreen.MoveWindow(x, btnY, ICON_WIDTH, BTN_HEIGHT);
-		x += ICON_WIDTH;
-		nextGroup();
-		m_btnMore.MoveWindow(x, btnY, moreWidth, BTN_HEIGHT);
-		for (; dividerIndex < 10; ++dividerIndex)
-			m_toolbarDividers[dividerIndex].ShowWindow(SW_HIDE);
-		m_btnFitWidth.ShowWindow(SW_HIDE);
-		m_btnRotateLeft.ShowWindow(SW_HIDE);
+		layoutToolbar(cx);
 
 		// 根据缩略图面板可见性调整布局
 		int pdfX, pdfWidth;
@@ -1778,22 +2011,19 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		// 更新工具栏控件状态 - 仅在文档已加载时更新
 		if (m_doc)
 		{
-			// 更新页码编辑框的显示
-			CString currentPage;
-			currentPage.Format(_T("%d"), m_currentPage + 1);
-			m_editCurrent.SetWindowText(currentPage);
+			// 仅在编辑框未聚焦且文本确实变化时更新页码，避免拖拽缩放时覆盖用户输入或高频抖动
+			if (::GetFocus() != m_editCurrent.GetSafeHwnd())
+			{
+				CString currentPage;
+				currentPage.Format(_T("%d"), m_currentPage + 1);
+				CString existingText;
+				m_editCurrent.GetWindowText(existingText);
+				if (existingText != currentPage)
+					m_editCurrent.SetWindowText(currentPage);
+			}
 
 			// 更新状态栏
 			UpdateStatusBar();
-
-			// 立即重绘按钮和状态栏，确保状态变化可见
-			// ★★★ 使用FALSE参数避免擦除背景，减少高刷新率显示器上的闪烁
-			m_btnFirst.Invalidate(FALSE);
-			m_btnLast.Invalidate(FALSE);
-			m_btnFullscreen.Invalidate(FALSE);
-			m_btnRotateLeft.Invalidate(FALSE);
-			m_btnRotateRight.Invalidate(FALSE);
-			m_editCurrent.Invalidate(FALSE);
 		}
 
 		// 无论是否有文档，都需要重绘状态栏（修复未打开PDF时横向伸缩显示异常）
@@ -1839,8 +2069,8 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		//         不传播到子控件（无 RDW_ALLCHILDREN），避免标准控件白屏。
 		//         这一步确保最大化→还原后新暴露的背景区域被正确填色。
 		RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
-		// 第二步：让所有子控件重绘自身内容，但不触发它们的 ERASEBKGND。
-		RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+		// 第二步：让所有子控件重绘自身内容及非客户区边框（如页码输入框、分隔线），但不触发 ERASEBKGND。
+		RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
 
 		// ★★★ 确保PDF视图也立即重绘（应用居中等布局变化）
 		if (m_doc && m_currentPage >= 0 && !doImmediateResizeRender)
@@ -1934,10 +2164,27 @@ BOOL CXiaoGongPDFDlg::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
 // 工具栏功能实现
 void CXiaoGongPDFDlg::UpdatePageControls()
 {
+	CString prevTotalText;
+	if (m_pageTotal.GetSafeHwnd())
+		m_pageTotal.GetWindowText(prevTotalText);
+
 	if (!m_doc)
 	{
 		m_editCurrent.SetWindowText(_T("0"));
-		m_pageTotal.SetWindowText(_T("/ 0"));
+		const CString emptyTotal(_T("/ 0"));
+		if (prevTotalText != emptyTotal)
+		{
+			m_pageTotal.SetWindowText(emptyTotal);
+			if (!m_isFullscreen && GetSafeHwnd())
+			{
+				CRect clientRect;
+				GetClientRect(&clientRect);
+				layoutToolbar(clientRect.Width());
+				CRect toolbarArea(0, TITLE_BAR_HEIGHT, clientRect.Width(), TITLE_BAR_HEIGHT + 52);
+				RedrawWindow(&toolbarArea, NULL,
+					RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
+			}
+		}
 		return;
 	}
 
@@ -1946,9 +2193,22 @@ void CXiaoGongPDFDlg::UpdatePageControls()
 	currentPage.Format(_T("%d"), m_currentPage + 1);
 	m_editCurrent.SetWindowText(currentPage);
 	m_editCurrent.UpdateWindow();  // 强制立即重绘，确保快速滚动时也能实时显示
+
 	CString totalPages;
 	totalPages.Format(_T("/ %d"), m_totalPages);
-	m_pageTotal.SetWindowText(totalPages);
+	if (prevTotalText != totalPages)
+	{
+		m_pageTotal.SetWindowText(totalPages);
+		if (!m_isFullscreen && GetSafeHwnd())
+		{
+			CRect clientRect;
+			GetClientRect(&clientRect);
+			layoutToolbar(clientRect.Width());
+			CRect toolbarArea(0, TITLE_BAR_HEIGHT, clientRect.Width(), TITLE_BAR_HEIGHT + 52);
+			RedrawWindow(&toolbarArea, NULL,
+				RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
+		}
+	}
 
 	// 更新状态栏
 	UpdateStatusBar();
@@ -2456,7 +2716,9 @@ void CXiaoGongPDFDlg::OnEditCurrentKillFocus()
 
 void CXiaoGongPDFDlg::InitializeToolbar()
 {
-	m_toolbar.ModifyStyle(WS_BORDER, 0, SWP_FRAMECHANGED);
+	m_toolbar.ModifyStyle(WS_BORDER, WS_CLIPSIBLINGS, SWP_FRAMECHANGED);
+	m_toolbar.SetWindowPos(&CWnd::wndBottom, 0, 0, 0, 0,
+		SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 	// 创建工具栏字体。
 	LOGFONT lf;
 	memset(&lf, 0, sizeof(LOGFONT));
@@ -2498,7 +2760,19 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_btnPrevMatch.SetFont(&m_buttonFont);
 	m_btnNextMatch.SetFont(&m_buttonFont);
 
-	// 设置编辑框的字体和外观
+	// 设置编辑框与总页码静态文本的字体、居中对齐及裁剪属性
+	m_editCurrent.ModifyStyle(0, WS_CLIPSIBLINGS | ES_CENTER);
+	m_pageTotal.ModifyStyle(SS_TYPEMASK,
+		WS_CLIPSIBLINGS | SS_CENTER | SS_CENTERIMAGE | SS_NOPREFIX);
+	CWnd* rcToolbarButtons[] = {
+		&m_btnFirst, &m_btnLast, &m_btnFullscreen, &m_btnRotateLeft,
+		&m_btnRotateRight, &m_btnEdit, &m_btnOutline, &m_btnFind
+	};
+	for (CWnd* pBtn : rcToolbarButtons)
+	{
+		if (pBtn->GetSafeHwnd())
+			pBtn->ModifyStyle(0, WS_CLIPSIBLINGS);
+	}
 	m_editCurrent.SetFont(&m_buttonFont);
 	m_pageTotal.SetFont(&m_buttonFont);
 	m_editSearch.SetFont(&m_buttonFont);
@@ -3225,13 +3499,44 @@ void CXiaoGongPDFDlg::OnBtnMore()
 			}
 		}
 	}
-	CRect clientRect;
-	GetClientRect(&clientRect);
-	if (clientRect.Width() < 850)
+	// 窗口压缩时自动隐藏的工具栏功能同步收纳到“更多”菜单中
+	bool hasOverflowItems = false;
+	auto appendOverflowItem = [&](UINT flags, UINT_PTR id, LPCTSTR label)
 	{
-		menu.AppendMenu(MF_STRING | (m_doc ? 0 : MF_GRAYED), IDC_BTN_FIRST, _T("首页"));
-		menu.AppendMenu(MF_STRING | (m_doc ? 0 : MF_GRAYED), IDC_BTN_LAST, _T("末页"));
+		menu.AppendMenu(MF_STRING | flags, id, label);
+		hasOverflowItems = true;
+	};
+	const UINT docFlag = (m_doc && m_totalPages > 0) ? 0 : MF_GRAYED;
+	if (m_btnOpen.GetSafeHwnd() && !m_btnOpen.IsWindowVisible())
+		appendOverflowItem(0, ID_MENU_OPEN, _T("打开"));
+	if (m_btnOutline.GetSafeHwnd() && !m_btnOutline.IsWindowVisible())
+		appendOverflowItem(docFlag | (m_outlineVisible ? MF_CHECKED : 0),
+			IDC_CHECK_THUMBNAIL, _T("目录"));
+	if (m_btnFind.GetSafeHwnd() && !m_btnFind.IsWindowVisible())
+		appendOverflowItem(docFlag, IDC_BTN_FIND, _T("查找"));
+	if (m_btnZoomOut.GetSafeHwnd() && !m_btnZoomOut.IsWindowVisible())
+		appendOverflowItem(docFlag, IDC_BTN_ZOOM_OUT, _T("缩小"));
+	if (m_btnZoomIn.GetSafeHwnd() && !m_btnZoomIn.IsWindowVisible())
+		appendOverflowItem(docFlag, IDC_BTN_ZOOM_IN, _T("放大"));
+	if (m_btnFitPage.GetSafeHwnd() && !m_btnFitPage.IsWindowVisible())
+	{
+		appendOverflowItem(docFlag, IDC_BTN_FIT_PAGE,
+			m_nextFitMode == ZOOM_FIT_PAGE ? _T("适合页面") : _T("适合宽度"));
 	}
+	if (m_btnPrint.GetSafeHwnd() && !m_btnPrint.IsWindowVisible())
+		appendOverflowItem(docFlag, ID_MENU_PRINT, _T("打印"));
+	if (m_btnRotateRight.GetSafeHwnd() && !m_btnRotateRight.IsWindowVisible())
+		appendOverflowItem(docFlag, IDC_BTN_ROTATE_RIGHT, _T("向右旋转"));
+	if (m_btnEdit.GetSafeHwnd() && !m_btnEdit.IsWindowVisible())
+		appendOverflowItem(docFlag, IDC_BTN_EDIT, _T("编辑页面"));
+	if (m_btnFirst.GetSafeHwnd() && !m_btnFirst.IsWindowVisible())
+		appendOverflowItem(docFlag, IDC_BTN_FIRST, _T("首页"));
+	if (m_btnLast.GetSafeHwnd() && !m_btnLast.IsWindowVisible())
+		appendOverflowItem(docFlag, IDC_BTN_LAST, _T("末页"));
+	if (m_btnFullscreen.GetSafeHwnd() && !m_btnFullscreen.IsWindowVisible())
+		appendOverflowItem(0, IDC_BTN_FULLSCREEN, _T("全屏"));
+	if (hasOverflowItems)
+		menu.AppendMenu(MF_SEPARATOR);
 	menu.AppendMenu(MF_STRING, ID_MENU_SHORTCUTS, _T("快捷键"));
 	CMenu readingMenu;
 	if (readingMenu.CreatePopupMenu())

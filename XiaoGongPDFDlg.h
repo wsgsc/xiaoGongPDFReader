@@ -22,7 +22,7 @@
 #include "ShortcutsDialog.h"
 
 // 应用程序最小尺寸常量
-#define APP_MINWIDTH 800
+#define APP_MINWIDTH 600
 #define APP_MINHEIGHT 600
 
 // 最近文件数量（需要与资源文件中的菜单项数量保持一致）
@@ -307,6 +307,7 @@ protected:
 
 	// 工具栏相关函数
 	void InitializeToolbar();
+	void layoutToolbar(int cx);
 	void ApplyReadingMode(ReadingMode mode);
 	void UpdateOutlineButtonColors();
 	COLORREF ViewBgColor() const { return m_readingMode == READING_NIGHT ? DARK_VIEW_BACKGROUND : PDF_VIEW_BACKGROUND; }

@@ -37,6 +37,7 @@ BEGIN_MESSAGE_MAP(CCustomButton, CButton)
 	ON_WM_MOUSEMOVE()
 	ON_WM_MOUSELEAVE()
 	ON_WM_ENABLE()
+	ON_WM_SHOWWINDOW()
 	ON_WM_CANCELMODE()
 	ON_WM_ERASEBKGND()
 END_MESSAGE_MAP()
@@ -78,6 +79,8 @@ void CCustomButton::SetIconGlyph(WCHAR glyph)
 
 void CCustomButton::SetIconAndText(bool enabled)
 {
+	if (m_iconAndText == enabled)
+		return;
 	m_iconAndText = enabled;
 	if (GetSafeHwnd())
 		Invalidate(FALSE);
@@ -450,6 +453,16 @@ void CCustomButton::OnEnable(BOOL bEnable)
 		Invalidate(FALSE);
 	}
 	CButton::OnEnable(bEnable);
+}
+
+void CCustomButton::OnShowWindow(BOOL bShow, UINT nStatus)
+{
+	if (!bShow && (m_bHover || m_bTracking))
+	{
+		m_bHover = FALSE;
+		m_bTracking = FALSE;
+	}
+	CButton::OnShowWindow(bShow, nStatus);
 }
 
 void CCustomButton::OnCancelMode()
