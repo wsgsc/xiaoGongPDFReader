@@ -15,7 +15,6 @@
 #define IDR_ROTATE_RIGHT_PNG            134
 #define IDR_WELCOME_PNG                 135
 #define IDR_TITLE_ICON                  136
-#define IDC_LIST2                       1001
 #define IDC_THUMBNAIL_LIST              1001
 #define IDC_PDF_VIEW                    1002
 #define IDC_OPEN_FILE                   1003
@@ -49,7 +48,6 @@
 #define IDC_BTN_NEXT_MATCH              1043
 #define IDC_CHECK_CASE_SENSITIVE        1044
 #define IDC_BTN_EDIT                    1045
-#define IDC_BTN_SELECT_TEXT             1057
 #define IDC_EDIT_FILE_PATH              1058
 #define IDC_PAGE_TOTAL                  1059
 #define IDC_BTN_OPEN                    1060
@@ -109,8 +107,6 @@
 #define ID_MENU_READING_NORMAL          32792
 #define ID_MENU_READING_NIGHT           32793
 #define ID_MENU_READING_EYE             32794
-#define ID_MENU_VIEW_CONTINUOUS         32795
-#define ID_MENU_VIEW_SINGLE_PAGE        32796
 
 #define WM_PDF_LOAD_COMPLETE   (WM_USER + 104)
 #define WM_PDF_LOAD_CANCELLED  (WM_USER + 105)

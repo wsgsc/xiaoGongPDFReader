@@ -36,6 +36,9 @@
     <ClInclude Include="CustomButton.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="CustomPrintDlg.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="ModernTabCtrl.h">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -51,7 +54,19 @@
     <ClInclude Include="PDFEditDialog.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="PDFScrollBar.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="PDFSearch.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="PDFViewCtrl.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="ProgressDlg.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="SearchTypes.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>
@@ -68,6 +83,9 @@
     <ClCompile Include="CustomButton.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="CustomPrintDlg.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="ModernTabCtrl.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -81,6 +99,15 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="PDFEditDialog.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="PDFScrollBar.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="PDFSearch.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="PDFViewCtrl.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="ProgressDlg.cpp">

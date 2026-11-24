@@ -1,7 +1,7 @@
 ﻿#include "pch.h"
+#include <cstring>
 #include <mupdf/pdf.h>
 #include "PDFDocument.h"
-#include <cstring>
 
 namespace
 {
@@ -60,25 +60,20 @@ const fz_locks_context* GetMuPDFLocksContext()
 CPDFDocument::CPDFDocument()
 	: m_ctx(nullptr)
 	, m_doc(nullptr)
-	, m_currentPageObj(nullptr)
 	, m_totalPages(0)
 	, m_currentPage(0)
 	, m_zoom(1.0f)
 	, m_zoomMode(ZOOM_CUSTOM)
 	, m_customZoom(1.0f)
 	, m_uniformScale(0.0f)
-	, m_panOffset(0, 0)
-	, m_canDrag(false)
-	, m_hPanPageBitmap(NULL)
-	, m_thumbnailPicWidth(0)
-	, m_thumbnailPicHeight(0)
-	, m_hCurrentBitmap(NULL)
-	, m_currentMatchIndex(-1)
-	, m_scrollPosition(0)
 	, m_pageBoundsCached(false)
 	, m_maxPageWidth(0.0f)
+	, m_panOffset(0, 0)
+	, m_canDrag(false)
+	, m_currentMatchIndex(-1)
+	, m_scrollPosition(0)
 {
-	m_lastWriteTime = {0, 0};
+	m_lastWriteTime = { 0, 0 };
 	m_ctx = fz_new_context(nullptr, GetMuPDFLocksContext(), MUPDF_STORE_LIMIT);
 	if (m_ctx)
 	{
@@ -174,10 +169,6 @@ PDFOpenResult CPDFDocument::OpenDocument(const char* filename, const char* passw
 
 void CPDFDocument::CloseDocument()
 {
-	CleanupCurrentPage();
-	CleanupBitmap();
-	CleanupPanPageBitmap();
-	CleanupThumbnails();
 	ClearPageCache();
 	ClearDisplayLists();
 
@@ -188,7 +179,7 @@ void CPDFDocument::CloseDocument()
 	m_doc = nullptr;
 
 	m_filePath.Empty();
-	m_lastWriteTime = {0, 0};
+	m_lastWriteTime = { 0, 0 };
 	if (!m_password.empty())
 	{
 		SecureZeroMemory(m_password.data(), m_password.size());
@@ -240,34 +231,6 @@ void CPDFDocument::SetCurrentPage(int page)
 	if (page >= 0 && page < m_totalPages)
 	{
 		m_currentPage = page;
-	}
-}
-
-void CPDFDocument::LoadPageObject(int pageNumber)
-{
-	if (!m_doc || !m_ctx)
-	{
-		return;
-	}
-
-	CleanupCurrentPage();
-
-	fz_try(m_ctx)
-	{
-		m_currentPageObj = fz_load_page(m_ctx, m_doc, pageNumber);
-	}
-	fz_catch(m_ctx)
-	{
-		m_currentPageObj = nullptr;
-	}
-}
-
-void CPDFDocument::CleanupCurrentPage()
-{
-	if (m_currentPageObj && m_ctx)
-	{
-		fz_drop_page(m_ctx, m_currentPageObj);
-		m_currentPageObj = nullptr;
 	}
 }
 
@@ -419,44 +382,6 @@ PageZoomState CPDFDocument::GetPageZoomState(int pageNumber)
 	return PageZoomState();
 }
 
-void CPDFDocument::CleanupThumbnails()
-{
-	for (auto& pair : m_thumbnailCache)
-	{
-		if (pair.second.hBitmap)
-		{
-			DeleteObject(pair.second.hBitmap);
-		}
-	}
-	m_thumbnailCache.clear();
-	m_thumbnailCacheOrder.clear();
-}
-
-void CPDFDocument::LimitThumbnailCache(int maxCount)
-{
-	while ((int)m_thumbnailCache.size() > maxCount && !m_thumbnailCacheOrder.empty())
-	{
-		int oldestPage = m_thumbnailCacheOrder.back();
-		m_thumbnailCacheOrder.pop_back();
-
-		auto it = m_thumbnailCache.find(oldestPage);
-		if (it != m_thumbnailCache.end())
-		{
-			if (it->second.hBitmap)
-			{
-				DeleteObject(it->second.hBitmap);
-			}
-			m_thumbnailCache.erase(it);
-		}
-	}
-}
-
-void CPDFDocument::UpdateThumbnailLRU(int pageNumber)
-{
-	m_thumbnailCacheOrder.remove(pageNumber);
-	m_thumbnailCacheOrder.push_front(pageNumber);
-}
-
 void CPDFDocument::ClearPageCache()
 {
 	for (auto& pair : m_pageCache)
@@ -525,51 +450,6 @@ void CPDFDocument::ClearDisplayLists()
 	}
 	m_displayLists.clear();
 	m_displayListOrder.clear();
-}
-
-void CPDFDocument::SetCurrentBitmap(HBITMAP hBitmap)
-{
-	CleanupBitmap();
-	m_hCurrentBitmap = hBitmap;
-}
-
-void CPDFDocument::CleanupBitmap()
-{
-	if (m_hCurrentBitmap)
-	{
-		// 无条件删除：用 GetObject 做前置校验只会在校验失败时丢掉句柄并泄漏。
-		DeleteObject(m_hCurrentBitmap);
-		m_hCurrentBitmap = NULL;
-	}
-}
-
-HBITMAP CPDFDocument::TransferCurrentBitmap()
-{
-	HBITMAP hBitmap = m_hCurrentBitmap;
-	m_hCurrentBitmap = NULL;
-	return hBitmap;
-}
-
-void CPDFDocument::SetPanPageBitmap(HBITMAP hBitmap)
-{
-	CleanupPanPageBitmap();
-	m_hPanPageBitmap = hBitmap;
-}
-
-void CPDFDocument::CleanupPanPageBitmap()
-{
-	if (m_hPanPageBitmap)
-	{
-		DeleteObject(m_hPanPageBitmap);
-		m_hPanPageBitmap = NULL;
-	}
-}
-
-HBITMAP CPDFDocument::TransferPanPageBitmap()
-{
-	HBITMAP hBitmap = m_hPanPageBitmap;
-	m_hPanPageBitmap = NULL;
-	return hBitmap;
 }
 
 bool CPDFDocument::CachePageseBounds(const std::atomic<bool>* cancelled)
@@ -657,7 +537,7 @@ void CPDFDocument::UpdateLastWriteTime()
 {
 	if (m_filePath.IsEmpty())
 	{
-		m_lastWriteTime = {0, 0};
+		m_lastWriteTime = { 0, 0 };
 		return;
 	}
 	WIN32_FILE_ATTRIBUTE_DATA attrs;

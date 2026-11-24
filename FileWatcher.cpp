@@ -158,7 +158,9 @@ void CFileWatcher::StartDirWatch(DirWatchInfo* pInfo)
 
     if (hDir == INVALID_HANDLE_VALUE)
     {
+#ifdef _DEBUG
         TRACE(_T("FileWatcher: 无法打开目录 %s, 错误=%d\n"), (LPCTSTR)actualDir, GetLastError());
+#endif
         return;
     }
     pInfo->hDir = hDir;

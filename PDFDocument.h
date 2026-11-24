@@ -3,18 +3,12 @@
 #include <afxwin.h>
 #include <mupdf/fitz.h>
 
+#include <atomic>
 #include <list>
 #include <map>
 #include <vector>
-#include <atomic>
 
 #include "SearchTypes.h"
-
-struct ThumbnailInfo {
-	HBITMAP hBitmap;
-	int pageNumber;
-	bool isCurrentPage;
-};
 
 enum ZoomMode { ZOOM_CUSTOM, ZOOM_FIT_WIDTH, ZOOM_FIT_PAGE };
 
@@ -103,9 +97,6 @@ public:
 
 	int GetCurrentPage() const { return m_currentPage; }
 	void SetCurrentPage(int page);
-	fz_page* GetCurrentPageObj() const { return m_currentPageObj; }
-	void LoadPageObject(int pageNumber);
-	void CleanupCurrentPage();
 
 	ZoomMode GetZoomMode() const { return m_zoomMode; }
 	float GetZoom() const { return m_zoom; }
@@ -140,34 +131,14 @@ public:
 	int GetScrollPosition() const { return m_scrollPosition; }
 	void SetScrollPosition(int pos) { m_scrollPosition = pos; }
 
-	std::map<int, ThumbnailInfo>& GetThumbnailCache() { return m_thumbnailCache; }
-	std::list<int>& GetThumbnailCacheOrder() { return m_thumbnailCacheOrder; }
-	void CleanupThumbnails();
-	void LimitThumbnailCache(int maxCount = 100);
-	void UpdateThumbnailLRU(int pageNumber);
-
 	std::map<PageCacheKey, PageCacheItem>& GetPageCache() { return m_pageCache; }
 	std::list<PageCacheKey>& GetCacheOrder() { return m_cacheOrder; }
 	void ClearPageCache();
 	fz_display_list* GetDisplayList(int pageNumber);
 	void ClearDisplayLists();
 
-	HBITMAP GetCurrentBitmap() const { return m_hCurrentBitmap; }
-	void SetCurrentBitmap(HBITMAP hBitmap);
-	void CleanupBitmap();
-	HBITMAP TransferCurrentBitmap();
-	HBITMAP GetPanPageBitmap() const { return m_hPanPageBitmap; }
-	void SetPanPageBitmap(HBITMAP hBitmap);
-	void CleanupPanPageBitmap();
-	HBITMAP TransferPanPageBitmap();
-
 	fz_context* GetContext() const { return m_ctx; }
 	fz_document* GetDocument() const { return m_doc; }
-
-	int GetThumbnailPicWidth() const { return m_thumbnailPicWidth; }
-	void SetThumbnailPicWidth(int width) { m_thumbnailPicWidth = width; }
-	int GetThumbnailPicHeight() const { return m_thumbnailPicHeight; }
-	void SetThumbnailPicHeight(int height) { m_thumbnailPicHeight = height; }
 
 	std::vector<SearchMatch>& GetSearchMatches() { return m_searchMatches; }
 	void SetSearchMatches(const std::vector<SearchMatch>& matches) { m_searchMatches = matches; }
@@ -181,7 +152,6 @@ private:
 
 	fz_context* m_ctx;
 	fz_document* m_doc;
-	fz_page* m_currentPageObj;
 
 	CString m_filePath;
 	std::vector<char> m_password;
@@ -203,12 +173,6 @@ private:
 
 	CPoint m_panOffset;
 	bool m_canDrag;
-	HBITMAP m_hPanPageBitmap;
-
-	std::map<int, ThumbnailInfo> m_thumbnailCache;
-	std::list<int> m_thumbnailCacheOrder;
-	int m_thumbnailPicWidth;
-	int m_thumbnailPicHeight;
 
 	std::map<PageCacheKey, PageCacheItem> m_pageCache;
 	std::list<PageCacheKey> m_cacheOrder;
@@ -216,8 +180,6 @@ private:
 	std::map<int, fz_display_list*> m_displayLists;
 	std::list<int> m_displayListOrder;
 	static const int DISPLAY_LIST_LIMIT = 24;
-
-	HBITMAP m_hCurrentBitmap;
 
 	std::vector<SearchMatch> m_searchMatches;
 	int m_currentMatchIndex;

@@ -27,6 +27,7 @@ public:
 protected:
 	virtual void DoDataExchange(CDataExchange* pDX);
 	virtual BOOL OnInitDialog();
+	virtual void OnOK() override {}
 	virtual void OnCancel();
 
 	DECLARE_MESSAGE_MAP()

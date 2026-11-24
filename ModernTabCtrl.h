@@ -32,6 +32,8 @@ protected:
 	afx_msg void OnLButtonDown(UINT nFlags, CPoint point);
 	afx_msg void OnLButtonUp(UINT nFlags, CPoint point);
 	afx_msg void OnLButtonDblClk(UINT nFlags, CPoint point);
+	afx_msg void OnCaptureChanged(CWnd* pWnd);
+	afx_msg void OnCancelMode();
 	afx_msg BOOL OnEraseBkgnd(CDC* pDC);
 	afx_msg void OnDestroy();
 
@@ -42,6 +44,10 @@ private:
 	BOOL IsCloseButtonVisible(int index);
 	CRect GetCloseButtonRect(int index);
 	CRect GetTabRect(int index);
+	int GetMaxScrollOffset() const;
+	void ClampScrollOffset();
+	void EnsureTabVisible(int index);
+	void ResetDragState();
 	int HitTestTab(CPoint point);
 
 	// 状态跟踪
@@ -54,6 +60,9 @@ private:
 	int m_tabPressedIndex;
 	CPoint m_tabDragStartScreen;
 	CRect m_tabDragStartWindow;
+	int m_scrollOffset;        // 标签溢出时的水平滚动偏移
+	int m_lastEnsuredSel;      // 上次自动滚入可视区的选中标签
+	int m_wheelRemainder;      // 高精度触控板滚轮余数
 
 	// 外观配置
 	int m_tabHeight;           // 标签页高度

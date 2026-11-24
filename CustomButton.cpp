@@ -36,6 +36,8 @@ CCustomButton::~CCustomButton()
 BEGIN_MESSAGE_MAP(CCustomButton, CButton)
 	ON_WM_MOUSEMOVE()
 	ON_WM_MOUSELEAVE()
+	ON_WM_ENABLE()
+	ON_WM_CANCELMODE()
 	ON_WM_ERASEBKGND()
 END_MESSAGE_MAP()
 
@@ -156,9 +158,13 @@ bool CCustomButton::DrawIconImage(CDC* pDC, const CRect& rect, bool disabled, bo
 	if (side <= 0)
 		return false;
 
-	COLORREF iconColor = disabled ? RGB(163, 173, 185) : m_textColor;
+	const bool darkTheme = (static_cast<int>(GetRValue(m_normalColor)) +
+		static_cast<int>(GetGValue(m_normalColor)) +
+		static_cast<int>(GetBValue(m_normalColor))) < 300;
+	COLORREF iconColor = disabled ?
+		(darkTheme ? RGB(105, 113, 122) : RGB(163, 173, 185)) : m_textColor;
 	if (!disabled && active)
-		iconColor = RGB(32, 100, 185);
+		iconColor = darkTheme ? RGB(130, 182, 255) : RGB(32, 100, 185);
 
 	// 源图为纯黑透明图标，用颜色矩阵把它整体替换为目标颜色，保留 alpha 通道。
 	Gdiplus::ColorMatrix matrix = {};
@@ -236,15 +242,21 @@ void CCustomButton::PreSubclassWindow()
 
 void CCustomButton::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 {
+	if (!lpDrawItemStruct || !lpDrawItemStruct->hDC)
+		return;
+
 	CDC* pDC = CDC::FromHandle(lpDrawItemStruct->hDC);
 	CRect rect = lpDrawItemStruct->rcItem;
+	if (!pDC || rect.Width() <= 0 || rect.Height() <= 0)
+		return;
 	UINT state = lpDrawItemStruct->itemState;
 
 	// Draw into a memory DC so the rounded edge and text update together.
 	CDC bufferDC;
 	CBitmap bufferBitmap;
-	bufferDC.CreateCompatibleDC(pDC);
-	bufferBitmap.CreateCompatibleBitmap(pDC, rect.Width(), rect.Height());
+	if (!bufferDC.CreateCompatibleDC(pDC) ||
+		!bufferBitmap.CreateCompatibleBitmap(pDC, rect.Width(), rect.Height()))
+		return;
 	CBitmap* pOldBitmap = bufferDC.SelectObject(&bufferBitmap);
 	CRect localRect(0, 0, rect.Width(), rect.Height());
 	bufferDC.FillSolidRect(localRect, m_normalColor);
@@ -257,22 +269,25 @@ void CCustomButton::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 
 	const bool bDisabled = (state & ODS_DISABLED) != 0;
 	const bool bPressed = (state & ODS_SELECTED) != 0;
+	const bool darkTheme = (static_cast<int>(GetRValue(m_normalColor)) +
+		static_cast<int>(GetGValue(m_normalColor)) +
+		static_cast<int>(GetBValue(m_normalColor))) < 300;
 	COLORREF fillColor = m_normalColor;
 	COLORREF borderColor = m_normalColor;
 	if (bDisabled)
 	{
-		fillColor = RGB(250, 251, 253);
-		borderColor = RGB(236, 239, 243);
+		fillColor = darkTheme ? RGB(45, 49, 54) : RGB(250, 251, 253);
+		borderColor = darkTheme ? RGB(58, 63, 69) : RGB(236, 239, 243);
 	}
 	else if (bPressed)
 	{
 		fillColor = m_pressedColor;
-		borderColor = RGB(158, 192, 248);
+		borderColor = darkTheme ? RGB(92, 130, 180) : RGB(158, 192, 248);
 	}
 	else if (m_bHover)
 	{
 		fillColor = m_hoverColor;
-		borderColor = RGB(186, 209, 250);
+		borderColor = darkTheme ? RGB(82, 102, 128) : RGB(186, 209, 250);
 	}
 	else
 		borderColor = m_normalColor;
@@ -310,12 +325,13 @@ void CCustomButton::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 		{
 			TCHAR glyph[] = { static_cast<TCHAR>(m_iconGlyph), 0 };
 			bufferDC.SetBkMode(TRANSPARENT);
-			COLORREF iconColor = bDisabled ? RGB(163, 173, 185) : m_textColor;
+			COLORREF iconColor = bDisabled ?
+				(darkTheme ? RGB(105, 113, 122) : RGB(163, 173, 185)) : m_textColor;
 			if (!bDisabled && m_windowControlStyle && m_closeWindowControl &&
 				(m_bHover || bPressed))
 				iconColor = RGB(255, 255, 255);
 			else if (!bDisabled && !m_windowControlStyle && (m_bHover || bPressed))
-				iconColor = RGB(32, 100, 185);
+				iconColor = darkTheme ? RGB(130, 182, 255) : RGB(32, 100, 185);
 			bufferDC.SetTextColor(iconColor);
 			bufferDC.DrawText(glyph, iconRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 		}
@@ -326,8 +342,10 @@ void CCustomButton::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 		CFont* pFont = m_iconGlyph ? &m_buttonFont : GetFont();
 		CFont* pOldFont = bufferDC.SelectObject(pFont ? pFont : &m_buttonFont);
 		bufferDC.SetBkMode(TRANSPARENT);
-		COLORREF textColor = bDisabled ? RGB(163, 173, 185) :
-			(bPressed && !m_windowControlStyle ? RGB(35, 84, 155) : m_textColor);
+		COLORREF textColor = bDisabled ?
+			(darkTheme ? RGB(105, 113, 122) : RGB(163, 173, 185)) :
+			(bPressed && !m_windowControlStyle ?
+				(darkTheme ? RGB(130, 182, 255) : RGB(35, 84, 155)) : m_textColor);
 		if (!bDisabled && m_windowControlStyle && m_closeWindowControl &&
 			(m_bHover || bPressed))
 			textColor = RGB(255, 255, 255);
@@ -352,6 +370,9 @@ void CCustomButton::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 
 void CCustomButton::DrawRoundRect(CDC* pDC, CRect rect, int radius, COLORREF fillColor, COLORREF borderColor)
 {
+	if (!pDC || rect.Width() <= 1 || rect.Height() <= 1)
+		return;
+
 	Gdiplus::Graphics graphics(pDC->GetSafeHdc());
 	graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
 
@@ -362,7 +383,19 @@ void CCustomButton::DrawRoundRect(CDC* pDC, CRect rect, int radius, COLORREF fil
 		(Gdiplus::REAL)(rect.Height() - 1)
 	);
 
-	float diameter = (float)(min(radius, min(rect.Width(), rect.Height()) / 2) * 2);
+	Gdiplus::SolidBrush brush(Gdiplus::Color(255,
+		GetRValue(fillColor), GetGValue(fillColor), GetBValue(fillColor)));
+	Gdiplus::Pen pen(Gdiplus::Color(255,
+		GetRValue(borderColor), GetGValue(borderColor), GetBValue(borderColor)), 1.0f);
+
+	int clampedRadius = max(0, min(radius, min(rect.Width(), rect.Height()) / 2));
+	float diameter = (float)(clampedRadius * 2);
+	if (diameter <= 0.0f)
+	{
+		graphics.FillRectangle(&brush, rf);
+		graphics.DrawRectangle(&pen, rf);
+		return;
+	}
 
 	Gdiplus::GraphicsPath path;
 	path.AddArc(rf.X,                        rf.Y,                        diameter, diameter, 180, 90);
@@ -371,14 +404,7 @@ void CCustomButton::DrawRoundRect(CDC* pDC, CRect rect, int radius, COLORREF fil
 	path.AddArc(rf.X,                        rf.Y + rf.Height - diameter, diameter, diameter,  90, 90);
 	path.CloseFigure();
 
-	// Fill
-	Gdiplus::SolidBrush brush(Gdiplus::Color(255,
-		GetRValue(fillColor), GetGValue(fillColor), GetBValue(fillColor)));
 	graphics.FillPath(&brush, &path);
-
-	// Border
-	Gdiplus::Pen pen(Gdiplus::Color(255,
-		GetRValue(borderColor), GetGValue(borderColor), GetBValue(borderColor)), 1.0f);
 	graphics.DrawPath(&pen, &path);
 }
 
@@ -413,6 +439,28 @@ void CCustomButton::OnMouseLeave()
 	Invalidate(FALSE);
 
 	CButton::OnMouseLeave();
+}
+
+void CCustomButton::OnEnable(BOOL bEnable)
+{
+	if (!bEnable && (m_bHover || m_bTracking))
+	{
+		m_bHover = FALSE;
+		m_bTracking = FALSE;
+		Invalidate(FALSE);
+	}
+	CButton::OnEnable(bEnable);
+}
+
+void CCustomButton::OnCancelMode()
+{
+	if (m_bHover || m_bTracking)
+	{
+		m_bHover = FALSE;
+		m_bTracking = FALSE;
+		Invalidate(FALSE);
+	}
+	CButton::OnCancelMode();
 }
 
 BOOL CCustomButton::OnEraseBkgnd(CDC* pDC)

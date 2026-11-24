@@ -29,6 +29,8 @@ protected:
 
 	afx_msg void OnMouseMove(UINT nFlags, CPoint point);
 	afx_msg void OnMouseLeave();
+	afx_msg void OnEnable(BOOL bEnable);
+	afx_msg void OnCancelMode();
 	afx_msg BOOL OnEraseBkgnd(CDC* pDC);
 
 	DECLARE_MESSAGE_MAP()

@@ -12,6 +12,8 @@ BEGIN_MESSAGE_MAP(CModernTabCtrl, CTabCtrl)
 	ON_WM_LBUTTONDOWN()
 	ON_WM_LBUTTONUP()
 	ON_WM_LBUTTONDBLCLK()
+	ON_WM_CAPTURECHANGED()
+	ON_WM_CANCELMODE()
 	ON_WM_ERASEBKGND()
 	ON_WM_DESTROY()
 END_MESSAGE_MAP()
@@ -25,6 +27,10 @@ CModernTabCtrl::CModernTabCtrl()
 	, m_tabDragging(FALSE)
 	, m_tabPressedIndex(-1)
 	, m_tabDragStartScreen(0, 0)
+	, m_tabDragStartWindow(0, 0, 0, 0)
+	, m_scrollOffset(0)
+	, m_lastEnsuredSel(-1)
+	, m_wheelRemainder(0)
 	, m_tabHeight(36)
 	, m_normalColor(RGB(240, 240, 240))      // 浅灰色背景
 	, m_hoverColor(RGB(230, 230, 230))       // 稍深的灰色（悬停）
@@ -95,11 +101,15 @@ void CModernTabCtrl::SetTabHeight(int height)
 	if (GetSafeHwnd())
 	{
 		// 更新控件高度
-		CRect rect;
-		GetWindowRect(&rect);
-		GetParent()->ScreenToClient(&rect);
-		rect.bottom = rect.top + m_tabHeight;
-		MoveWindow(&rect);
+		CWnd* pParent = GetParent();
+		if (pParent)
+		{
+			CRect rect;
+			GetWindowRect(&rect);
+			pParent->ScreenToClient(&rect);
+			rect.bottom = rect.top + m_tabHeight;
+			MoveWindow(&rect);
+		}
 		Invalidate();
 	}
 }
@@ -136,6 +146,8 @@ void CModernTabCtrl::OnPaint()
 
 	CRect clientRect;
 	GetClientRect(&clientRect);
+	if (clientRect.Width() <= 0 || clientRect.Height() <= 0)
+		return;
 
 	// 双缓冲绘制，避免闪烁
 	CDC memDC;
@@ -163,6 +175,15 @@ void CModernTabCtrl::OnPaint()
 	// 获取标签数量
 	int tabCount = GetItemCount();
 	int curSel = GetCurSel();
+	if (curSel != m_lastEnsuredSel)
+	{
+		m_lastEnsuredSel = curSel;
+		EnsureTabVisible(curSel);
+	}
+	else
+	{
+		ClampScrollOffset();
+	}
 
 	// 先绘制未选中的标签页
 	for (int i = 0; i < tabCount; i++)
@@ -170,6 +191,8 @@ void CModernTabCtrl::OnPaint()
 		if (i != curSel)
 		{
 			CRect tabRect = GetTabRect(i);
+			if (tabRect.right <= 0 || tabRect.left >= clientRect.Width())
+				continue;
 			BOOL isHovered = (i == m_hoverIndex);
 			DrawTab(&memDC, i, tabRect, FALSE, isHovered);
 		}
@@ -179,7 +202,8 @@ void CModernTabCtrl::OnPaint()
 	if (curSel >= 0 && curSel < tabCount)
 	{
 		CRect tabRect = GetTabRect(curSel);
-		DrawTab(&memDC, curSel, tabRect, TRUE, FALSE);
+		if (tabRect.right > 0 && tabRect.left < clientRect.Width())
+			DrawTab(&memDC, curSel, tabRect, TRUE, FALSE);
 	}
 
 	// 复制到屏幕
@@ -232,12 +256,13 @@ void CModernTabCtrl::DrawTab(CDC* pDC, int index, CRect rect, BOOL isSelected, B
 	}
 
 	// 获取标签文本
-	TCHAR szText[256];
-	TCITEM tci;
+	TCHAR szText[256] = { 0 };
+	TCITEM tci = {};
 	tci.mask = TCIF_TEXT;
 	tci.pszText = szText;
-	tci.cchTextMax = 256;
-	GetItem(index, &tci);
+	tci.cchTextMax = _countof(szText);
+	if (!GetItem(index, &tci))
+		szText[0] = _T('\0');
 
 	const bool compact = GetTabRect(index).Width() < 124;
 	// 计算关闭按钮区域（如果启用）
@@ -326,12 +351,78 @@ BOOL CModernTabCtrl::IsCloseButtonVisible(int index)
 	return m_bCloseButtonEnabled && (index == GetCurSel() || index == m_hoverIndex);
 }
 
+int CModernTabCtrl::GetMaxScrollOffset() const
+{
+	int tabCount = GetItemCount();
+	if (tabCount <= 0 || !GetSafeHwnd())
+		return 0;
+
+	CRect clientRect;
+	GetClientRect(&clientRect);
+	int availableWidth = clientRect.Width();
+	if (availableWidth <= 0)
+		return 0;
+
+	const int minTabWidth = 60;
+	const int totalWidth = tabCount * minTabWidth;
+	return max(0, totalWidth - availableWidth);
+}
+
+void CModernTabCtrl::ClampScrollOffset()
+{
+	const int maxOffset = GetMaxScrollOffset();
+	if (m_scrollOffset < 0)
+		m_scrollOffset = 0;
+	else if (m_scrollOffset > maxOffset)
+		m_scrollOffset = maxOffset;
+}
+
+void CModernTabCtrl::EnsureTabVisible(int index)
+{
+	int tabCount = GetItemCount();
+	if (tabCount <= 0 || index < 0 || index >= tabCount || !GetSafeHwnd())
+	{
+		ClampScrollOffset();
+		return;
+	}
+
+	CRect clientRect;
+	GetClientRect(&clientRect);
+	int availableWidth = clientRect.Width();
+	if (availableWidth <= 0)
+		return;
+
+	const int maxTabWidth = 220;
+	const int minTabWidth = 60;
+	int tabWidth = availableWidth / tabCount;
+	if (tabWidth > maxTabWidth)
+		tabWidth = maxTabWidth;
+	if (tabWidth < minTabWidth)
+		tabWidth = minTabWidth;
+
+	const int tabLeft = index * tabWidth;
+	const int tabRight = tabLeft + tabWidth;
+	if (tabLeft < m_scrollOffset)
+		m_scrollOffset = tabLeft;
+	else if (tabRight > m_scrollOffset + availableWidth)
+		m_scrollOffset = tabRight - availableWidth;
+
+	ClampScrollOffset();
+}
+
+void CModernTabCtrl::ResetDragState()
+{
+	m_tabDragArmed = FALSE;
+	m_tabDragging = FALSE;
+	m_tabPressedIndex = -1;
+}
+
 CRect CModernTabCtrl::GetTabRect(int index)
 {
 	int tabCount = GetItemCount();
 	if (tabCount <= 0)
 	{
-		CRect rect;
+		CRect rect(0, 0, 0, 0);
 		GetItemRect(index, &rect);
 		return rect;
 	}
@@ -350,7 +441,7 @@ CRect CModernTabCtrl::GetTabRect(int index)
 		tabWidth = minTabWidth;
 
 	CRect rect;
-	rect.left = index * tabWidth;
+	rect.left = index * tabWidth - m_scrollOffset;
 	rect.right = rect.left + tabWidth;
 	rect.top = 0;
 	rect.bottom = m_tabHeight;
@@ -360,6 +451,11 @@ CRect CModernTabCtrl::GetTabRect(int index)
 
 int CModernTabCtrl::HitTestTab(CPoint point)
 {
+	CRect clientRect;
+	GetClientRect(&clientRect);
+	if (!clientRect.PtInRect(point))
+		return -1;
+
 	int tabCount = GetItemCount();
 	for (int i = 0; i < tabCount; i++)
 	{
@@ -374,11 +470,10 @@ void CModernTabCtrl::OnMouseMove(UINT nFlags, CPoint point)
 {
 	if (m_tabDragArmed)
 	{
-		if (!(nFlags & MK_LBUTTON))
+		CWnd* pParent = GetParent();
+		if (!(nFlags & MK_LBUTTON) || !pParent)
 		{
-			m_tabDragArmed = FALSE;
-			m_tabDragging = FALSE;
-			m_tabPressedIndex = -1;
+			ResetDragState();
 			if (::GetCapture() == GetSafeHwnd())
 				::ReleaseCapture();
 		}
@@ -391,19 +486,21 @@ void CModernTabCtrl::OnMouseMove(UINT nFlags, CPoint point)
 			if (m_tabDragging || dx * dx + dy * dy >= 25)
 			{
 				m_tabDragging = TRUE;
-				if (GetParent()->IsZoomed())
+				if (pParent->IsZoomed())
 				{
-					const double xRatio = static_cast<double>(m_tabDragStartScreen.x -
-						m_tabDragStartWindow.left) / m_tabDragStartWindow.Width();
-					GetParent()->ShowWindow(SW_RESTORE);
-					GetParent()->GetWindowRect(&m_tabDragStartWindow);
+					const int startWidth = m_tabDragStartWindow.Width();
+					const double xRatio = startWidth > 0 ?
+						static_cast<double>(m_tabDragStartScreen.x - m_tabDragStartWindow.left) / startWidth :
+						0.5;
+					pParent->ShowWindow(SW_RESTORE);
+					pParent->GetWindowRect(&m_tabDragStartWindow);
 					m_tabDragStartWindow.OffsetRect(
 						cursor.x - m_tabDragStartWindow.left -
 						static_cast<int>(xRatio * m_tabDragStartWindow.Width()),
 						cursor.y - m_tabDragStartWindow.top - 21);
 					m_tabDragStartScreen = cursor;
 				}
-				GetParent()->SetWindowPos(nullptr,
+				pParent->SetWindowPos(nullptr,
 					m_tabDragStartWindow.left + cursor.x - m_tabDragStartScreen.x,
 					m_tabDragStartWindow.top + cursor.y - m_tabDragStartScreen.y,
 					0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -467,20 +564,40 @@ BOOL CModernTabCtrl::OnMouseWheel(UINT nFlags, short zDelta, CPoint point)
 	if (!clientRect.PtInRect(clientPoint))
 		return CTabCtrl::OnMouseWheel(nFlags, zDelta, point);
 
+	if (zDelta == 0)
+		return TRUE;
+
+	m_wheelRemainder += zDelta;
+	const int steps = m_wheelRemainder / WHEEL_DELTA;
+	if (steps == 0)
+		return TRUE;
+	m_wheelRemainder -= steps * WHEEL_DELTA;
+
+	const int tabCount = GetItemCount();
 	const int current = GetCurSel();
-	const int next = current + (zDelta > 0 ? -1 : 1);
-	if (current < 0 || next < 0 || next >= GetItemCount())
+	if (current < 0 || tabCount <= 0)
+		return TRUE;
+
+	const int next = max(0, min(tabCount - 1, current - steps));
+	if (next == current)
 		return TRUE;
 
 	SetCurSel(next);
+	m_lastEnsuredSel = next;
+	EnsureTabVisible(next);
 	HideOverflowButtons();
 	Invalidate(FALSE);
-	NMHDR notification = {};
-	notification.hwndFrom = GetSafeHwnd();
-	notification.idFrom = GetDlgCtrlID();
-	notification.code = TCN_SELCHANGE;
-	GetParent()->SendMessage(WM_NOTIFY, notification.idFrom,
-		reinterpret_cast<LPARAM>(&notification));
+
+	CWnd* pParent = GetParent();
+	if (pParent)
+	{
+		NMHDR notification = {};
+		notification.hwndFrom = GetSafeHwnd();
+		notification.idFrom = GetDlgCtrlID();
+		notification.code = TCN_SELCHANGE;
+		pParent->SendMessage(WM_NOTIFY, notification.idFrom,
+			reinterpret_cast<LPARAM>(&notification));
+	}
 	return TRUE;
 }
 
@@ -501,9 +618,7 @@ void CModernTabCtrl::OnMouseLeave()
 
 void CModernTabCtrl::OnLButtonDown(UINT nFlags, CPoint point)
 {
-	m_tabDragArmed = FALSE;
-	m_tabDragging = FALSE;
-	m_tabPressedIndex = -1;
+	ResetDragState();
 	// 检查是否点击了关闭按钮
 	int closeIndex = -1;
 	if (m_bCloseButtonEnabled)
@@ -519,14 +634,20 @@ void CModernTabCtrl::OnLButtonDown(UINT nFlags, CPoint point)
 	}
 	if (closeIndex != -1)
 	{
+		m_hoverIndex = -1;
+		m_closeHoverIndex = -1;
 		// 发送自定义消息通知父窗口关闭标签页
 		// 使用WM_APP + 自定义偏移
-		GetParent()->SendMessage(WM_APP + 100, closeIndex, 0);
+		if (CWnd* pParent = GetParent())
+			pParent->SendMessage(WM_APP + 100, closeIndex, 0);
 		return;
 	}
 	m_tabPressedIndex = HitTestTab(point);
 	::GetCursorPos(&m_tabDragStartScreen);
-	GetParent()->GetWindowRect(&m_tabDragStartWindow);
+	if (CWnd* pParent = GetParent())
+		pParent->GetWindowRect(&m_tabDragStartWindow);
+	else
+		m_tabDragStartWindow.SetRectEmpty();
 	m_tabDragArmed = TRUE;
 	SetCapture();
 }
@@ -535,9 +656,7 @@ void CModernTabCtrl::OnLButtonUp(UINT nFlags, CPoint point)
 {
 	const BOOL wasDragging = m_tabDragging;
 	const int pressedIndex = m_tabPressedIndex;
-	m_tabDragArmed = FALSE;
-	m_tabDragging = FALSE;
-	m_tabPressedIndex = -1;
+	ResetDragState();
 	if (::GetCapture() == GetSafeHwnd())
 		::ReleaseCapture();
 	if (!wasDragging && pressedIndex >= 0)
@@ -545,13 +664,18 @@ void CModernTabCtrl::OnLButtonUp(UINT nFlags, CPoint point)
 		if (HitTestTab(point) == pressedIndex)
 		{
 			SetCurSel(pressedIndex);
+			m_lastEnsuredSel = pressedIndex;
+			EnsureTabVisible(pressedIndex);
 			Invalidate(FALSE);
-			NMHDR notification = {};
-			notification.hwndFrom = GetSafeHwnd();
-			notification.idFrom = GetDlgCtrlID();
-			notification.code = TCN_SELCHANGE;
-			GetParent()->SendMessage(WM_NOTIFY, notification.idFrom,
-				reinterpret_cast<LPARAM>(&notification));
+			if (CWnd* pParent = GetParent())
+			{
+				NMHDR notification = {};
+				notification.hwndFrom = GetSafeHwnd();
+				notification.idFrom = GetDlgCtrlID();
+				notification.code = TCN_SELCHANGE;
+				pParent->SendMessage(WM_NOTIFY, notification.idFrom,
+					reinterpret_cast<LPARAM>(&notification));
+			}
 		}
 	}
 }
@@ -560,9 +684,25 @@ void CModernTabCtrl::OnLButtonDblClk(UINT nFlags, CPoint point)
 {
 	if (HitTestTab(point) < 0)
 	{
-		GetParent()->SendMessage(WM_SYSCOMMAND,
-			GetParent()->IsZoomed() ? SC_RESTORE : SC_MAXIMIZE);
+		if (CWnd* pParent = GetParent())
+		{
+			pParent->SendMessage(WM_SYSCOMMAND,
+				pParent->IsZoomed() ? SC_RESTORE : SC_MAXIMIZE);
+		}
 		return;
 	}
 	CTabCtrl::OnLButtonDblClk(nFlags, point);
+}
+
+void CModernTabCtrl::OnCaptureChanged(CWnd* pWnd)
+{
+	if (pWnd != this)
+		ResetDragState();
+	CTabCtrl::OnCaptureChanged(pWnd);
+}
+
+void CModernTabCtrl::OnCancelMode()
+{
+	ResetDragState();
+	CTabCtrl::OnCancelMode();
 }
