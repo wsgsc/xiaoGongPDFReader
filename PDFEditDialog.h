@@ -73,6 +73,7 @@ private:
 	CButton m_btnUndo;
 	CButton m_btnRedo;
 	CButton m_btnAddPDF;
+	CButton m_btnExportImg;
 	CStatic m_staticInfo;
 
 	// 页面数据
@@ -179,8 +180,10 @@ private:
 	// 旋转功能
 	void RotateSelectedPages(int angle);
 
-	// 保存功能
+	// 保存与导出图片功能
 	afx_msg void OnBnClickedBtnSave();
+	afx_msg void OnBnClickedBtnExportImages();
+	void ExportEditedPagesToImages(bool preferSelectedRange);
 	bool SaveToNewFile(const CString& newFilePath);
 
 	// 添加PDF功能

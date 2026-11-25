@@ -25,6 +25,7 @@ public:
 		, m_welcomePressedTarget(WELCOME_HIT_NONE)
 		, m_welcomePressedIndex(-1)
 		, m_welcomeTracking(FALSE)
+		, m_mouseTracking(FALSE)
 	{
 	}
 	~CPDFViewCtrl() override;
@@ -63,6 +64,7 @@ protected:
 	WelcomeHitTarget m_welcomePressedTarget;
 	int m_welcomePressedIndex;
 	BOOL m_welcomeTracking;
+	BOOL m_mouseTracking;
 	CFont m_welcomeTitleFont;
 	CFont m_welcomeBtnFont;
 	CFont m_welcomeSectionFont;

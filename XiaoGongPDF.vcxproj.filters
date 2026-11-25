@@ -54,6 +54,9 @@
     <ClInclude Include="PDFEditDialog.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="PDFImageExport.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="PDFScrollBar.h">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -99,6 +102,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="PDFEditDialog.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="PDFImageExport.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="PDFScrollBar.cpp">

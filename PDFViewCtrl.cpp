@@ -539,17 +539,19 @@ void CPDFViewCtrl::OnMButtonUp(UINT nFlags, CPoint point)
 
 void CPDFViewCtrl::OnMouseMove(UINT nFlags, CPoint point)
 {
+	if (!m_mouseTracking)
+	{
+		TRACKMOUSEEVENT tme = {};
+		tme.cbSize = sizeof(tme);
+		tme.dwFlags = TME_LEAVE;
+		tme.hwndTrack = GetSafeHwnd();
+		if (::TrackMouseEvent(&tme))
+			m_mouseTracking = TRUE;
+	}
+
 	if (isWelcomePageActive())
 	{
-		if (!m_welcomeTracking)
-		{
-			TRACKMOUSEEVENT tme = {};
-			tme.cbSize = sizeof(tme);
-			tme.dwFlags = TME_LEAVE;
-			tme.hwndTrack = GetSafeHwnd();
-			if (::TrackMouseEvent(&tme))
-				m_welcomeTracking = TRUE;
-		}
+		m_welcomeTracking = m_mouseTracking;
 		WelcomeHitTarget target = WELCOME_HIT_NONE;
 		int index = -1;
 		hitTestWelcomePage(point, target, index);
@@ -568,6 +570,7 @@ void CPDFViewCtrl::OnMouseMove(UINT nFlags, CPoint point)
 
 void CPDFViewCtrl::OnMouseLeave()
 {
+	m_mouseTracking = FALSE;
 	m_welcomeTracking = FALSE;
 	if (m_welcomeHoverTarget != WELCOME_HIT_NONE || m_welcomeHoverIndex != -1)
 	{
@@ -575,6 +578,8 @@ void CPDFViewCtrl::OnMouseLeave()
 		m_welcomeHoverIndex = -1;
 		Invalidate(FALSE);
 	}
+	if (m_pParentDlg)
+		m_pParentDlg->OnPdfViewMouseLeave();
 	CStatic::OnMouseLeave();
 }
 
@@ -696,6 +701,9 @@ void CPDFViewCtrl::OnPaint()
 			&tintDC, 0, 0, 1, 1, blend);
 		tintDC.SelectObject(pOldTint);
 	}
+
+	if (m_pParentDlg && m_pParentDlg->IsAreaCaptureOverlayVisible())
+		m_pParentDlg->DrawAreaCaptureOverlay(&backDC, clientRect);
 
 	dc.BitBlt(0, 0, clientRect.Width(), clientRect.Height(), &backDC, 0, 0, SRCCOPY);
 

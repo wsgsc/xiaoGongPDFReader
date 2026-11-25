@@ -289,9 +289,6 @@ CXiaoGongPDFDlg::CXiaoGongPDFDlg(CWnd* pParent /*=nullptr*/)
 	, m_isWindowDragging(false)
 	, m_windowDragStartScreen(0, 0)
 	, m_linkPressPoint(0, 0)
-	, m_pendingLinkPage(-1)
-	, m_pendingLinkX(-1.0f)
-	, m_pendingLinkY(-1.0f)
 	, m_pendingLinkDocument(nullptr)
 	, m_panOffset(0, 0)
 	, m_hHandCursor(nullptr)
@@ -393,6 +390,8 @@ CXiaoGongPDFDlg::~CXiaoGongPDFDlg()
 	// 释放字体和画刷对象
 	if (m_buttonFont.GetSafeHandle())
 		m_buttonFont.DeleteObject();
+	if (m_captureBarFont.GetSafeHandle())
+		m_captureBarFont.DeleteObject();
 	if (m_highlightBrush.GetSafeHandle())
 		m_highlightBrush.DeleteObject();
 	if (m_whiteBrush.GetSafeHandle())
@@ -438,9 +437,11 @@ void CXiaoGongPDFDlg::LoadDialogStateFromDocument(CPDFDocument* pDoc)
 		return;
 
 	ClearSelection();
+	CancelAreaCaptureMode(false);
+	InvalidateLinkCache();
 	if (m_pdfView.GetSafeHwnd())
 		m_pdfView.SetDisplayBitmap(NULL);
-	m_pendingLinkPage = -1;
+	m_pendingLinkHit = PdfLinkHit{};
 	m_pendingLinkDocument = nullptr;
 
 	m_ctx = pDoc->GetContext();
@@ -689,7 +690,7 @@ void CXiaoGongPDFDlg::SetControlsVisible(bool visible)
 		&m_toolbar, &m_tabCtrl, &m_btnOpen, &m_btnZoomOut, &m_btnFitWidth, &m_btnFitPage,
 		&m_btnZoomIn, &m_btnMore, &m_btnMinimize, &m_btnMaximize,
 		&m_btnCloseWindow, &m_btnFirst, &m_btnPrevPage, &m_btnNextPage,
-		&m_btnLast, &m_btnPrint,
+		&m_btnLast, &m_btnPrint, &m_btnSnapshot,
 		&m_btnFullscreen, &m_btnRotateLeft, &m_btnRotateRight,
 		&m_btnEdit, &m_editCurrent, &m_pageTotal,
 		&m_statusBar, &m_zoomStatus, &m_btnOutline,
@@ -825,6 +826,8 @@ BEGIN_MESSAGE_MAP(CXiaoGongPDFDlg, CDialogEx)
 	ON_COMMAND(ID_MENU_PRINT, &CXiaoGongPDFDlg::onMenuPrint)
 	ON_COMMAND(ID_MENU_SET_DEFAULT, &CXiaoGongPDFDlg::onMenuSetDefault)
 	ON_COMMAND(ID_MENU_SHORTCUTS, &CXiaoGongPDFDlg::onMenuShortcuts)
+	ON_COMMAND(ID_MENU_REGION_CAPTURE, &CXiaoGongPDFDlg::OnMenuRegionCapture)
+	ON_COMMAND(ID_MENU_EXPORT_IMAGES, &CXiaoGongPDFDlg::OnMenuExportImages)
 	ON_COMMAND_RANGE(ID_MENU_READING_NORMAL, ID_MENU_READING_EYE, &CXiaoGongPDFDlg::OnReadingMode)
 	ON_COMMAND_RANGE(ID_MENU_RECENT_FILE_1, ID_MENU_RECENT_FILE_10, &CXiaoGongPDFDlg::onMenuRecentFile)
 	ON_NOTIFY(TVN_SELCHANGED, IDC_OUTLINE_TREE, &CXiaoGongPDFDlg::OnOutlineSelectionChanged)
@@ -847,6 +850,7 @@ BEGIN_MESSAGE_MAP(CXiaoGongPDFDlg, CDialogEx)
 	ON_BN_CLICKED(IDC_BTN_PREV, &CXiaoGongPDFDlg::OnBtnPrevPage)
 	ON_BN_CLICKED(IDC_BTN_NEXT, &CXiaoGongPDFDlg::OnBtnNextPage)
 	ON_BN_CLICKED(IDC_BTN_PRINT, &CXiaoGongPDFDlg::onMenuPrint)
+	ON_BN_CLICKED(IDC_BTN_SNAPSHOT, &CXiaoGongPDFDlg::OnMenuRegionCapture)
 	ON_BN_CLICKED(IDC_BTN_OPEN, &CXiaoGongPDFDlg::onMenuOpen)
 	ON_BN_CLICKED(IDC_BTN_ZOOM_OUT, &CXiaoGongPDFDlg::OnBtnZoomOut)
 	ON_BN_CLICKED(IDC_BTN_FIT_WIDTH, &CXiaoGongPDFDlg::OnBtnFitWidth)
@@ -1199,6 +1203,8 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 		CRect(0, 0, 34, 34), this, IDC_BTN_NEXT);
 	m_btnPrint.Create(_T("打印"), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW,
 		CRect(0, 0, 34, 34), this, IDC_BTN_PRINT);
+	m_btnSnapshot.Create(_T("截图"), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW,
+		CRect(0, 0, 34, 34), this, IDC_BTN_SNAPSHOT);
 	for (auto& divider : m_toolbarDividers)
 		divider.Create(_T(""), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_ETCHEDVERT,
 			CRect(0, 0, 2, 24), this);
@@ -1273,6 +1279,7 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	m_btnRotateLeft.SetColors(normal, hover, pressed);
 	m_btnRotateRight.SetColors(normal, hover, pressed);
 	m_btnEdit.SetColors(normal, hover, pressed);
+	m_btnSnapshot.SetColors(normal, hover, pressed);
 	m_btnFind.SetColors(normal, hover, pressed);
 	m_btnPrevMatch.SetColors(normal, hover, pressed);
 	m_btnNextMatch.SetColors(normal, hover, pressed);
@@ -1285,6 +1292,7 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	m_btnRotateLeft.SetTextColor(RGB(32, 33, 36));
 	m_btnRotateRight.SetTextColor(RGB(32, 33, 36));
 	m_btnEdit.SetTextColor      (RGB(32, 33, 36));
+	m_btnSnapshot.SetTextColor  (RGB(32, 33, 36));
 	m_btnFind.SetTextColor      (RGB(32, 33, 36));
 	m_btnPrevMatch.SetTextColor (RGB(32, 33, 36));
 	m_btnNextMatch.SetTextColor (RGB(32, 33, 36));
@@ -1470,6 +1478,8 @@ void CXiaoGongPDFDlg::GoToPage(int pageNumber)
 	if (pageNumber < 0 || pageNumber >= m_totalPages)
 		return;
 
+	ClearActiveCaptureRect();
+
 	// 滚动到目标页面位置
 	if (!m_pageYPositions.empty() && pageNumber < (int)m_pageYPositions.size())
 	{
@@ -1535,6 +1545,8 @@ void CXiaoGongPDFDlg::PerformResizeRender()
 	{
 		return;
 	}
+
+	ClearActiveCaptureRect();
 
 	const bool recalcScale = (m_zoomMode == ZOOM_FIT_WIDTH || m_zoomMode == ZOOM_FIT_PAGE);
 	const float scrollRatio = (recalcScale && m_totalScrollHeight > 0) ?
@@ -1611,7 +1623,7 @@ void CXiaoGongPDFDlg::layoutToolbar(int cx)
 	const int normLeftBudget = normCenterLeft - 16 - 16;
 	const int normRightBudget = (cx - 16) - (normCenterRight + 16);
 	const int normFullLeftWidth = 3 * 82 + 2 * 14;
-	const int normFullRightWidth = (34 + 5 + 34 + 5 + 68) + 14 + 34 + 14 + 34 + 14 + 34 +
+	const int normFullRightWidth = (34 + 5 + 34 + 5 + 68) + 14 + 34 + 14 + 34 + 14 + 34 + 14 + 34 +
 		14 + (34 + 5 + 34) + 14 + 34 + 14 + 76;
 	const bool compact = (normLeftBudget < normFullLeftWidth || normRightBudget < normFullRightWidth);
 
@@ -1718,12 +1730,13 @@ void CXiaoGongPDFDlg::layoutToolbar(int cx)
 	placeLeftBtn(m_btnOutline, showOutline);
 	placeLeftBtn(m_btnFind, showFind);
 
-	// 3. 右侧区域（缩放 | 打印 | 右旋 | 编辑 | 首末页 | 全屏 | 更多）：右对齐，压缩时按优先级隐藏
+	// 3. 右侧区域（缩放 | 打印 | 右旋 | 编辑 | 截图 | 首末页 | 全屏 | 更多）：右对齐，压缩时按优先级隐藏
 	bool showZoomStep = true;
 	bool showFitPage = true;
 	bool showPrint = true;
 	bool showRotate = true;
 	bool showEdit = true;
+	bool showSnapshot = true;
 	bool showFirstLast = true;
 	bool showFullscreen = true;
 	bool showMore = true;
@@ -1756,6 +1769,8 @@ void CXiaoGongPDFDlg::layoutToolbar(int cx)
 			addGroup(iconWidth);
 		if (showEdit)
 			addGroup(iconWidth);
+		if (showSnapshot)
+			addGroup(iconWidth);
 		if (showFirstLast)
 			addGroup(2 * iconWidth + gap);
 		if (showFullscreen)
@@ -1768,6 +1783,8 @@ void CXiaoGongPDFDlg::layoutToolbar(int cx)
 
 	if (calcRightWidth() > rightBudget)
 		showFirstLast = false;
+	if (calcRightWidth() > rightBudget)
+		showSnapshot = false;
 	if (calcRightWidth() > rightBudget)
 		showPrint = false;
 	if (calcRightWidth() > rightBudget)
@@ -1792,6 +1809,7 @@ void CXiaoGongPDFDlg::layoutToolbar(int cx)
 	m_btnPrint.ShowWindow(showPrint ? SW_SHOW : SW_HIDE);
 	m_btnRotateRight.ShowWindow(showRotate ? SW_SHOW : SW_HIDE);
 	m_btnEdit.ShowWindow(showEdit ? SW_SHOW : SW_HIDE);
+	m_btnSnapshot.ShowWindow(showSnapshot ? SW_SHOW : SW_HIDE);
 	m_btnFirst.ShowWindow(showFirstLast ? SW_SHOW : SW_HIDE);
 	m_btnLast.ShowWindow(showFirstLast ? SW_SHOW : SW_HIDE);
 	m_btnFullscreen.ShowWindow(showFullscreen ? SW_SHOW : SW_HIDE);
@@ -1846,6 +1864,12 @@ void CXiaoGongPDFDlg::layoutToolbar(int cx)
 	{
 		beginRightGroup();
 		m_btnEdit.MoveWindow(rightX, btnY, iconWidth, BTN_HEIGHT);
+		rightX += iconWidth;
+	}
+	if (showSnapshot)
+	{
+		beginRightGroup();
+		m_btnSnapshot.MoveWindow(rightX, btnY, iconWidth, BTN_HEIGHT);
 		rightX += iconWidth;
 	}
 	if (showFirstLast)
@@ -2151,6 +2175,7 @@ BOOL CXiaoGongPDFDlg::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
 
 			if (newPos != m_scrollPosition)
 			{
+				ClearActiveCaptureRect();
 				m_scrollPosition = newPos;
 				UpdateScrollBar();
 				RenderVisiblePages();
@@ -2349,6 +2374,7 @@ void CXiaoGongPDFDlg::OnBtnEdit()
 	}
 
 	// 停止并等待后台搜索线程退出，避免搜索线程持有同一PDF文件句柄阻塞覆盖保存
+	CancelAreaCaptureMode(false);
 	CleanupSearches();
 
 	// 模态编辑期间挂起外部文件变化通知，防止编辑框借用的 m_ctx/m_doc 被异步重载或关闭
@@ -2572,6 +2598,8 @@ void CXiaoGongPDFDlg::RotatePage(int degrees)
 		return;
 
 	ClearSelection();
+	ClearActiveCaptureRect();
+	InvalidateLinkCache();
 
 	// 记录旋转前相对当前页的滚动比例，避免旋转改变总高度后视口跳到其他页
 	float relPageOffset = 0.0f;
@@ -2745,6 +2773,7 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_btnPrevPage.SetFont(&m_buttonFont);
 	m_btnNextPage.SetFont(&m_buttonFont);
 	m_btnPrint.SetFont(&m_buttonFont);
+	m_btnSnapshot.SetFont(&m_buttonFont);
 	m_btnOpen.SetFont(&m_buttonFont);
 	m_btnZoomOut.SetFont(&m_buttonFont);
 	m_btnFitWidth.SetFont(&m_buttonFont);
@@ -2790,6 +2819,7 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_btnRotateLeft.SetWindowText(_T("左旋"));
 	m_btnRotateRight.SetWindowText(_T("右旋"));
 	m_btnEdit.SetWindowText(_T("编辑"));
+	m_btnSnapshot.SetWindowText(_T("截图"));
 	m_btnFind.SetWindowText(_T("查找"));
 	m_btnFind.SetIconAndText(true);
 	m_btnFitPage.SetWindowText(_T("适页"));
@@ -2808,6 +2838,7 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_btnRotateLeft.SetIconImage(IDR_ROTATE_LEFT_PNG);
 	m_btnRotateRight.SetIconImage(IDR_ROTATE_RIGHT_PNG);
 	m_btnEdit.SetIconGlyph(0xE70F);
+	m_btnSnapshot.SetIconGlyph(0xE7A8);
 	m_btnFind.SetIconGlyph(0xE721);
 	m_btnPrevMatch.SetIconGlyph(0xE76B);
 	m_btnNextMatch.SetIconGlyph(0xE76C);
@@ -2836,6 +2867,7 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_btnRotateLeft.SetToolTipText(_T("向左旋转"));
 	m_btnRotateRight.SetToolTipText(_T("向右旋转"));
 	m_btnEdit.SetToolTipText(_T("编辑页面"));
+	m_btnSnapshot.SetToolTipText(_T("区域截图 (Ctrl+Shift+S)"));
 	m_btnFind.SetToolTipText(_T("查找"));
 	m_btnPrevMatch.SetToolTipText(_T("上一个匹配项"));
 	m_btnNextMatch.SetToolTipText(_T("下一个匹配项"));
@@ -2873,6 +2905,7 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_btnRotateLeft.SetCornerRadius(6);
 	m_btnRotateRight.SetCornerRadius(6);
 	m_btnEdit.SetCornerRadius(6);
+	m_btnSnapshot.SetCornerRadius(6);
 	m_btnFind.SetCornerRadius(6);
 	m_btnPrevMatch.SetCornerRadius(6);
 	m_btnNextMatch.SetCornerRadius(6);
@@ -2997,6 +3030,11 @@ BOOL CXiaoGongPDFDlg::PreTranslateMessage(MSG* pMsg)
 		// 处理ESC键 - 关闭当前临时界面
 		if (pMsg->wParam == VK_ESCAPE)
 		{
+			if (m_isAreaCaptureMode)
+			{
+				CancelAreaCaptureMode(true);
+				return TRUE;
+			}
 			if (m_isSearching)
 			{
 				StopSearch();
@@ -3019,6 +3057,36 @@ BOOL CXiaoGongPDFDlg::PreTranslateMessage(MSG* pMsg)
 		const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
 		const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
 		const bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
+
+		// 区域截图框选完成后的快捷操作：Enter / Ctrl+C 复制，Ctrl+S 另存为 PNG
+		if (m_isAreaCaptureMode && m_hasCaptureRect && !IsEditControlFocused() && !altDown)
+		{
+			if ((!ctrlDown && !shiftDown && pMsg->wParam == VK_RETURN) ||
+				(ctrlDown && !shiftDown && pMsg->wParam == 'C'))
+			{
+				CopyCapturedRegionToClipboard();
+				return TRUE;
+			}
+			if (ctrlDown && !shiftDown && pMsg->wParam == 'S')
+			{
+				SaveCapturedRegionAsPng();
+				return TRUE;
+			}
+		}
+
+		// 处理 Ctrl + Shift + S - 框选区域高清截图
+		if (ctrlDown && shiftDown && !altDown && pMsg->wParam == 'S')
+		{
+			OnMenuRegionCapture();
+			return TRUE;
+		}
+
+		// 处理 Ctrl + Shift + E - 导出页面为图片
+		if (ctrlDown && shiftDown && !altDown && pMsg->wParam == 'E')
+		{
+			OnMenuExportImages();
+			return TRUE;
+		}
 
 		// 处理 Ctrl + Q - 退出程序
 		if (ctrlDown && !altDown && !shiftDown && pMsg->wParam == 'Q')
@@ -3620,6 +3688,11 @@ void CXiaoGongPDFDlg::OnBtnMore()
 		appendOverflowItem(0, IDC_BTN_FULLSCREEN, _T("全屏"));
 	if (hasOverflowItems)
 		menu.AppendMenu(MF_SEPARATOR);
+	menu.AppendMenu(MF_STRING | docFlag | (m_isAreaCaptureMode ? MF_CHECKED : 0),
+		ID_MENU_REGION_CAPTURE, _T("区域截图\tCtrl+Shift+S"));
+	menu.AppendMenu(MF_STRING | docFlag,
+		ID_MENU_EXPORT_IMAGES, _T("导出为图片...\tCtrl+Shift+E"));
+	menu.AppendMenu(MF_SEPARATOR);
 	menu.AppendMenu(MF_STRING, ID_MENU_SHORTCUTS, _T("快捷键"));
 	CMenu readingMenu;
 	if (readingMenu.CreatePopupMenu())
@@ -3694,7 +3767,7 @@ void CXiaoGongPDFDlg::ApplyReadingMode(ReadingMode mode)
 	}
 	CCustomButton* buttons[] = { &m_btnOpen, &m_btnZoomOut, &m_btnFitWidth,
 		&m_btnFitPage, &m_btnZoomIn, &m_btnOutline, &m_btnFirst, &m_btnLast,
-		&m_btnPrevPage, &m_btnNextPage, &m_btnPrint,
+		&m_btnPrevPage, &m_btnNextPage, &m_btnPrint, &m_btnSnapshot,
 		&m_btnFullscreen, &m_btnRotateLeft, &m_btnRotateRight, &m_btnEdit,
 		&m_btnFind, &m_btnPrevMatch, &m_btnNextMatch, &m_btnMore,
 		&m_btnCloseSearchResults };
@@ -3712,6 +3785,7 @@ void CXiaoGongPDFDlg::ApplyReadingMode(ReadingMode mode)
 		pButton->SetTextColor(text);
 	}
 	UpdateOutlineButtonColors();
+	UpdateSnapshotButtonColors();
 	CCustomButton* titleButtons[] = { &m_btnMinimize, &m_btnMaximize };
 	for (CCustomButton* pButton : titleButtons)
 	{
@@ -3750,6 +3824,18 @@ void CXiaoGongPDFDlg::UpdateOutlineButtonColors()
 	const bool dark = m_readingMode == READING_NIGHT;
 	m_btnOutline.SetColors(
 		m_outlineVisible ? (dark ? RGB(65, 82, 88) : RGB(221, 235, 252)) :
+			(dark ? RGB(39, 43, 47) : RGB(255, 255, 255)),
+		dark ? RGB(55, 65, 72) : RGB(236, 244, 255),
+		dark ? RGB(69, 82, 91) : RGB(219, 235, 255));
+}
+
+void CXiaoGongPDFDlg::UpdateSnapshotButtonColors()
+{
+	if (!m_btnSnapshot.GetSafeHwnd())
+		return;
+	const bool dark = m_readingMode == READING_NIGHT;
+	m_btnSnapshot.SetColors(
+		m_isAreaCaptureMode ? (dark ? RGB(65, 82, 88) : RGB(221, 235, 252)) :
 			(dark ? RGB(39, 43, 47) : RGB(255, 255, 255)),
 		dark ? RGB(55, 65, 72) : RGB(236, 244, 255),
 		dark ? RGB(69, 82, 91) : RGB(219, 235, 255));
@@ -3795,6 +3881,7 @@ void CXiaoGongPDFDlg::SetZoom(float zoom, ZoomMode mode)
 
 	m_zoomMode = mode;
 	m_customZoom = zoom;
+	ClearActiveCaptureRect();
 
 	// ★★★ 切换缩放模式时重置平移偏移量
 	if (mode != ZOOM_CUSTOM)
@@ -4523,8 +4610,10 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 	if (index != m_activeDocIndex)
 		StopSearch();
 
-	// 切换文档时清除文本选择
+	// 切换文档时清除文本选择与截图模式
 	ClearSelection();
+	CancelAreaCaptureMode(false);
+	InvalidateLinkCache();
 
 	// 保存当前文档的状态
 	if (m_activeDocIndex >= 0 && m_activeDocIndex < (int)m_documents.size())
@@ -4677,6 +4766,8 @@ void CXiaoGongPDFDlg::CloseDocument(int index)
 	{
 		KillTimer(TIMER_ID_PAGE_PREFETCH);
 		ClearSelection();
+		CancelAreaCaptureMode(false);
+		InvalidateLinkCache();
 		m_pdfView.SetDisplayBitmap(NULL);
 		SafeDeleteBitmap(m_hContinuousViewBitmap);
 
@@ -5189,6 +5280,8 @@ void CXiaoGongPDFDlg::OnDestroy()
 	if (m_sessionRestoreStarted)
 		SaveOpenTabs();
 	ClearSelection();
+	CancelAreaCaptureMode(false);
+	InvalidateLinkCache();
 	CleanupSearches();
 	CleanupPendingLoad();
 	UIRelease();             // 先在 HWND 有效时解绑 UI
@@ -5282,7 +5375,7 @@ bool CXiaoGongPDFDlg::StartPanDrag(CPoint pdfViewPoint, bool temporaryPan)
 
 void CXiaoGongPDFDlg::OnLButtonDown(UINT nFlags, CPoint point)
 {
-	m_pendingLinkPage = -1;
+	m_pendingLinkHit = PdfLinkHit{};
 	m_pendingLinkDocument = nullptr;
 	CRect clientRect;
 	GetClientRect(&clientRect);
@@ -5319,11 +5412,40 @@ void CXiaoGongPDFDlg::OnLButtonDown(UINT nFlags, CPoint point)
 			m_spaceKeyDown = false;
 		const bool temporarySpacePan = m_spaceKeyDown && !IsEditControlFocused() && spaceHeld;
 
+		// 框选区域截图模式优先处理（按住空格仍支持临时抓手平移页面）
+		if (m_isAreaCaptureMode && !temporarySpacePan && m_totalPages > 0)
+		{
+			SetFocus();
+			if (m_hasCaptureRect && !m_isDraggingCaptureRect)
+			{
+				const int hitAction = HitTestCaptureActionBar(pdfViewPoint);
+				if (hitAction != CAPTURE_ACT_NONE)
+				{
+					m_pressedCaptureAction = hitAction;
+					SetCapture();
+					InvalidateSelection();
+					return;
+				}
+			}
+
+			m_pressedCaptureAction = CAPTURE_ACT_NONE;
+			m_hoverCaptureAction = CAPTURE_ACT_NONE;
+			m_isDraggingCaptureRect = true;
+			m_hasCaptureRect = false;
+			for (auto& r : m_captureActionRects)
+				r.SetRectEmpty();
+			m_captureStartView = pdfViewPoint;
+			m_captureEndView = pdfViewPoint;
+			SetCapture();
+			::SetCursor(::LoadCursor(nullptr, IDC_CROSS));
+			InvalidateSelection();
+			return;
+		}
+
 		if (!temporarySpacePan && m_totalPages > 0)
 		{
 			m_linkPressPoint = pdfViewPoint;
-			if (HitTestInternalLink(pdfViewPoint, m_pendingLinkPage,
-				m_pendingLinkX, m_pendingLinkY))
+			if (HitTestLink(pdfViewPoint, m_pendingLinkHit))
 				m_pendingLinkDocument = m_doc;
 		}
 
@@ -5385,11 +5507,9 @@ void CXiaoGongPDFDlg::StartWindowDrag()
 
 void CXiaoGongPDFDlg::OnLButtonUp(UINT nFlags, CPoint point)
 {
-	const int linkPage = m_pendingLinkPage;
-	const float linkX = m_pendingLinkX;
-	const float linkY = m_pendingLinkY;
+	const PdfLinkHit linkHit = m_pendingLinkHit;
 	const fz_document* linkDocument = m_pendingLinkDocument;
-	m_pendingLinkPage = -1;
+	m_pendingLinkHit = PdfLinkHit{};
 	m_pendingLinkDocument = nullptr;
 	if (m_isWindowDragging)
 	{
@@ -5405,6 +5525,7 @@ void CXiaoGongPDFDlg::OnLButtonUp(UINT nFlags, CPoint point)
 		m_tempHandDrag = false;
 		if (m_isSelecting)
 			ClearSelection();
+		CancelAreaCaptureMode(false);
 		if (::GetCapture() == GetSafeHwnd())
 			::ReleaseCapture();
 		CDialogEx::OnLButtonUp(nFlags, point);
@@ -5421,7 +5542,63 @@ void CXiaoGongPDFDlg::OnLButtonUp(UINT nFlags, CPoint point)
 	ScreenToClient(&linkViewRect);
 	CPoint linkReleasePoint = point;
 	linkReleasePoint.Offset(-linkViewRect.left, -linkViewRect.top);
-	if (linkPage >= 0 && linkDocument == m_doc && linkViewRect.PtInRect(point) &&
+
+	// 处理区域截图浮动工具栏点击或框选拖拽完成
+	if (m_isAreaCaptureMode)
+	{
+		if (m_pressedCaptureAction != CAPTURE_ACT_NONE)
+		{
+			const int pressedAct = m_pressedCaptureAction;
+			m_pressedCaptureAction = CAPTURE_ACT_NONE;
+			if (::GetCapture() == GetSafeHwnd())
+				::ReleaseCapture();
+			const int releaseAct = HitTestCaptureActionBar(linkReleasePoint);
+			InvalidateSelection();
+			if (releaseAct == pressedAct)
+			{
+				if (releaseAct == CAPTURE_ACT_COPY)
+					CopyCapturedRegionToClipboard();
+				else if (releaseAct == CAPTURE_ACT_SAVE)
+					SaveCapturedRegionAsPng();
+				else if (releaseAct == CAPTURE_ACT_CANCEL)
+					CancelAreaCaptureMode(true);
+			}
+			return;
+		}
+
+		if (m_isDraggingCaptureRect)
+		{
+			CRect viewClient;
+			m_pdfView.GetClientRect(&viewClient);
+			m_captureEndView.x = max(0L, min(viewClient.right, linkReleasePoint.x));
+			m_captureEndView.y = max(0L, min(viewClient.bottom, linkReleasePoint.y));
+			m_isDraggingCaptureRect = false;
+			if (::GetCapture() == GetSafeHwnd())
+				::ReleaseCapture();
+
+			const CRect selRect = GetNormalizedCaptureViewRect();
+			CSize previewSize(0, 0);
+			int previewDpi = 300;
+			if (selRect.Width() >= 6 && selRect.Height() >= 6 &&
+				ComputeCapturePixelSizePreview(selRect, previewSize, previewDpi))
+			{
+				m_hasCaptureRect = true;
+				CString tip;
+				tip.Format(_T("已框选区域 (%d×%d px, %d DPI)：点击“复制截图”/按 Enter 复制，或点击“保存 PNG”"),
+					previewSize.cx, previewSize.cy, previewDpi);
+				SetStatusBarMessage(tip);
+			}
+			else
+			{
+				m_hasCaptureRect = false;
+				SetStatusBarMessage(_T("区域截图模式：请在 PDF 页面有效内容区域内拖动鼠标框选，按 Esc 取消"));
+			}
+			InvalidateSelection();
+			return;
+		}
+	}
+
+	if (linkHit.kind != PdfLinkKind::None && linkDocument == m_doc && linkViewRect.PtInRect(point) &&
 		abs(linkReleasePoint.x - m_linkPressPoint.x) <= 3 &&
 		abs(linkReleasePoint.y - m_linkPressPoint.y) <= 3)
 	{
@@ -5435,32 +5612,42 @@ void CXiaoGongPDFDlg::OnLButtonUp(UINT nFlags, CPoint point)
 		}
 		if (::GetCapture() == GetSafeHwnd())
 			::ReleaseCapture();
-		::SetCursor(::LoadCursor(nullptr, IDC_ARROW));
-		GoToPage(linkPage);
-		if (linkY >= 0.0f || linkX >= 0.0f)
+
+		if (linkHit.kind == PdfLinkKind::Internal && linkHit.targetPage >= 0)
 		{
-			fz_rect bounds;
-			float scale;
-			int offsetX, offsetY;
-			if (GetSelectionPageTransform(linkPage, bounds, scale, offsetX, offsetY))
+			::SetCursor(::LoadCursor(nullptr, IDC_ARROW));
+			GoToPage(linkHit.targetPage);
+			if (linkHit.targetY >= 0.0f || linkHit.targetX >= 0.0f)
 			{
-				const int rotation = GetPageRotation(linkPage);
-				float localY = -1.0f;
-				if (linkY >= 0.0f && rotation == 0)
-					localY = linkY - bounds.y0;
-				else if (linkY >= 0.0f && rotation == 180)
-					localY = bounds.y1 - linkY;
-				else if (linkX >= 0.0f && rotation == 90)
-					localY = linkX - bounds.x0;
-				else if (linkX >= 0.0f && rotation == 270)
-					localY = bounds.x1 - linkX;
-				if (localY >= 0.0f)
+				fz_rect bounds;
+				float scale;
+				int offsetX, offsetY;
+				if (GetSelectionPageTransform(linkHit.targetPage, bounds, scale, offsetX, offsetY))
 				{
-					ScrollToVerticalPosition(m_scrollPosition + offsetY + (int)(localY * scale) - 24);
+					const int rotation = GetPageRotation(linkHit.targetPage);
+					float localY = -1.0f;
+					if (linkHit.targetY >= 0.0f && rotation == 0)
+						localY = linkHit.targetY - bounds.y0;
+					else if (linkHit.targetY >= 0.0f && rotation == 180)
+						localY = bounds.y1 - linkHit.targetY;
+					else if (linkHit.targetX >= 0.0f && rotation == 90)
+						localY = linkHit.targetX - bounds.x0;
+					else if (linkHit.targetX >= 0.0f && rotation == 270)
+						localY = bounds.x1 - linkHit.targetX;
+					if (localY >= 0.0f)
+					{
+						ScrollToVerticalPosition(m_scrollPosition + offsetY + (int)(localY * scale) - 24);
+					}
 				}
 			}
+			return;
 		}
-		return;
+		else if (linkHit.kind == PdfLinkKind::External)
+		{
+			::SetCursor(::LoadCursor(nullptr, IDC_ARROW));
+			OpenExternalLinkWithConfirm(linkHit.externalUri);
+			return;
+		}
 	}
 
 	// ★★★ 文本选择结束
@@ -5501,7 +5688,12 @@ void CXiaoGongPDFDlg::OnLButtonUp(UINT nFlags, CPoint point)
 			ClearSelection();
 		}
 		InvalidateSelection();
-		::SetCursor(::LoadCursor(nullptr, IDC_ARROW));
+		if (m_pdfView.GetSafeHwnd())
+		{
+			SendMessage(WM_SETCURSOR,
+				reinterpret_cast<WPARAM>(m_pdfView.GetSafeHwnd()),
+				MAKELPARAM(HTCLIENT, WM_MOUSEMOVE));
+		}
 		return;
 	}
 
@@ -5586,8 +5778,14 @@ void CXiaoGongPDFDlg::OnCaptureChanged(CWnd* pWnd)
 		m_isWindowDragging = false;
 		m_isDragging = false;
 		m_tempHandDrag = false;
-		m_pendingLinkPage = -1;
+		m_pendingLinkHit = PdfLinkHit{};
 		m_pendingLinkDocument = nullptr;
+		m_pressedCaptureAction = CAPTURE_ACT_NONE;
+		if (m_isDraggingCaptureRect)
+		{
+			m_isDraggingCaptureRect = false;
+			InvalidateSelection();
+		}
 		if (m_isSelecting)
 		{
 			ClearSelection();
@@ -5634,6 +5832,36 @@ void CXiaoGongPDFDlg::OnMouseMove(UINT nFlags, CPoint point)
 				m_windowDragStartRect.top + cursor.y - m_windowDragStartScreen.y,
 				0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 			return;
+		}
+	}
+
+	// ★★★ 框选区域高清截图模式：更新框选矩形或悬浮操作按钮高亮
+	if (m_isAreaCaptureMode && m_pdfView.GetSafeHwnd())
+	{
+		CRect pdfRect;
+		m_pdfView.GetWindowRect(&pdfRect);
+		ScreenToClient(&pdfRect);
+		CPoint pdfViewPoint = point;
+		pdfViewPoint.Offset(-pdfRect.left, -pdfRect.top);
+
+		if (m_isDraggingCaptureRect && (nFlags & MK_LBUTTON))
+		{
+			CRect viewClient;
+			m_pdfView.GetClientRect(&viewClient);
+			m_captureEndView.x = max(0L, min(viewClient.right, pdfViewPoint.x));
+			m_captureEndView.y = max(0L, min(viewClient.bottom, pdfViewPoint.y));
+			InvalidateSelection();
+			return;
+		}
+
+		if (m_hasCaptureRect && !m_isDraggingCaptureRect)
+		{
+			const int hoverAct = HitTestCaptureActionBar(pdfViewPoint);
+			if (hoverAct != m_hoverCaptureAction)
+			{
+				m_hoverCaptureAction = hoverAct;
+				InvalidateSelection();
+			}
 		}
 	}
 
@@ -5694,9 +5922,29 @@ void CXiaoGongPDFDlg::OnMouseMove(UINT nFlags, CPoint point)
 
 			if (m_scrollPosition != oldScrollY || m_scrollPositionH != oldScrollX)
 			{
+				ClearActiveCaptureRect();
 				RenderVisiblePages();
 			}
 			return;
+		}
+	}
+
+	// 普通悬停移动：检测链接并在底部状态栏实时预览目标页码或 URL
+	if (m_doc && m_totalPages > 0 && !m_isAreaCaptureMode && !m_isSelecting &&
+		!m_isDragging && m_pdfView.GetSafeHwnd())
+	{
+		CRect pdfRect;
+		m_pdfView.GetWindowRect(&pdfRect);
+		ScreenToClient(&pdfRect);
+		if (pdfRect.PtInRect(point))
+		{
+			CPoint pdfViewPoint = point;
+			pdfViewPoint.Offset(-pdfRect.left, -pdfRect.top);
+			UpdateHoverLinkFeedback(pdfViewPoint);
+		}
+		else
+		{
+			ClearHoverLinkFeedback();
 		}
 	}
 
@@ -5711,17 +5959,88 @@ void CXiaoGongPDFDlg::OnContextMenu(CWnd* pWnd, CPoint point)
 		return;
 	}
 
-	if (!m_hasSelection || m_selectedText.IsEmpty())
+	// 区域截图模式下右键即取消截图（符合主流截图工具操作直觉）
+	if (m_isAreaCaptureMode)
+	{
+		CancelAreaCaptureMode(true);
 		return;
+	}
+
+	if (!m_doc || m_totalPages <= 0)
+		return;
+
+	CPoint menuScreenPt = point;
+	if (menuScreenPt.x == -1 && menuScreenPt.y == -1)
+	{
+		::GetCursorPos(&menuScreenPt);
+	}
+
+	CPoint viewPt = menuScreenPt;
+	m_pdfView.ScreenToClient(&viewPt);
+	PdfLinkHit linkHit;
+	HitTestLink(viewPt, linkHit);
+
+	enum PageContextCmd
+	{
+		CMD_CTX_COPY_TEXT = 1,
+		CMD_CTX_OPEN_LINK,
+		CMD_CTX_COPY_LINK,
+		CMD_CTX_AREA_CAPTURE,
+		CMD_CTX_COPY_PAGE_IMG,
+		CMD_CTX_EXPORT_IMAGES
+	};
 
 	CMenu popup;
 	if (!popup.CreatePopupMenu())
 		return;
-	const UINT copyCommand = 1;
-	popup.AppendMenu(MF_STRING, copyCommand, _T("复制"));
-	if (popup.TrackPopupMenu(TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON |
-		TPM_RETURNCMD | TPM_NONOTIFY, point.x, point.y, this) == copyCommand)
+
+	bool hasTopGroup = false;
+	if (m_hasSelection && !m_selectedText.IsEmpty())
+	{
+		popup.AppendMenu(MF_STRING, CMD_CTX_COPY_TEXT, _T("复制选中文本\tCtrl+C"));
+		hasTopGroup = true;
+	}
+	if (linkHit.kind == PdfLinkKind::External && !linkHit.externalUri.IsEmpty())
+	{
+		popup.AppendMenu(MF_STRING, CMD_CTX_OPEN_LINK, _T("打开外部链接..."));
+		popup.AppendMenu(MF_STRING, CMD_CTX_COPY_LINK, _T("复制链接地址"));
+		hasTopGroup = true;
+	}
+	if (hasTopGroup)
+		popup.AppendMenu(MF_SEPARATOR);
+
+	popup.AppendMenu(MF_STRING, CMD_CTX_AREA_CAPTURE, _T("区域截图\tCtrl+Shift+S"));
+	popup.AppendMenu(MF_STRING, CMD_CTX_COPY_PAGE_IMG, _T("复制当前页为图片"));
+	popup.AppendMenu(MF_STRING, CMD_CTX_EXPORT_IMAGES, _T("导出页面为图片...\tCtrl+Shift+E"));
+
+	const UINT cmd = static_cast<UINT>(popup.TrackPopupMenu(
+		TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+		menuScreenPt.x, menuScreenPt.y, this));
+
+	switch (cmd)
+	{
+	case CMD_CTX_COPY_TEXT:
 		CopySelectionToClipboard();
+		break;
+	case CMD_CTX_OPEN_LINK:
+		OpenExternalLinkWithConfirm(linkHit.externalUri);
+		break;
+	case CMD_CTX_COPY_LINK:
+		if (CopyTextToClipboard(linkHit.externalUri))
+			SetStatusBarMessage(_T("已复制链接地址到剪贴板"));
+		break;
+	case CMD_CTX_AREA_CAPTURE:
+		StartAreaCaptureMode();
+		break;
+	case CMD_CTX_COPY_PAGE_IMG:
+		CopyCurrentPageAsImage();
+		break;
+	case CMD_CTX_EXPORT_IMAGES:
+		OnMenuExportImages();
+		break;
+	default:
+		break;
+	}
 }
 
 BOOL CXiaoGongPDFDlg::OnSetCursor(CWnd* pWnd, UINT nHitTest, UINT message)
@@ -5767,7 +6086,29 @@ BOOL CXiaoGongPDFDlg::OnSetCursor(CWnd* pWnd, UINT nHitTest, UINT message)
 		return TRUE;
 	}
 
+	if (m_doc && m_totalPages > 0 && IsHandPanModeActive())
+	{
+		::SetCursor(m_hHandCursor ? m_hHandCursor : ::LoadCursor(nullptr, IDC_HAND));
+		return TRUE;
+	}
+
+	// 区域截图模式下：悬浮操作栏按钮显示手型光标，其余位置显示十字准星
+	if (m_doc && m_totalPages > 0 && m_isAreaCaptureMode)
+	{
+		if (m_hasCaptureRect && !m_isDraggingCaptureRect &&
+			HitTestCaptureActionBar(point) != CAPTURE_ACT_NONE)
+		{
+			::SetCursor(m_hHandCursor ? m_hHandCursor : ::LoadCursor(nullptr, IDC_HAND));
+		}
+		else
+		{
+			::SetCursor(::LoadCursor(nullptr, IDC_CROSS));
+		}
+		return TRUE;
+	}
+
 	bool overPage = false;
+	bool overLink = false;
 	if (m_doc && m_totalPages > 0)
 	{
 		const int pageNumber = GetPageAtPosition(point.y + m_scrollPosition - m_panOffset.y);
@@ -5788,16 +6129,16 @@ BOOL CXiaoGongPDFDlg::OnSetCursor(CWnd* pWnd, UINT nHitTest, UINT message)
 			const int height = ClampRenderDimension(pageH * scale);
 			CRect pageRect(offsetX, offsetY, offsetX + width, offsetY + height);
 			overPage = pageRect.PtInRect(point) != FALSE;
+			if (overPage && !m_isSelecting)
+			{
+				PdfLinkHit linkHit;
+				overLink = HitTestLink(point, linkHit);
+			}
 		}
 	}
 
-	if (m_doc && m_totalPages > 0 && IsHandPanModeActive())
-	{
-		if ((m_spaceKeyDown && !IsEditControlFocused()) || overPage)
-			::SetCursor(m_hHandCursor ? m_hHandCursor : ::LoadCursor(nullptr, IDC_HAND));
-		else
-			::SetCursor(::LoadCursor(nullptr, IDC_ARROW));
-	}
+	if (overLink)
+		::SetCursor(m_hHandCursor ? m_hHandCursor : ::LoadCursor(nullptr, IDC_HAND));
 	else if (overPage)
 		::SetCursor(::LoadCursor(nullptr, IDC_IBEAM));
 	else
@@ -6489,6 +6830,7 @@ void CXiaoGongPDFDlg::OnVScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar)
 
 	if (newPos != m_scrollPosition)
 	{
+		ClearActiveCaptureRect();
 		m_scrollPosition = newPos;
 		UpdateScrollBar();
 		RenderVisiblePages();
@@ -6506,6 +6848,7 @@ void CXiaoGongPDFDlg::ScrollToVerticalPosition(int position)
 	position = max(0, min(position, max(0, m_totalScrollHeight - viewRect.Height())));
 	if (position == m_scrollPosition)
 		return;
+	ClearActiveCaptureRect();
 	m_scrollPosition = position;
 	UpdateScrollBar();
 	RenderVisiblePages();
@@ -6520,6 +6863,7 @@ void CXiaoGongPDFDlg::ScrollToHorizontalPosition(int position)
 	position = max(0, min(position, max(0, m_totalScrollWidth - viewRect.Width())));
 	if (position == m_scrollPositionH)
 		return;
+	ClearActiveCaptureRect();
 	m_scrollPositionH = position;
 	UpdateScrollBar();
 	RenderVisiblePages();
@@ -6584,6 +6928,7 @@ void CXiaoGongPDFDlg::OnHScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar)
 
 	if (newPos != m_scrollPositionH)
 	{
+		ClearActiveCaptureRect();
 		m_scrollPositionH = newPos;
 		UpdateScrollBar();
 		RenderVisiblePages();
@@ -7255,13 +7600,159 @@ bool CXiaoGongPDFDlg::ScreenPointToPdfCoords(CPoint viewPt, int pageNumber,
 	return true;
 }
 
-bool CXiaoGongPDFDlg::HitTestInternalLink(CPoint viewPt, int& targetPage,
-	float& targetX, float& targetY)
+void CXiaoGongPDFDlg::InvalidateLinkCache()
 {
-	targetPage = -1;
-	targetX = -1.0f;
-	targetY = -1.0f;
-	if (!m_ctx || !m_doc || !m_pdfView.GetSafeHwnd())
+	m_cachedLinksPage = -1;
+	m_cachedLinksDoc = nullptr;
+	m_cachedPageLinks.clear();
+	ClearHoverLinkFeedback();
+}
+
+void CXiaoGongPDFDlg::EnsurePageLinksCached(int pageNumber)
+{
+	if (!m_ctx || !m_doc || pageNumber < 0 || pageNumber >= m_totalPages)
+	{
+		m_cachedLinksPage = -1;
+		m_cachedLinksDoc = nullptr;
+		m_cachedPageLinks.clear();
+		return;
+	}
+	if (m_cachedLinksDoc == m_doc && m_cachedLinksPage == pageNumber)
+		return;
+
+	m_cachedLinksDoc = m_doc;
+	m_cachedLinksPage = pageNumber;
+	m_cachedPageLinks.clear();
+
+	struct RawLinkEntry
+	{
+		fz_rect rect;
+		bool isExternal;
+		int destPage;
+		float destX;
+		float destY;
+		std::string utf8Uri;
+	};
+	std::vector<RawLinkEntry> rawLinks;
+
+	{
+		fz_page* pPage = nullptr;
+		fz_link* pLinks = nullptr;
+		fz_var(pPage);
+		fz_var(pLinks);
+		CSingleLock lock(&m_renderLock, TRUE);
+		fz_try(m_ctx)
+		{
+			pPage = fz_load_page(m_ctx, m_doc, pageNumber);
+			pLinks = fz_load_links(m_ctx, pPage);
+			for (fz_link* pLink = pLinks; pLink; pLink = pLink->next)
+			{
+				if (!pLink->uri || !*pLink->uri)
+					continue;
+
+				RawLinkEntry entry = {};
+				entry.rect = pLink->rect;
+				entry.destPage = -1;
+				entry.destX = -1.0f;
+				entry.destY = -1.0f;
+				entry.isExternal = fz_is_external_link(m_ctx, pLink->uri) != 0;
+
+				if (entry.isExternal)
+				{
+					entry.utf8Uri.assign(pLink->uri);
+					rawLinks.push_back(std::move(entry));
+				}
+				else
+				{
+					int resolvedPage = -1;
+					float resolvedX = -1.0f;
+					float resolvedY = -1.0f;
+					fz_var(resolvedPage);
+					fz_var(resolvedX);
+					fz_var(resolvedY);
+					fz_try(m_ctx)
+					{
+						const fz_link_dest dest = fz_resolve_link_dest(m_ctx, m_doc, pLink->uri);
+						if (dest.loc.chapter >= 0 && dest.loc.page >= 0)
+						{
+							const int pg = fz_page_number_from_location(m_ctx, m_doc, dest.loc);
+							if (pg >= 0 && pg < m_totalPages)
+							{
+								resolvedPage = pg;
+								if (dest.type == FZ_LINK_DEST_XYZ)
+									resolvedX = dest.x;
+								if (dest.type == FZ_LINK_DEST_XYZ ||
+									dest.type == FZ_LINK_DEST_FIT_H ||
+									dest.type == FZ_LINK_DEST_FIT_BH)
+								{
+									resolvedY = dest.y;
+								}
+							}
+						}
+					}
+					fz_catch(m_ctx)
+					{
+						resolvedPage = -1;
+					}
+					if (resolvedPage >= 0)
+					{
+						entry.destPage = resolvedPage;
+						entry.destX = resolvedX;
+						entry.destY = resolvedY;
+						rawLinks.push_back(std::move(entry));
+					}
+				}
+			}
+		}
+		fz_always(m_ctx)
+		{
+			if (pLinks)
+				fz_drop_link(m_ctx, pLinks);
+			if (pPage)
+				fz_drop_page(m_ctx, pPage);
+		}
+		fz_catch(m_ctx)
+		{
+			rawLinks.clear();
+		}
+	}
+
+	m_cachedPageLinks.reserve(rawLinks.size());
+	for (const RawLinkEntry& raw : rawLinks)
+	{
+		CachedPageLinkItem item;
+		item.rect = raw.rect;
+		if (raw.isExternal)
+		{
+			item.hit.kind = PdfLinkKind::External;
+			const int wideLen = ::MultiByteToWideChar(CP_UTF8, 0, raw.utf8Uri.c_str(), -1, nullptr, 0);
+			if (wideLen > 1)
+			{
+				CString wideUri;
+				LPWSTR pBuf = wideUri.GetBuffer(wideLen);
+				::MultiByteToWideChar(CP_UTF8, 0, raw.utf8Uri.c_str(), -1, pBuf, wideLen);
+				wideUri.ReleaseBuffer();
+				wideUri.Trim();
+				item.hit.externalUri = wideUri;
+			}
+			if (!item.hit.externalUri.IsEmpty())
+				m_cachedPageLinks.push_back(std::move(item));
+		}
+		else if (raw.destPage >= 0)
+		{
+			item.hit.kind = PdfLinkKind::Internal;
+			item.hit.targetPage = raw.destPage;
+			item.hit.targetX = raw.destX;
+			item.hit.targetY = raw.destY;
+			m_cachedPageLinks.push_back(std::move(item));
+		}
+	}
+}
+
+bool CXiaoGongPDFDlg::HitTestLink(CPoint viewPt, PdfLinkHit& outHit)
+{
+	outHit = PdfLinkHit{};
+	if (!m_ctx || !m_doc || !m_pdfView.GetSafeHwnd() || m_totalPages <= 0)
 		return false;
 
 	const int sourcePage = GetPageAtPosition(viewPt.y + m_scrollPosition - m_panOffset.y);
@@ -7269,10 +7760,12 @@ bool CXiaoGongPDFDlg::HitTestInternalLink(CPoint viewPt, int& targetPage,
 		return false;
 
 	fz_rect bounds;
-	float scale;
-	int offsetX, offsetY;
+	float scale = 0.0f;
+	int offsetX = 0;
+	int offsetY = 0;
 	if (!GetSelectionPageTransform(sourcePage, bounds, scale, offsetX, offsetY))
 		return false;
+
 	const int rotation = GetPageRotation(sourcePage);
 	const float width = (rotation == 90 || rotation == 270) ?
 		bounds.y1 - bounds.y0 : bounds.x1 - bounds.x0;
@@ -7280,55 +7773,947 @@ bool CXiaoGongPDFDlg::HitTestInternalLink(CPoint viewPt, int& targetPage,
 		bounds.x1 - bounds.x0 : bounds.y1 - bounds.y0;
 	if (viewPt.x < offsetX || viewPt.y < offsetY ||
 		viewPt.x >= offsetX + width * scale || viewPt.y >= offsetY + height * scale)
+	{
 		return false;
+	}
 
-	float pdfX, pdfY;
+	float pdfX = 0.0f;
+	float pdfY = 0.0f;
 	if (!ScreenPointToPdfCoords(viewPt, sourcePage, pdfX, pdfY))
 		return false;
+
+	EnsurePageLinksCached(sourcePage);
 	const fz_point pdfPoint = { pdfX, pdfY };
-	fz_page* page = nullptr;
-	fz_link* links = nullptr;
-	fz_var(page);
-	fz_var(links);
+	for (const CachedPageLinkItem& item : m_cachedPageLinks)
+	{
+		if (fz_is_point_inside_rect(pdfPoint, item.rect))
+		{
+			outHit = item.hit;
+			return outHit.kind != PdfLinkKind::None;
+		}
+	}
+	return false;
+}
+
+void CXiaoGongPDFDlg::UpdateHoverLinkFeedback(CPoint viewPt)
+{
+	PdfLinkHit hit;
+	if (!HitTestLink(viewPt, hit))
+	{
+		ClearHoverLinkFeedback();
+		return;
+	}
+
+	CString preview;
+	if (hit.kind == PdfLinkKind::Internal && hit.targetPage >= 0)
+	{
+		preview.Format(_T("链接：跳转到第 %d 页"), hit.targetPage + 1);
+	}
+	else if (hit.kind == PdfLinkKind::External && !hit.externalUri.IsEmpty())
+	{
+		CString displayUri = hit.externalUri;
+		if (displayUri.GetLength() > 140)
+			displayUri = displayUri.Left(137) + _T("...");
+		CString lowerPrefix = hit.externalUri.Left(7);
+		lowerPrefix.MakeLower();
+		if (lowerPrefix == _T("mailto:"))
+			preview.Format(_T("邮件链接：%s"), displayUri.GetString());
+		else
+			preview.Format(_T("外部链接：%s"), displayUri.GetString());
+	}
+
+	if (!preview.IsEmpty() && (!m_hasHoverLinkStatus || m_lastHoverLinkPreview != preview))
+	{
+		m_hasHoverLinkStatus = true;
+		m_lastHoverLinkPreview = preview;
+		SetStatusBarMessage(preview);
+	}
+}
+
+void CXiaoGongPDFDlg::ClearHoverLinkFeedback()
+{
+	if (!m_hasHoverLinkStatus)
+		return;
+	m_hasHoverLinkStatus = false;
+	m_lastHoverLinkPreview.Empty();
+	if (!m_isAreaCaptureMode && m_statusBar.GetSafeHwnd())
+		SetStatusBarMessage(nullptr);
+}
+
+void CXiaoGongPDFDlg::OnPdfViewMouseLeave()
+{
+	ClearHoverLinkFeedback();
+	if (m_hoverCaptureAction != CAPTURE_ACT_NONE)
+	{
+		m_hoverCaptureAction = CAPTURE_ACT_NONE;
+		InvalidateSelection();
+	}
+}
+
+void CXiaoGongPDFDlg::OpenExternalLinkWithConfirm(const CString& externalUri)
+{
+	CString safeUri(externalUri);
+	safeUri.Trim();
+	if (safeUri.IsEmpty())
+		return;
+
+	// 过滤控制字符，防止命令行/协议注入
+	for (int i = 0; i < safeUri.GetLength(); ++i)
+	{
+		const WCHAR ch = safeUri[i];
+		if (ch < 0x20 || ch == 0x7F)
+		{
+			MessageBox(_T("检测到链接包含非法控制字符，已阻止打开。"),
+				_T("安全提示"), MB_OK | MB_ICONWARNING);
+			return;
+		}
+	}
+
+	CString lowerUri(safeUri);
+	lowerUri.MakeLower();
+	const bool isHttp = (lowerUri.Left(7) == _T("http://"));
+	const bool isHttps = (lowerUri.Left(8) == _T("https://"));
+	const bool isMailto = (lowerUri.Left(7) == _T("mailto:"));
+
+	CString displayUri = safeUri;
+	if (displayUri.GetLength() > 500)
+		displayUri = displayUri.Left(497) + _T("...");
+
+	if (!isHttp && !isHttps && !isMailto)
+	{
+		CString blockMsg;
+		blockMsg.Format(
+			_T("出于安全考虑，小龚PDF阅读器仅允许打开 http / https / mailto 外部链接，已阻止以下协议地址：\n\n%s"),
+			displayUri.GetString());
+		MessageBox(blockMsg, _T("安全提示"), MB_OK | MB_ICONWARNING);
+		return;
+	}
+
+	CString confirmMsg;
+	confirmMsg.Format(
+		_T("即将调用系统默认%s打开以下%s：\n\n%s\n\n小龚PDF阅读器自身保持零联网。请确认该目标地址安全可信，是否继续打开？"),
+		isMailto ? _T("邮件客户端") : _T("浏览器"),
+		isMailto ? _T("邮件地址") : _T("外部链接"),
+		displayUri.GetString());
+
+	if (MessageBox(confirmMsg, _T("打开外部链接确认"),
+		MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES)
+	{
+		return;
+	}
+
+	HINSTANCE hResult = ::ShellExecute(GetSafeHwnd(), _T("open"),
+		safeUri, nullptr, nullptr, SW_SHOWNORMAL);
+	if (reinterpret_cast<INT_PTR>(hResult) <= 32)
+	{
+		MessageBox(_T("无法调用系统默认程序打开该链接。"),
+			_T("提示"), MB_OK | MB_ICONWARNING);
+	}
+}
+
+// ============================================================================
+// 框选区域高清截图与页面导出图片实现
+// ============================================================================
+
+void CXiaoGongPDFDlg::OnMenuRegionCapture()
+{
+	if (!m_doc || m_totalPages <= 0)
+	{
+		SetStatusBarMessage(_T("请先打开 PDF 文档后再使用区域截图"));
+		return;
+	}
+
+	if (m_isAreaCaptureMode)
+		CancelAreaCaptureMode(true);
+	else
+		StartAreaCaptureMode();
+}
+
+void CXiaoGongPDFDlg::StartAreaCaptureMode()
+{
+	if (!m_doc || m_totalPages <= 0)
+		return;
+
+	ClearSelection();
+	ClearHoverLinkFeedback();
+	m_isAreaCaptureMode = true;
+	m_isDraggingCaptureRect = false;
+	m_hasCaptureRect = false;
+	m_hoverCaptureAction = CAPTURE_ACT_NONE;
+	m_pressedCaptureAction = CAPTURE_ACT_NONE;
+	for (auto& r : m_captureActionRects)
+		r.SetRectEmpty();
+
+	UpdateSnapshotButtonColors();
+	SetStatusBarMessage(_T("区域截图模式：在页面上拖动鼠标框选区域（空格+左键可平移页面，右键或 Esc 取消）"));
+	InvalidateSelection();
+
+	if (m_pdfView.GetSafeHwnd())
+	{
+		SendMessage(WM_SETCURSOR,
+			reinterpret_cast<WPARAM>(m_pdfView.GetSafeHwnd()),
+			MAKELPARAM(HTCLIENT, WM_MOUSEMOVE));
+	}
+}
+
+void CXiaoGongPDFDlg::CancelAreaCaptureMode(bool restoreStatusBar)
+{
+	const bool wasActive = m_isAreaCaptureMode || m_isDraggingCaptureRect || m_hasCaptureRect;
+	m_isAreaCaptureMode = false;
+	m_isDraggingCaptureRect = false;
+	m_hasCaptureRect = false;
+	m_hoverCaptureAction = CAPTURE_ACT_NONE;
+	m_pressedCaptureAction = CAPTURE_ACT_NONE;
+	for (auto& r : m_captureActionRects)
+		r.SetRectEmpty();
+
+	if (wasActive && ::GetCapture() == GetSafeHwnd() && !m_isDragging && !m_isSelecting && !m_isWindowDragging)
+		::ReleaseCapture();
+
+	UpdateSnapshotButtonColors();
+	if (restoreStatusBar && m_statusBar.GetSafeHwnd())
+		UpdateStatusBar();
+	if (wasActive)
+	{
+		InvalidateSelection();
+		if (m_pdfView.GetSafeHwnd())
+		{
+			SendMessage(WM_SETCURSOR,
+				reinterpret_cast<WPARAM>(m_pdfView.GetSafeHwnd()),
+				MAKELPARAM(HTCLIENT, WM_MOUSEMOVE));
+		}
+	}
+}
+
+void CXiaoGongPDFDlg::ClearActiveCaptureRect()
+{
+	if (!m_isDraggingCaptureRect && !m_hasCaptureRect)
+		return;
+	m_isDraggingCaptureRect = false;
+	m_hasCaptureRect = false;
+	m_hoverCaptureAction = CAPTURE_ACT_NONE;
+	m_pressedCaptureAction = CAPTURE_ACT_NONE;
+	for (auto& r : m_captureActionRects)
+		r.SetRectEmpty();
+	if (m_isAreaCaptureMode)
+		SetStatusBarMessage(_T("区域截图模式：在页面上拖动鼠标框选区域（右键或 Esc 取消）"));
+	InvalidateSelection();
+}
+
+CRect CXiaoGongPDFDlg::GetNormalizedCaptureViewRect() const
+{
+	CRect r(
+		min(m_captureStartView.x, m_captureEndView.x),
+		min(m_captureStartView.y, m_captureEndView.y),
+		max(m_captureStartView.x, m_captureEndView.x),
+		max(m_captureStartView.y, m_captureEndView.y));
+	if (m_pdfView.GetSafeHwnd())
+	{
+		CRect clientRect;
+		m_pdfView.GetClientRect(&clientRect);
+		r.IntersectRect(&r, &clientRect);
+	}
+	return r;
+}
+
+bool CXiaoGongPDFDlg::ComputeCapturePixelSizePreview(const CRect& viewSelRect,
+	CSize& outPixelSize, int& outDpi) const
+{
+	outPixelSize = CSize(0, 0);
+	outDpi = 300;
+	if (!m_doc || m_totalPages <= 0 || viewSelRect.Width() < 2 || viewSelRect.Height() < 2)
+		return false;
+
+	auto* pSelf = const_cast<CXiaoGongPDFDlg*>(this);
+	CRect unionClipped(0, 0, 0, 0);
+	float sampleViewScale = m_uniformScale;
+	int hitCount = 0;
+
+	for (int p = 0; p < m_totalPages; ++p)
+	{
+		if (p < static_cast<int>(m_pageYPositions.size()) &&
+			p < static_cast<int>(m_pageHeights.size()))
+		{
+			const int pageTopView = m_pageYPositions[p] - m_scrollPosition + m_panOffset.y;
+			const int pageBottomView = pageTopView + m_pageHeights[p];
+			if (pageBottomView < viewSelRect.top || pageTopView > viewSelRect.bottom)
+				continue;
+		}
+
+		fz_rect bounds = {};
+		float viewScale = 0.0f;
+		int offsetX = 0;
+		int offsetY = 0;
+		if (!pSelf->GetSelectionPageTransform(p, bounds, viewScale, offsetX, offsetY))
+			continue;
+
+		const int rotation = pSelf->GetPageRotation(p);
+		const float origW = bounds.x1 - bounds.x0;
+		const float origH = bounds.y1 - bounds.y0;
+		const float effW = (rotation == 90 || rotation == 270) ? origH : origW;
+		const float effH = (rotation == 90 || rotation == 270) ? origW : origH;
+		CRect pageRect(offsetX, offsetY,
+			offsetX + ClampRenderDimension(effW * viewScale),
+			offsetY + ClampRenderDimension(effH * viewScale));
+
+		CRect inter;
+		if (inter.IntersectRect(&viewSelRect, &pageRect) && !inter.IsRectEmpty())
+		{
+			if (hitCount == 0)
+				unionClipped = inter;
+			else
+				unionClipped.UnionRect(&unionClipped, &inter);
+			sampleViewScale = viewScale;
+			++hitCount;
+		}
+	}
+
+	if (hitCount == 0 || unionClipped.Width() < 2 || unionClipped.Height() < 2 || sampleViewScale <= 0.0f)
+		return false;
+
+	constexpr float MIN_SCALE = 300.0f / 72.0f;
+	constexpr float MAX_SCALE = 600.0f / 72.0f;
+	constexpr double MAX_CAPTURE_PIXELS = 36.0 * 1024.0 * 1024.0;
+
+	float renderScale = min(MAX_SCALE, max(MIN_SCALE, sampleViewScale * 1.5f));
+	float ratio = renderScale / sampleViewScale;
+	const double estPixels = static_cast<double>(unionClipped.Width()) *
+		static_cast<double>(unionClipped.Height()) * ratio * ratio;
+	if (estPixels > MAX_CAPTURE_PIXELS)
+	{
+		ratio *= static_cast<float>(std::sqrt(MAX_CAPTURE_PIXELS / estPixels));
+		renderScale = sampleViewScale * ratio;
+	}
+
+	outPixelSize.cx = max(1, static_cast<int>(std::round(unionClipped.Width() * ratio)));
+	outPixelSize.cy = max(1, static_cast<int>(std::round(unionClipped.Height() * ratio)));
+	outDpi = max(72, static_cast<int>(renderScale * 72.0f + 0.5f));
+	return true;
+}
+
+int CXiaoGongPDFDlg::HitTestCaptureActionBar(CPoint viewPt) const
+{
+	if (!m_isAreaCaptureMode || !m_hasCaptureRect || m_isDraggingCaptureRect)
+		return CAPTURE_ACT_NONE;
+	for (int i = 0; i < 3; ++i)
+	{
+		if (!m_captureActionRects[i].IsRectEmpty() && m_captureActionRects[i].PtInRect(viewPt))
+			return i;
+	}
+	return CAPTURE_ACT_NONE;
+}
+
+void CXiaoGongPDFDlg::DrawAreaCaptureOverlay(CDC* pDC, const CRect& clientRect)
+{
+	if (!pDC || !IsAreaCaptureOverlayVisible() || clientRect.IsRectEmpty())
+		return;
+
+	CRect selRect = GetNormalizedCaptureViewRect();
+	if (selRect.IsRectEmpty())
+		return;
+
+	// 1. 绘制选区四周的半透明暗角遮罩，突出框选区域
+	CDC maskDC;
+	CBitmap maskBmp;
+	if (maskDC.CreateCompatibleDC(pDC) && maskBmp.CreateCompatibleBitmap(pDC, 1, 1))
+	{
+		CBitmap* pOldMask = maskDC.SelectObject(&maskBmp);
+		maskDC.FillSolidRect(0, 0, 1, 1, RGB(0, 0, 0));
+		BLENDFUNCTION bf = { AC_SRC_OVER, 0, 88, 0 };
+
+		auto dimRect = [&](int l, int t, int r, int b)
+		{
+			if (r > l && b > t)
+				pDC->AlphaBlend(l, t, r - l, b - t, &maskDC, 0, 0, 1, 1, bf);
+		};
+		dimRect(clientRect.left, clientRect.top, clientRect.right, selRect.top);
+		dimRect(clientRect.left, selRect.bottom, clientRect.right, clientRect.bottom);
+		dimRect(clientRect.left, selRect.top, selRect.left, selRect.bottom);
+		dimRect(selRect.right, selRect.top, clientRect.right, selRect.bottom);
+
+		maskDC.SelectObject(pOldMask);
+	}
+
+	Gdiplus::Graphics graphics(pDC->GetSafeHdc());
+	graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+	// 2. 绘制蓝色高亮选框及 8 个控制点锚点
+	Gdiplus::Pen borderPen(Gdiplus::Color(255, 26, 115, 232), 1.8f);
+	graphics.DrawRectangle(&borderPen,
+		selRect.left, selRect.top, max(1, selRect.Width() - 1), max(1, selRect.Height() - 1));
+
+	const CPoint anchors[8] = {
+		{ selRect.left, selRect.top },
+		{ (selRect.left + selRect.right) / 2, selRect.top },
+		{ selRect.right - 1, selRect.top },
+		{ selRect.right - 1, (selRect.top + selRect.bottom) / 2 },
+		{ selRect.right - 1, selRect.bottom - 1 },
+		{ (selRect.left + selRect.right) / 2, selRect.bottom - 1 },
+		{ selRect.left, selRect.bottom - 1 },
+		{ selRect.left, (selRect.top + selRect.bottom) / 2 }
+	};
+	Gdiplus::SolidBrush handleFill(Gdiplus::Color(255, 255, 255, 255));
+	Gdiplus::Pen handlePen(Gdiplus::Color(255, 26, 115, 232), 1.2f);
+	for (const CPoint& pt : anchors)
+	{
+		Gdiplus::Rect hr(pt.x - 3, pt.y - 3, 6, 6);
+		graphics.FillRectangle(&handleFill, hr);
+		graphics.DrawRectangle(&handlePen, hr);
+	}
+
+	if (!m_captureBarFont.GetSafeHandle())
+	{
+		m_captureBarFont.CreateFont(-13, 0, 0, 0, FW_MEDIUM, FALSE, FALSE, 0,
+			DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+			CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, _T("微软雅黑"));
+	}
+
+	auto drawRoundPill = [&](const CRect& rc, float radius, Gdiplus::Color fill,
+		Gdiplus::Color border, bool withBorder)
+	{
+		if (rc.Width() <= 2 || rc.Height() <= 2)
+			return;
+		const float r = max(1.0f, min(radius, min(rc.Width(), rc.Height()) * 0.5f));
+		const float d = r * 2.0f;
+		Gdiplus::RectF rf(static_cast<Gdiplus::REAL>(rc.left) + 0.5f,
+			static_cast<Gdiplus::REAL>(rc.top) + 0.5f,
+			static_cast<Gdiplus::REAL>(rc.Width() - 1),
+			static_cast<Gdiplus::REAL>(rc.Height() - 1));
+		Gdiplus::GraphicsPath path;
+		path.AddArc(rf.X, rf.Y, d, d, 180.0f, 90.0f);
+		path.AddArc(rf.GetRight() - d, rf.Y, d, d, 270.0f, 90.0f);
+		path.AddArc(rf.GetRight() - d, rf.GetBottom() - d, d, d, 0.0f, 90.0f);
+		path.AddArc(rf.X, rf.GetBottom() - d, d, d, 90.0f, 90.0f);
+		path.CloseFigure();
+		Gdiplus::SolidBrush b(fill);
+		graphics.FillPath(&b, &path);
+		if (withBorder)
+		{
+			Gdiplus::Pen p(border, 1.0f);
+			graphics.DrawPath(&p, &path);
+		}
+	};
+
+	pDC->SetBkMode(TRANSPARENT);
+	CFont* pOldFont = pDC->SelectObject(&m_captureBarFont);
+
+	// 3. 左上角输出像素尺寸提示胶囊
+	CSize pxSize(0, 0);
+	int outDpi = 300;
+	if (ComputeCapturePixelSizePreview(selRect, pxSize, outDpi))
+	{
+		CString badgeText;
+		badgeText.Format(_T("%d × %d px (%d DPI)"), pxSize.cx, pxSize.cy, outDpi);
+		const CSize ext = pDC->GetTextExtent(badgeText);
+		const int badgeW = ext.cx + 18;
+		const int badgeH = 24;
+		int badgeX = max(clientRect.left + 6, min(selRect.left, clientRect.right - badgeW - 6));
+		int badgeY = (selRect.top >= badgeH + 8) ? (selRect.top - badgeH - 6) : (selRect.top + 6);
+		CRect badgeRect(badgeX, badgeY, badgeX + badgeW, badgeY + badgeH);
+		drawRoundPill(badgeRect, 5.0f, Gdiplus::Color(220, 28, 33, 40),
+			Gdiplus::Color(180, 70, 80, 95), false);
+		pDC->SetTextColor(RGB(245, 248, 252));
+		pDC->DrawText(badgeText, &badgeRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+	}
+
+	// 4. 释放鼠标后在选框右下角显示浮动操作条：[复制截图] [保存 PNG] [取消]
+	for (auto& r : m_captureActionRects)
+		r.SetRectEmpty();
+
+	if (m_hasCaptureRect && !m_isDraggingCaptureRect)
+	{
+		const int barH = 36;
+		const int pad = 5;
+		const int btnGap = 6;
+		const int btnCopyW = 86;
+		const int btnSaveW = 86;
+		const int btnCancelW = 56;
+		const int barW = pad * 2 + btnCopyW + btnSaveW + btnCancelW + btnGap * 2;
+
+		int barX = selRect.right - barW;
+		barX = max(clientRect.left + 8, min(barX, clientRect.right - barW - 8));
+		int barY = selRect.bottom + 8;
+		if (barY + barH + 6 > clientRect.bottom)
+		{
+			barY = (selRect.top >= barH + 14) ? (selRect.top - barH - 8) : (selRect.bottom - barH - 8);
+		}
+		barY = max(clientRect.top + 6, min(barY, clientRect.bottom - barH - 6));
+
+		CRect barRect(barX, barY, barX + barW, barY + barH);
+		const bool dark = (m_readingMode == READING_NIGHT);
+		drawRoundPill(barRect, 8.0f,
+			dark ? Gdiplus::Color(245, 40, 44, 50) : Gdiplus::Color(248, 255, 255, 255),
+			dark ? Gdiplus::Color(255, 72, 79, 88) : Gdiplus::Color(255, 206, 218, 235),
+			true);
+
+		const int btnTop = barY + pad;
+		const int btnBottom = barY + barH - pad;
+		m_captureActionRects[CAPTURE_ACT_COPY].SetRect(barX + pad, btnTop,
+			barX + pad + btnCopyW, btnBottom);
+		m_captureActionRects[CAPTURE_ACT_SAVE].SetRect(
+			m_captureActionRects[CAPTURE_ACT_COPY].right + btnGap, btnTop,
+			m_captureActionRects[CAPTURE_ACT_COPY].right + btnGap + btnSaveW, btnBottom);
+		m_captureActionRects[CAPTURE_ACT_CANCEL].SetRect(
+			m_captureActionRects[CAPTURE_ACT_SAVE].right + btnGap, btnTop,
+			m_captureActionRects[CAPTURE_ACT_SAVE].right + btnGap + btnCancelW, btnBottom);
+
+		const LPCTSTR labels[3] = { _T("复制截图"), _T("保存 PNG"), _T("取消") };
+		for (int i = 0; i < 3; ++i)
+		{
+			const bool hovered = (m_hoverCaptureAction == i);
+			const bool pressed = (m_pressedCaptureAction == i);
+			if (i == CAPTURE_ACT_COPY)
+			{
+				Gdiplus::Color fill = pressed ? Gdiplus::Color(255, 18, 92, 192) :
+					(hovered ? Gdiplus::Color(255, 22, 105, 215) : Gdiplus::Color(255, 29, 124, 243));
+				drawRoundPill(m_captureActionRects[i], 5.0f, fill, fill, false);
+				pDC->SetTextColor(RGB(255, 255, 255));
+			}
+			else
+			{
+				if (hovered || pressed)
+				{
+					Gdiplus::Color fill = dark ?
+						(pressed ? Gdiplus::Color(255, 68, 75, 85) : Gdiplus::Color(255, 56, 62, 70)) :
+						(pressed ? Gdiplus::Color(255, 216, 230, 248) : Gdiplus::Color(255, 234, 242, 253));
+					drawRoundPill(m_captureActionRects[i], 5.0f, fill, fill, false);
+				}
+				pDC->SetTextColor(dark ? RGB(228, 233, 238) : RGB(36, 44, 54));
+			}
+			pDC->DrawText(labels[i], &m_captureActionRects[i],
+				DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+		}
+	}
+
+	pDC->SelectObject(pOldFont);
+}
+
+bool CXiaoGongPDFDlg::RenderCapturedRegionBuffer(const CRect& viewSelRect,
+	ExportBitmapBuffer& outBuffer, int& outDpi)
+{
+	outBuffer = ExportBitmapBuffer{};
+	outDpi = 300;
+	if (!m_ctx || !m_doc || m_totalPages <= 0 || viewSelRect.Width() < 2 || viewSelRect.Height() < 2)
+		return false;
+
+	struct PageSliceHit
+	{
+		int pageNumber;
+		fz_rect bounds;
+		int rotation;
+		float effW;
+		float effH;
+		float viewScale;
+		int offsetX;
+		int offsetY;
+		CRect inter;
+	};
+	std::vector<PageSliceHit> hits;
+	CRect unionClipped(0, 0, 0, 0);
+
+	for (int p = 0; p < m_totalPages; ++p)
+	{
+		if (p < static_cast<int>(m_pageYPositions.size()) &&
+			p < static_cast<int>(m_pageHeights.size()))
+		{
+			const int pageTopView = m_pageYPositions[p] - m_scrollPosition + m_panOffset.y;
+			const int pageBottomView = pageTopView + m_pageHeights[p];
+			if (pageBottomView < viewSelRect.top || pageTopView > viewSelRect.bottom)
+				continue;
+		}
+
+		fz_rect bounds = {};
+		float viewScale = 0.0f;
+		int offsetX = 0;
+		int offsetY = 0;
+		if (!GetSelectionPageTransform(p, bounds, viewScale, offsetX, offsetY))
+			continue;
+
+		const int rotation = GetPageRotation(p);
+		const float origW = bounds.x1 - bounds.x0;
+		const float origH = bounds.y1 - bounds.y0;
+		const float effW = (rotation == 90 || rotation == 270) ? origH : origW;
+		const float effH = (rotation == 90 || rotation == 270) ? origW : origH;
+		CRect pageRect(offsetX, offsetY,
+			offsetX + ClampRenderDimension(effW * viewScale),
+			offsetY + ClampRenderDimension(effH * viewScale));
+
+		CRect inter;
+		if (inter.IntersectRect(&viewSelRect, &pageRect) && !inter.IsRectEmpty())
+		{
+			if (hits.empty())
+				unionClipped = inter;
+			else
+				unionClipped.UnionRect(&unionClipped, &inter);
+			hits.push_back({ p, bounds, rotation, effW, effH, viewScale, offsetX, offsetY, inter });
+		}
+	}
+
+	if (hits.empty() || unionClipped.Width() < 2 || unionClipped.Height() < 2)
+		return false;
+
+	constexpr float MIN_SCALE = 300.0f / 72.0f;
+	constexpr float MAX_SCALE = 600.0f / 72.0f;
+	constexpr double MAX_CAPTURE_PIXELS = 36.0 * 1024.0 * 1024.0;
+
+	const float baseViewScale = max(0.01f, hits.front().viewScale);
+	float renderScale = min(MAX_SCALE, max(MIN_SCALE, baseViewScale * 1.5f));
+	float ratio = renderScale / baseViewScale;
+	const double estPixels = static_cast<double>(unionClipped.Width()) *
+		static_cast<double>(unionClipped.Height()) * ratio * ratio;
+	if (estPixels > MAX_CAPTURE_PIXELS)
+	{
+		ratio *= static_cast<float>(std::sqrt(MAX_CAPTURE_PIXELS / estPixels));
+		renderScale = baseViewScale * ratio;
+	}
+	outDpi = max(72, static_cast<int>(renderScale * 72.0f + 0.5f));
+
+	auto renderSubPage = [&](const PageSliceHit& h, ExportBitmapBuffer& sliceBuf) -> bool
+	{
+		const float ptLeft = max(0.0f, min(h.effW, (h.inter.left - h.offsetX) / h.viewScale));
+		const float ptTop = max(0.0f, min(h.effH, (h.inter.top - h.offsetY) / h.viewScale));
+		const float ptRight = max(ptLeft, min(h.effW, (h.inter.right - h.offsetX) / h.viewScale));
+		const float ptBottom = max(ptTop, min(h.effH, (h.inter.bottom - h.offsetY) / h.viewScale));
+
+		const int cropX = static_cast<int>(std::floor(ptLeft * renderScale));
+		const int cropY = static_cast<int>(std::floor(ptTop * renderScale));
+		const int cropW = max(1, static_cast<int>(std::ceil(ptRight * renderScale)) - cropX);
+		const int cropH = max(1, static_cast<int>(std::ceil(ptBottom * renderScale)) - cropY);
+		const int stride = cropW * 4;
+
+		try
+		{
+			sliceBuf.bgra.assign(static_cast<size_t>(stride) * static_cast<size_t>(cropH), 0xFF);
+		}
+		catch (...)
+		{
+			return false;
+		}
+		sliceBuf.width = cropW;
+		sliceBuf.height = cropH;
+		sliceBuf.stride = stride;
+
+		BYTE* pSamples = sliceBuf.bgra.data();
+		bool rendered = false;
+		fz_var(rendered);
+
+		CSingleLock lock(&m_renderLock, TRUE);
+		fz_page* pPage = nullptr;
+		fz_pixmap* pPixmap = nullptr;
+		fz_device* pDev = nullptr;
+		fz_var(pPage);
+		fz_var(pPixmap);
+		fz_var(pDev);
+		fz_try(m_ctx)
+		{
+			pPage = fz_load_page(m_ctx, m_doc, h.pageNumber);
+			if (!pPage)
+				fz_throw(m_ctx, FZ_ERROR_GENERIC, "Failed to load page for region capture");
+			pPixmap = fz_new_pixmap_with_data(m_ctx, fz_device_bgr(m_ctx),
+				cropW, cropH, nullptr, 1, stride, pSamples);
+			fz_clear_pixmap_with_value(m_ctx, pPixmap, 0xff);
+			fz_matrix ctm = BuildPageRenderMatrix(h.bounds, renderScale, h.rotation);
+			ctm = fz_concat(ctm, fz_translate(static_cast<float>(-cropX), static_cast<float>(-cropY)));
+			pDev = fz_new_draw_device(m_ctx, ctm, pPixmap);
+			fz_run_page(m_ctx, pPage, pDev, fz_identity, nullptr);
+			fz_close_device(m_ctx, pDev);
+			rendered = true;
+		}
+		fz_always(m_ctx)
+		{
+			if (pDev)
+				fz_drop_device(m_ctx, pDev);
+			if (pPixmap)
+				fz_drop_pixmap(m_ctx, pPixmap);
+			if (pPage)
+				fz_drop_page(m_ctx, pPage);
+		}
+		fz_catch(m_ctx)
+		{
+			rendered = false;
+		}
+		return rendered;
+	};
+
+	// 单页框选（绝大多数场景）：直接输出零拷贝切片缓冲区
+	if (hits.size() == 1)
+	{
+		return renderSubPage(hits.front(), outBuffer);
+	}
+
+	// 跨页框选：合成所有命中页的高清局部渲染切片
+	const int canvasW = max(1, static_cast<int>(std::round(unionClipped.Width() * ratio)));
+	const int canvasH = max(1, static_cast<int>(std::round(unionClipped.Height() * ratio)));
+	const int canvasStride = canvasW * 4;
+	try
+	{
+		outBuffer.bgra.assign(static_cast<size_t>(canvasStride) * static_cast<size_t>(canvasH), 0xFF);
+	}
+	catch (...)
+	{
+		return false;
+	}
+	outBuffer.width = canvasW;
+	outBuffer.height = canvasH;
+	outBuffer.stride = canvasStride;
+
+	for (const PageSliceHit& h : hits)
+	{
+		ExportBitmapBuffer slice;
+		if (!renderSubPage(h, slice))
+			return false;
+
+		const int dstX = max(0, static_cast<int>(std::round((h.inter.left - unionClipped.left) * ratio)));
+		const int dstY = max(0, static_cast<int>(std::round((h.inter.top - unionClipped.top) * ratio)));
+		const int copyW = min(slice.width, canvasW - dstX);
+		const int copyH = min(slice.height, canvasH - dstY);
+		for (int row = 0; row < copyH; ++row)
+		{
+			BYTE* pDst = outBuffer.bgra.data() +
+				static_cast<size_t>(dstY + row) * canvasStride +
+				static_cast<size_t>(dstX) * 4;
+			const BYTE* pSrc = slice.bgra.data() + static_cast<size_t>(row) * slice.stride;
+			std::memcpy(pDst, pSrc, static_cast<size_t>(copyW) * 4);
+		}
+	}
+	return true;
+}
+
+void CXiaoGongPDFDlg::CopyCapturedRegionToClipboard()
+{
+	if (!m_isAreaCaptureMode || !m_hasCaptureRect)
+		return;
+
+	const CRect selRect = GetNormalizedCaptureViewRect();
+	ExportBitmapBuffer buffer;
+	int outDpi = 300;
+	if (!RenderCapturedRegionBuffer(selRect, buffer, outDpi))
+	{
+		MessageBox(_T("渲染所选区域失败，请重试。"), _T("提示"), MB_OK | MB_ICONWARNING);
+		return;
+	}
+
+	if (!CopyBgrxBufferToClipboard(GetSafeHwnd(), buffer.bgra.data(),
+		buffer.width, buffer.height, buffer.stride))
+	{
+		MessageBox(_T("无法将截图写入剪贴板。"), _T("错误"), MB_OK | MB_ICONERROR);
+		return;
+	}
+
+	CancelAreaCaptureMode(false);
+	CString msg;
+	msg.Format(_T("已复制高清区域截图到剪贴板 (%d×%d px, %d DPI)"),
+		buffer.width, buffer.height, outDpi);
+	SetStatusBarMessage(msg);
+}
+
+void CXiaoGongPDFDlg::SaveCapturedRegionAsPng()
+{
+	if (!m_isAreaCaptureMode || !m_hasCaptureRect)
+		return;
+
+	const CRect selRect = GetNormalizedCaptureViewRect();
+	ExportBitmapBuffer buffer;
+	int outDpi = 300;
+	if (!RenderCapturedRegionBuffer(selRect, buffer, outDpi))
+	{
+		MessageBox(_T("渲染所选区域失败，请重试。"), _T("提示"), MB_OK | MB_ICONWARNING);
+		return;
+	}
+
+	CString baseName(_T("PDF截图"));
+	CString initialDir;
+	if (CPDFDocument* pDoc = GetActiveDocument())
+	{
+		const CString fullPath = pDoc->GetFilePath();
+		const int slash = max(fullPath.ReverseFind(_T('\\')), fullPath.ReverseFind(_T('/')));
+		if (slash > 0)
+			initialDir = fullPath.Left(slash);
+		CString fileName = pDoc->GetFileName();
+		const int dot = fileName.ReverseFind(_T('.'));
+		if (dot > 0)
+			fileName = fileName.Left(dot);
+		if (!fileName.IsEmpty())
+			baseName = fileName;
+	}
+
+	CString defaultName;
+	defaultName.Format(_T("%s_第%d页_区域截图.png"), baseName.GetString(), m_currentPage + 1);
+	if (!initialDir.IsEmpty())
+		defaultName = initialDir + _T("\\") + defaultName;
+
+	ScopedFileWatchSuspend suspendWatch(this);
+	CFileDialog saveDlg(FALSE, _T("png"), defaultName,
+		OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST,
+		_T("PNG 高清无损图片 (*.png)|*.png||"), this);
+	if (saveDlg.DoModal() != IDOK)
+		return;
+
+	const CString savePath = saveDlg.GetPathName();
+	if (!SaveBgrxBufferToImageFile(buffer.bgra.data(), buffer.width, buffer.height,
+		buffer.stride, savePath, ExportImageFormat::Png, outDpi))
+	{
+		MessageBox(_T("保存 PNG 图片失败，请检查目标路径权限与磁盘空间。"),
+			_T("保存失败"), MB_OK | MB_ICONERROR);
+		return;
+	}
+
+	CancelAreaCaptureMode(false);
+	CString msg;
+	msg.Format(_T("高清区域截图已保存：%s (%d×%d px)"),
+		savePath.GetString(), buffer.width, buffer.height);
+	SetStatusBarMessage(msg);
+}
+
+bool CXiaoGongPDFDlg::RenderDocumentPageBuffer(int pageNumber, float targetScale,
+	double maxPixels, ExportBitmapBuffer& outBuffer)
+{
+	outBuffer = ExportBitmapBuffer{};
+	if (!m_ctx || !m_doc || pageNumber < 0 || pageNumber >= m_totalPages || targetScale <= 0.0f)
+		return false;
+
+	fz_rect bounds = {};
+	if (!TryGetPageBaseBounds(pageNumber, bounds))
+		return false;
+
+	const int rotation = GetPageRotation(pageNumber);
+	const float origW = bounds.x1 - bounds.x0;
+	const float origH = bounds.y1 - bounds.y0;
+	const float effW = max(1.0f, (rotation == 90 || rotation == 270) ? origH : origW);
+	const float effH = max(1.0f, (rotation == 90 || rotation == 270) ? origW : origH);
+
+	float scale = targetScale;
+	const double estPixels = static_cast<double>(effW) * static_cast<double>(effH) * scale * scale;
+	if (maxPixels > 0.0 && estPixels > maxPixels)
+		scale *= static_cast<float>(std::sqrt(maxPixels / estPixels));
+
+	const int width = ClampRenderDimension(effW * scale);
+	const int height = ClampRenderDimension(effH * scale);
+	const int stride = width * 4;
+
+	try
+	{
+		outBuffer.bgra.assign(static_cast<size_t>(stride) * static_cast<size_t>(height), 0xFF);
+	}
+	catch (...)
+	{
+		return false;
+	}
+	outBuffer.width = width;
+	outBuffer.height = height;
+	outBuffer.stride = stride;
+
+	BYTE* pSamples = outBuffer.bgra.data();
+	bool rendered = false;
+	fz_var(rendered);
+
 	CSingleLock lock(&m_renderLock, TRUE);
+	fz_page* pPage = nullptr;
+	fz_pixmap* pPixmap = nullptr;
+	fz_device* pDev = nullptr;
+	fz_var(pPage);
+	fz_var(pPixmap);
+	fz_var(pDev);
 	fz_try(m_ctx)
 	{
-		page = fz_load_page(m_ctx, m_doc, sourcePage);
-		links = fz_load_links(m_ctx, page);
-		for (fz_link* link = links; link; link = link->next)
-		{
-			if (!link->uri || !fz_is_point_inside_rect(pdfPoint, link->rect) ||
-				fz_is_external_link(m_ctx, link->uri))
-				continue;
-			const fz_link_dest dest = fz_resolve_link_dest(m_ctx, m_doc, link->uri);
-			if (dest.loc.chapter < 0 || dest.loc.page < 0)
-				continue;
-			const int pageNumber = fz_page_number_from_location(m_ctx, m_doc, dest.loc);
-			if (pageNumber < 0 || pageNumber >= m_totalPages)
-				continue;
-			targetPage = pageNumber;
-			if (dest.type == FZ_LINK_DEST_XYZ)
-				targetX = dest.x;
-			if (dest.type == FZ_LINK_DEST_XYZ || dest.type == FZ_LINK_DEST_FIT_H ||
-				dest.type == FZ_LINK_DEST_FIT_BH)
-				targetY = dest.y;
-			break;
-		}
+		pPage = fz_load_page(m_ctx, m_doc, pageNumber);
+		if (!pPage)
+			fz_throw(m_ctx, FZ_ERROR_GENERIC, "Failed to load page for image export");
+		pPixmap = fz_new_pixmap_with_data(m_ctx, fz_device_bgr(m_ctx),
+			width, height, nullptr, 1, stride, pSamples);
+		fz_clear_pixmap_with_value(m_ctx, pPixmap, 0xff);
+		const fz_matrix ctm = BuildPageRenderMatrix(bounds, scale, rotation);
+		pDev = fz_new_draw_device(m_ctx, ctm, pPixmap);
+		fz_run_page(m_ctx, pPage, pDev, fz_identity, nullptr);
+		fz_close_device(m_ctx, pDev);
+		rendered = true;
 	}
 	fz_always(m_ctx)
 	{
-		if (links)
-			fz_drop_link(m_ctx, links);
-		if (page)
-			fz_drop_page(m_ctx, page);
+		if (pDev)
+			fz_drop_device(m_ctx, pDev);
+		if (pPixmap)
+			fz_drop_pixmap(m_ctx, pPixmap);
+		if (pPage)
+			fz_drop_page(m_ctx, pPage);
 	}
 	fz_catch(m_ctx)
 	{
-		targetPage = -1;
-		targetX = -1.0f;
-		targetY = -1.0f;
+		rendered = false;
 	}
-	return targetPage >= 0;
+	return rendered;
+}
+
+void CXiaoGongPDFDlg::CopyCurrentPageAsImage()
+{
+	if (!m_doc || m_totalPages <= 0 || m_currentPage < 0 || m_currentPage >= m_totalPages)
+		return;
+
+	ExportBitmapBuffer buffer;
+	constexpr float SCALE_300_DPI = 300.0f / 72.0f;
+	constexpr double MAX_PAGE_PIXELS = 32.0 * 1024.0 * 1024.0;
+	if (!RenderDocumentPageBuffer(m_currentPage, SCALE_300_DPI, MAX_PAGE_PIXELS, buffer))
+	{
+		MessageBox(_T("渲染当前页面图片失败。"), _T("错误"), MB_OK | MB_ICONERROR);
+		return;
+	}
+
+	if (CopyBgrxBufferToClipboard(GetSafeHwnd(), buffer.bgra.data(),
+		buffer.width, buffer.height, buffer.stride))
+	{
+		CString msg;
+		msg.Format(_T("已将第 %d 页高清图片复制到剪贴板 (%d×%d px)"),
+			m_currentPage + 1, buffer.width, buffer.height);
+		SetStatusBarMessage(msg);
+	}
+	else
+	{
+		MessageBox(_T("无法将页面图片复制到剪贴板。"), _T("错误"), MB_OK | MB_ICONERROR);
+	}
+}
+
+void CXiaoGongPDFDlg::OnMenuExportImages()
+{
+	if (!m_doc || m_totalPages <= 0)
+	{
+		MessageBox(_T("请先打开 PDF 文档"), _T("提示"), MB_OK | MB_ICONINFORMATION);
+		return;
+	}
+
+	CancelAreaCaptureMode(false);
+	ScopedFileWatchSuspend suspendFileWatch(this);
+
+	CPDFDocument* pActiveDoc = GetActiveDocument();
+	const CString docPath = pActiveDoc ? pActiveDoc->GetFilePath() : CString();
+
+	CString summary;
+	const bool exported = RunExportPagesToImages(
+		this,
+		m_totalPages,
+		max(0, min(m_currentPage, m_totalPages - 1)),
+		docPath,
+		[this, pActiveDoc](int pageIndex, float& outWidthPt, float& outHeightPt) -> bool
+		{
+			if (pActiveDoc && pActiveDoc->GetPageBounds(pageIndex, outWidthPt, outHeightPt))
+				return true;
+			fz_rect bounds = {};
+			if (!TryGetPageBaseBounds(pageIndex, bounds))
+				return false;
+			outWidthPt = bounds.x1 - bounds.x0;
+			outHeightPt = bounds.y1 - bounds.y0;
+			const int rot = GetPageRotation(pageIndex);
+			if (rot == 90 || rot == 270)
+				std::swap(outWidthPt, outHeightPt);
+			return true;
+		},
+		[this](int pageIndex, float scale, double maxPixels, ExportBitmapBuffer& outBuffer) -> bool
+		{
+			return RenderDocumentPageBuffer(pageIndex, scale, maxPixels, outBuffer);
+		},
+		&summary);
+
+	if (exported && !summary.IsEmpty())
+		SetStatusBarMessage(summary);
 }
 
 // 清除当前选择
@@ -7875,6 +9260,8 @@ void CXiaoGongPDFDlg::ReloadDocument(CPDFDocument* pDoc)
 	{
 		SaveDialogStateToDocument(pDoc);
 		ClearSelection();
+		CancelAreaCaptureMode(false);
+		InvalidateLinkCache();
 		m_pdfView.SetDisplayBitmap(NULL);
 		SafeDeleteBitmap(m_hContinuousViewBitmap);
 		CleanupBitmap();

@@ -15,6 +15,7 @@
 #include "FileWatcher.h"
 #include "ModernTabCtrl.h"
 #include "PDFDocument.h"
+#include "PDFImageExport.h"
 #include "PDFScrollBar.h"
 #include "PDFSearch.h"
 #include "PDFViewCtrl.h"
@@ -45,6 +46,8 @@ public:
 	afx_msg void onMenuRecentFile(UINT nID);
 	afx_msg void onMenuSetDefault();
 	afx_msg void onMenuShortcuts();
+	afx_msg void OnMenuRegionCapture();
+	afx_msg void OnMenuExportImages();
 
 	// 初始文件路径（从命令行参数传入）
 	CString m_initialFilePath;
@@ -83,7 +86,8 @@ private:
 	CCustomButton m_btnNextPage;
 	CCustomButton m_btnLast;
 	CCustomButton m_btnPrint;
-	CStatic m_toolbarDividers[10];
+	CCustomButton m_btnSnapshot;
+	CStatic m_toolbarDividers[12];
 	CCustomButton m_btnFullscreen;
 	CCustomButton m_btnRotateLeft;
 	CCustomButton m_btnRotateRight;
@@ -198,22 +202,63 @@ private:
 	std::map<int, int> m_pageRotations;
 
 	// 拖拽平移与窗口拖动相关
+	enum class PdfLinkKind
+	{
+		None = 0,
+		Internal,
+		External
+	};
+	struct PdfLinkHit
+	{
+		PdfLinkKind kind = PdfLinkKind::None;
+		int targetPage = -1;
+		float targetX = -1.0f;
+		float targetY = -1.0f;
+		CString externalUri;
+	};
+	struct CachedPageLinkItem
+	{
+		fz_rect rect = { 0.0f, 0.0f, 0.0f, 0.0f };
+		PdfLinkHit hit;
+	};
+
 	bool m_isDragging;
 	bool m_isWindowDragging;
 	CPoint m_windowDragStartScreen;
 	CRect m_windowDragStartRect;
 	CPoint m_lastMousePos;
 	CPoint m_linkPressPoint;
-	int m_pendingLinkPage;
-	float m_pendingLinkX;
-	float m_pendingLinkY;
+	PdfLinkHit m_pendingLinkHit;
 	fz_document* m_pendingLinkDocument;
+	int m_cachedLinksPage = -1;
+	fz_document* m_cachedLinksDoc = nullptr;
+	std::vector<CachedPageLinkItem> m_cachedPageLinks;
+	bool m_hasHoverLinkStatus = false;
+	CString m_lastHoverLinkPreview;
 	CPoint m_panOffset;
 	HCURSOR m_hHandCursor;
 	HCURSOR m_hHandCursorGrab;
 	bool m_canDrag;
 	bool m_spaceKeyDown = false;
 	bool m_tempHandDrag = false;
+
+	// 框选区域高清截图相关
+	enum CaptureBarAction
+	{
+		CAPTURE_ACT_NONE = -1,
+		CAPTURE_ACT_COPY = 0,
+		CAPTURE_ACT_SAVE = 1,
+		CAPTURE_ACT_CANCEL = 2
+	};
+	bool m_isAreaCaptureMode = false;
+	bool m_isDraggingCaptureRect = false;
+	bool m_hasCaptureRect = false;
+	CPoint m_captureStartView{ 0, 0 };
+	CPoint m_captureEndView{ 0, 0 };
+	CRect m_captureActionRects[3];
+	int m_hoverCaptureAction = CAPTURE_ACT_NONE;
+	int m_pressedCaptureAction = CAPTURE_ACT_NONE;
+	CFont m_captureBarFont;
 
 	// 文本选择相关
 	bool m_isSelecting;
@@ -310,6 +355,7 @@ protected:
 	void layoutToolbar(int cx);
 	void ApplyReadingMode(ReadingMode mode);
 	void UpdateOutlineButtonColors();
+	void UpdateSnapshotButtonColors();
 	COLORREF ViewBgColor() const { return m_readingMode == READING_NIGHT ? DARK_VIEW_BACKGROUND : PDF_VIEW_BACKGROUND; }
 	afx_msg void OnReadingMode(UINT nID);
 	void UpdatePageControls();
@@ -458,12 +504,31 @@ protected:
 	afx_msg void OnBtnNextMatch();
 	afx_msg void OnBtnPrevMatch();
 
-	// 文本选择相关函数
+	// 文本选择、链接交互与区域截图相关函数
 	CString ExtractSelectedText();
 	bool CopyTextToClipboard(const CString& text);
 	void CopySelectionToClipboard();
 	bool ScreenPointToPdfCoords(CPoint viewPt, int pageNumber, float& pdfX, float& pdfY);
-	bool HitTestInternalLink(CPoint viewPt, int& targetPage, float& targetX, float& targetY);
+	void InvalidateLinkCache();
+	void EnsurePageLinksCached(int pageNumber);
+	bool HitTestLink(CPoint viewPt, PdfLinkHit& outHit);
+	void UpdateHoverLinkFeedback(CPoint viewPt);
+	void ClearHoverLinkFeedback();
+	void OnPdfViewMouseLeave();
+	void OpenExternalLinkWithConfirm(const CString& externalUri);
+	void StartAreaCaptureMode();
+	void CancelAreaCaptureMode(bool restoreStatusBar = true);
+	void ClearActiveCaptureRect();
+	bool IsAreaCaptureOverlayVisible() const { return m_isAreaCaptureMode && (m_isDraggingCaptureRect || m_hasCaptureRect); }
+	CRect GetNormalizedCaptureViewRect() const;
+	bool ComputeCapturePixelSizePreview(const CRect& viewSelRect, CSize& outPixelSize, int& outDpi) const;
+	void DrawAreaCaptureOverlay(CDC* pDC, const CRect& clientRect);
+	int HitTestCaptureActionBar(CPoint viewPt) const;
+	bool RenderCapturedRegionBuffer(const CRect& viewSelRect, ExportBitmapBuffer& outBuffer, int& outDpi);
+	void CopyCapturedRegionToClipboard();
+	void SaveCapturedRegionAsPng();
+	void CopyCurrentPageAsImage();
+	bool RenderDocumentPageBuffer(int pageNumber, float targetScale, double maxPixels, ExportBitmapBuffer& outBuffer);
 	bool GetSelectionPageTransform(int pageNumber, fz_rect& bounds, float& scale,
 		int& offsetX, int& offsetY);
 	void UpdateSelectedText();

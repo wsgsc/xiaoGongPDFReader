@@ -213,6 +213,7 @@
     <ClInclude Include="FileWatcher.h" />
     <ClInclude Include="PDFDocument.h" />
     <ClInclude Include="PDFEditDialog.h" />
+    <ClInclude Include="PDFImageExport.h" />
     <ClInclude Include="PDFScrollBar.h" />
     <ClInclude Include="PDFSearch.h" />
     <ClInclude Include="PDFViewCtrl.h" />
@@ -237,6 +238,7 @@
     <ClCompile Include="FileWatcher.cpp" />
     <ClCompile Include="PDFDocument.cpp" />
     <ClCompile Include="PDFEditDialog.cpp" />
+    <ClCompile Include="PDFImageExport.cpp" />
     <ClCompile Include="PDFScrollBar.cpp" />
     <ClCompile Include="PDFSearch.cpp" />
     <ClCompile Include="PDFViewCtrl.cpp" />

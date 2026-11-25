@@ -75,6 +75,8 @@ void CShortcutsDialog::InitializeShortcutsList()
 	AddShortcut(_T("Ctrl + 0"), _T("恢复适合宽度缩放"));
 	AddShortcut(_T("空格 + 左键拖拽 / 中键拖拽"), _T("临时抓手拖动页面"));
 	AddShortcut(_T("Ctrl + C"), _T("复制选中的页面文本"));
+	AddShortcut(_T("Ctrl + Shift + S"), _T("框选区域高清截图（复制或保存 PNG）"));
+	AddShortcut(_T("Ctrl + Shift + E"), _T("导出当前页/指定页为 PNG / JPG / 长图"));
 	AddShortcut(_T(""), _T(""));
 
 	AddShortcut(_T("Ctrl + F"), _T("打开文档搜索"));

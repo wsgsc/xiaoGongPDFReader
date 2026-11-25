@@ -68,9 +68,21 @@
 #define IDC_SEARCH_MATCH_COUNT           1081
 #define IDC_BTN_CLOSE_SEARCH_POPUP       1082
 #define IDC_STATUS_ZOOM                  1083
+#define IDC_BTN_SNAPSHOT                 1084
+#define IDC_EXPORT_CURRENT_PAGE          1085
+#define IDC_EXPORT_ALL_PAGES             1086
+#define IDC_EXPORT_PAGE_RANGE            1087
+#define IDC_EXPORT_PAGE_FROM             1088
+#define IDC_EXPORT_PAGE_TO               1089
+#define IDC_EXPORT_FORMAT_COMBO          1090
+#define IDC_EXPORT_DPI_COMBO             1091
+#define IDC_EXPORT_MODE_SEPARATE         1092
+#define IDC_EXPORT_MODE_LONG             1093
+#define IDC_BTN_EDIT_EXPORT_IMG          1094
 #define IDD_PDF_EDIT_DIALOG             105
 #define IDD_PROGRESS_DIALOG             106
 #define IDD_PASSWORD_DIALOG             107
+#define IDD_EXPORT_IMAGE_DIALOG         108
 #define IDC_PASSWORD_FILE               1073
 #define IDC_PASSWORD_PROMPT             1074
 #define IDC_EDIT_PASSWORD               1075
@@ -107,6 +119,8 @@
 #define ID_MENU_READING_NORMAL          32792
 #define ID_MENU_READING_NIGHT           32793
 #define ID_MENU_READING_EYE             32794
+#define ID_MENU_REGION_CAPTURE          32797
+#define ID_MENU_EXPORT_IMAGES           32798
 
 #define WM_PDF_LOAD_COMPLETE   (WM_USER + 104)
 #define WM_PDF_LOAD_CANCELLED  (WM_USER + 105)
@@ -118,8 +132,8 @@
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        137
-#define _APS_NEXT_COMMAND_VALUE         32797
-#define _APS_NEXT_CONTROL_VALUE         1084
+#define _APS_NEXT_COMMAND_VALUE         32799
+#define _APS_NEXT_CONTROL_VALUE         1095
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

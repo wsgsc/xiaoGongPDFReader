@@ -2,6 +2,7 @@
 
 #include "pch.h"
 #include "PDFEditDialog.h"
+#include "PDFImageExport.h"
 #include "resource.h"
 #include <mupdf/pdf.h>
 #include <algorithm>
@@ -353,6 +354,7 @@ IMPLEMENT_DYNAMIC(CPDFEditDialog, CDialogEx)
 
 BEGIN_MESSAGE_MAP(CPDFEditDialog, CDialogEx)
 	ON_BN_CLICKED(IDC_BTN_EDIT_SAVE, &CPDFEditDialog::OnBnClickedBtnSave)
+	ON_BN_CLICKED(IDC_BTN_EDIT_EXPORT_IMG, &CPDFEditDialog::OnBnClickedBtnExportImages)
 	ON_BN_CLICKED(IDC_BTN_EDIT_RESET, &CPDFEditDialog::OnBnClickedBtnReset)
 	ON_BN_CLICKED(IDC_BTN_EDIT_PREVIEW, &CPDFEditDialog::OnBnClickedBtnPreview)
 	ON_BN_CLICKED(IDC_BTN_EDIT_UNDO, &CPDFEditDialog::OnBnClickedBtnUndo)
@@ -513,6 +515,15 @@ BOOL CPDFEditDialog::OnInitDialog()
 		rect.OffsetRect(buttonOffset, 0);
 		button->MoveWindow(&rect);
 	}
+	CRect saveRect;
+	m_btnSave.GetWindowRect(&saveRect);
+	ScreenToClient(&saveRect);
+	const int gapX = max(6, buttonOffset - resetRect.Width());
+	CRect exportRect(saveRect.right + gapX, saveRect.top,
+		saveRect.right + gapX + max(78, saveRect.Width() - 12), saveRect.bottom);
+	m_btnExportImg.Create(_T("导出图片"), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+		exportRect, this, IDC_BTN_EDIT_EXPORT_IMG);
+	m_btnExportImg.SetFont(m_btnSave.GetFont());
 
 	// 初始化缩略图列表
 	InitializeThumbnailList();
@@ -2542,6 +2553,7 @@ void CPDFEditDialog::OnNMRClick(NMHDR* pNMHDR, LRESULT* pResult)
 			extractText = _T("提取此页为新PDF");
 		}
 		menu.AppendMenu(MF_STRING, 6, extractText);
+		menu.AppendMenu(MF_STRING, 7, _T("导出为图片 / 长图..."));
 
 		// 添加删除菜单项
 		CString menuText;
@@ -2577,6 +2589,9 @@ void CPDFEditDialog::OnNMRClick(NMHDR* pNMHDR, LRESULT* pResult)
 		else if (cmd == 6) {
 			ExtractSelectedPages();
 		}
+		else if (cmd == 7) {
+			ExportEditedPagesToImages(true);
+		}
 
 		// 确保子菜单不被销毁前保持有效
 		rotateMenu.Detach();
@@ -2584,6 +2599,231 @@ void CPDFEditDialog::OnNMRClick(NMHDR* pNMHDR, LRESULT* pResult)
 }
 
 // 重置
+void CPDFEditDialog::OnBnClickedBtnExportImages()
+{
+	ExportEditedPagesToImages(false);
+}
+
+void CPDFEditDialog::ExportEditedPagesToImages(bool preferSelectedRange)
+{
+	if (!m_ctx)
+		return;
+
+	std::vector<const PageInfo*> activePages;
+	activePages.reserve(m_pages.size());
+	for (const PageInfo& page : m_pages)
+	{
+		if (!page.isDeleted)
+			activePages.push_back(&page);
+	}
+	if (activePages.empty())
+	{
+		MessageBox(_T("当前没有可导出的页面。"), _T("提示"), MB_OK | MB_ICONINFORMATION);
+		return;
+	}
+
+	int currentLogical = 0;
+	int presetFrom = -1;
+	int presetTo = -1;
+	std::vector<int> selItems;
+	POSITION pos = m_thumbnailList.GetFirstSelectedItemPosition();
+	while (pos)
+		selItems.push_back(m_thumbnailList.GetNextSelectedItem(pos));
+	if (!selItems.empty())
+	{
+		std::sort(selItems.begin(), selItems.end());
+		currentLogical = max(0, min(selItems.front(), static_cast<int>(activePages.size()) - 1));
+		if (preferSelectedRange && selItems.size() > 1)
+		{
+			presetFrom = selItems.front() + 1;
+			presetTo = min(static_cast<int>(activePages.size()), selItems.back() + 1);
+		}
+	}
+
+	auto buildRotatedMatrix = [](const fz_rect& bounds, float scale, int rotation) -> fz_matrix
+	{
+		const int normRotation = ((rotation % 360) + 360) % 360;
+		fz_matrix ctm = fz_scale(scale, scale);
+		if (normRotation != 0)
+		{
+			fz_matrix rotate = fz_rotate(static_cast<float>(normRotation));
+			if (normRotation == 90)
+				rotate = fz_pre_translate(rotate, -bounds.x0, -bounds.y1);
+			else if (normRotation == 180)
+				rotate = fz_pre_translate(rotate, -bounds.x1, -bounds.y1);
+			else if (normRotation == 270)
+				rotate = fz_pre_translate(rotate, -bounds.x1, -bounds.y0);
+			ctm = fz_concat(rotate, ctm);
+		}
+		else if (bounds.x0 != 0.0f || bounds.y0 != 0.0f)
+		{
+			ctm = fz_pre_translate(ctm, -bounds.x0, -bounds.y0);
+		}
+		return ctm;
+	};
+
+	RunExportPagesToImages(
+		this,
+		static_cast<int>(activePages.size()),
+		currentLogical,
+		m_filePath,
+		[this, &activePages](int idx, float& outW, float& outH) -> bool
+		{
+			if (idx < 0 || idx >= static_cast<int>(activePages.size()))
+				return false;
+			const PageInfo* pInfo = activePages[idx];
+			const bool useCur = IsCurrentSourceFile(pInfo->sourceFile) && m_doc != nullptr;
+			fz_document* pDoc = useCur ? m_doc : nullptr;
+			fz_page* pPage = nullptr;
+			bool ok = false;
+			fz_var(pDoc);
+			fz_var(pPage);
+			fz_var(ok);
+			fz_try(m_ctx)
+			{
+				if (!useCur)
+					pDoc = OpenAuthenticatedSource(pInfo->sourceFile);
+				if (!pDoc)
+					fz_throw(m_ctx, FZ_ERROR_GENERIC, "Cannot open source");
+				pPage = fz_load_page(m_ctx, pDoc, pInfo->sourcePageIndex);
+				const fz_rect b = fz_bound_page(m_ctx, pPage);
+				outW = b.x1 - b.x0;
+				outH = b.y1 - b.y0;
+				const int rot = ((pInfo->rotationAngle % 360) + 360) % 360;
+				if (rot == 90 || rot == 270)
+					std::swap(outW, outH);
+				ok = (outW > 0.0f && outH > 0.0f);
+			}
+			fz_always(m_ctx)
+			{
+				if (pPage)
+					fz_drop_page(m_ctx, pPage);
+				if (!useCur && pDoc)
+					fz_drop_document(m_ctx, pDoc);
+			}
+			fz_catch(m_ctx)
+			{
+				ok = false;
+			}
+			return ok;
+		},
+		[this, &activePages, &buildRotatedMatrix](int idx, float targetScale, double maxPixels,
+			ExportBitmapBuffer& outBuffer) -> bool
+		{
+			outBuffer = ExportBitmapBuffer{};
+			if (idx < 0 || idx >= static_cast<int>(activePages.size()) || targetScale <= 0.0f)
+				return false;
+			const PageInfo* pInfo = activePages[idx];
+			const int normRot = ((pInfo->rotationAngle % 360) + 360) % 360;
+			const bool useCur = IsCurrentSourceFile(pInfo->sourceFile) && m_doc != nullptr;
+
+			fz_rect bounds = {};
+			bool gotBounds = false;
+			{
+				fz_document* pDoc = useCur ? m_doc : nullptr;
+				fz_page* pPage = nullptr;
+				fz_var(pDoc);
+				fz_var(pPage);
+				fz_var(gotBounds);
+				fz_try(m_ctx)
+				{
+					if (!useCur)
+						pDoc = OpenAuthenticatedSource(pInfo->sourceFile);
+					if (!pDoc)
+						fz_throw(m_ctx, FZ_ERROR_GENERIC, "Cannot open source");
+					pPage = fz_load_page(m_ctx, pDoc, pInfo->sourcePageIndex);
+					bounds = fz_bound_page(m_ctx, pPage);
+					gotBounds = true;
+				}
+				fz_always(m_ctx)
+				{
+					if (pPage)
+						fz_drop_page(m_ctx, pPage);
+					if (!useCur && pDoc)
+						fz_drop_document(m_ctx, pDoc);
+				}
+				fz_catch(m_ctx)
+				{
+					gotBounds = false;
+				}
+			}
+			if (!gotBounds)
+				return false;
+
+			const float origW = bounds.x1 - bounds.x0;
+			const float origH = bounds.y1 - bounds.y0;
+			const float effW = max(1.0f, (normRot == 90 || normRot == 270) ? origH : origW);
+			const float effH = max(1.0f, (normRot == 90 || normRot == 270) ? origW : origH);
+
+			float scale = targetScale;
+			const double estPixels = static_cast<double>(effW) * effH * scale * scale;
+			if (maxPixels > 0.0 && estPixels > maxPixels)
+				scale *= static_cast<float>(std::sqrt(maxPixels / estPixels));
+
+			const int width = max(1, static_cast<int>(effW * scale));
+			const int height = max(1, static_cast<int>(effH * scale));
+			const int stride = width * 4;
+			try
+			{
+				outBuffer.bgra.assign(static_cast<size_t>(stride) * static_cast<size_t>(height), 0xFF);
+			}
+			catch (...)
+			{
+				return false;
+			}
+			outBuffer.width = width;
+			outBuffer.height = height;
+			outBuffer.stride = stride;
+
+			BYTE* pSamples = outBuffer.bgra.data();
+			bool rendered = false;
+			fz_document* pDoc = useCur ? m_doc : nullptr;
+			fz_page* pPage = nullptr;
+			fz_pixmap* pPix = nullptr;
+			fz_device* pDev = nullptr;
+			fz_var(pDoc);
+			fz_var(pPage);
+			fz_var(pPix);
+			fz_var(pDev);
+			fz_var(rendered);
+			fz_try(m_ctx)
+			{
+				if (!useCur)
+					pDoc = OpenAuthenticatedSource(pInfo->sourceFile);
+				if (!pDoc)
+					fz_throw(m_ctx, FZ_ERROR_GENERIC, "Cannot open source");
+				pPage = fz_load_page(m_ctx, pDoc, pInfo->sourcePageIndex);
+				pPix = fz_new_pixmap_with_data(m_ctx, fz_device_bgr(m_ctx),
+					width, height, nullptr, 1, stride, pSamples);
+				fz_clear_pixmap_with_value(m_ctx, pPix, 0xff);
+				const fz_matrix ctm = buildRotatedMatrix(bounds, scale, normRot);
+				pDev = fz_new_draw_device(m_ctx, ctm, pPix);
+				fz_run_page(m_ctx, pPage, pDev, fz_identity, nullptr);
+				fz_close_device(m_ctx, pDev);
+				rendered = true;
+			}
+			fz_always(m_ctx)
+			{
+				if (pDev)
+					fz_drop_device(m_ctx, pDev);
+				if (pPix)
+					fz_drop_pixmap(m_ctx, pPix);
+				if (pPage)
+					fz_drop_page(m_ctx, pPage);
+				if (!useCur && pDoc)
+					fz_drop_document(m_ctx, pDoc);
+			}
+			fz_catch(m_ctx)
+			{
+				rendered = false;
+			}
+			return rendered;
+		},
+		nullptr,
+		presetFrom,
+		presetTo);
+}
+
 void CPDFEditDialog::OnBnClickedBtnReset()
 {
 	if (MessageBox(_T("确定要重置所有修改吗？"), _T("确认"), MB_YESNO | MB_ICONQUESTION) != IDYES)
