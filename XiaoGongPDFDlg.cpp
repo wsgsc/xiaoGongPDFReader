@@ -6885,11 +6885,7 @@ void CXiaoGongPDFDlg::OnContextMenu(CWnd* pWnd, CPoint point)
 		CMD_CTX_COPY_LINK,
 		CMD_CTX_ADD_NOTE_HERE,
 		CMD_CTX_AREA_CAPTURE,
-		CMD_CTX_COPY_PAGE_IMG,
-		CMD_CTX_EXPORT_IMAGES,
-		CMD_CTX_SAVE_PDF,
-		CMD_CTX_SAVE_PDF_AS,
-		CMD_CTX_DOC_PROPERTIES
+		CMD_CTX_COPY_PAGE_IMG
 	};
 
 	CMenu popup;
@@ -6937,38 +6933,12 @@ void CXiaoGongPDFDlg::OnContextMenu(CWnd* pWnd, CPoint point)
 		CMD_CTX_ADD_NOTE_HERE, _T("在此处添加文字批注..."));
 	popup.AppendMenu(MF_SEPARATOR);
 
-	CMenu layoutSubMenu;
-	if (layoutSubMenu.CreatePopupMenu())
-	{
-		layoutSubMenu.AppendMenu(MF_STRING, ID_MENU_LAYOUT_SINGLE, _T("单页连续视图"));
-		layoutSubMenu.AppendMenu(MF_STRING, ID_MENU_LAYOUT_TWO_PAGE, _T("双页并排视图"));
-		layoutSubMenu.CheckMenuRadioItem(ID_MENU_LAYOUT_SINGLE, ID_MENU_LAYOUT_TWO_PAGE,
-			ID_MENU_LAYOUT_SINGLE + static_cast<int>(m_layoutMode), MF_BYCOMMAND);
-		if (popup.AppendMenu(MF_POPUP, reinterpret_cast<UINT_PTR>(layoutSubMenu.GetSafeHmenu()),
-			_T("页面视图")))
-		{
-			layoutSubMenu.Detach();
-		}
-		popup.AppendMenu(MF_SEPARATOR);
-	}
-
 	popup.AppendMenu(MF_STRING, CMD_CTX_AREA_CAPTURE, _T("区域截图\tCtrl+Shift+S"));
 	popup.AppendMenu(MF_STRING, CMD_CTX_COPY_PAGE_IMG, _T("复制当前页为图片"));
-	popup.AppendMenu(MF_STRING, CMD_CTX_EXPORT_IMAGES, _T("导出页面为图片...\tCtrl+Shift+E"));
-	popup.AppendMenu(MF_SEPARATOR);
-	popup.AppendMenu(MF_STRING, CMD_CTX_SAVE_PDF, _T("保存批注与旋转回原 PDF\tCtrl+S"));
-	popup.AppendMenu(MF_STRING, CMD_CTX_SAVE_PDF_AS, _T("另存为新 PDF..."));
-	popup.AppendMenu(MF_STRING, CMD_CTX_DOC_PROPERTIES, _T("文档属性与幅面...\tCtrl+D"));
 
 	const UINT cmd = static_cast<UINT>(popup.TrackPopupMenu(
 		TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
 		menuScreenPt.x, menuScreenPt.y, this));
-
-	if (cmd >= ID_MENU_LAYOUT_SINGLE && cmd <= ID_MENU_LAYOUT_TWO_PAGE)
-	{
-		OnMenuPageLayout(cmd);
-		return;
-	}
 
 	switch (cmd)
 	{
@@ -7040,18 +7010,6 @@ void CXiaoGongPDFDlg::OnContextMenu(CWnd* pWnd, CPoint point)
 		break;
 	case CMD_CTX_COPY_PAGE_IMG:
 		CopyCurrentPageAsImage();
-		break;
-	case CMD_CTX_EXPORT_IMAGES:
-		OnMenuExportImages();
-		break;
-	case CMD_CTX_SAVE_PDF:
-		OnMenuSavePdf();
-		break;
-	case CMD_CTX_SAVE_PDF_AS:
-		OnMenuSavePdfAs();
-		break;
-	case CMD_CTX_DOC_PROPERTIES:
-		OnMenuDocProperties();
 		break;
 	default:
 		break;
