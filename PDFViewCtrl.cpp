@@ -702,8 +702,14 @@ void CPDFViewCtrl::OnPaint()
 		tintDC.SelectObject(pOldTint);
 	}
 
+	if (m_pParentDlg && m_pParentDlg->IsSelectionActionBarVisible())
+		m_pParentDlg->DrawSelectionActionBar(&backDC, clientRect);
+
 	if (m_pParentDlg && m_pParentDlg->IsAreaCaptureOverlayVisible())
 		m_pParentDlg->DrawAreaCaptureOverlay(&backDC, clientRect);
+
+	if (m_pParentDlg && m_pParentDlg->IsInlineTextAnnotVisible())
+		m_pParentDlg->DrawInlineTextAnnotOverlay(&backDC, clientRect);
 
 	dc.BitBlt(0, 0, clientRect.Width(), clientRect.Height(), &backDC, 0, 0, SRCCOPY);
 

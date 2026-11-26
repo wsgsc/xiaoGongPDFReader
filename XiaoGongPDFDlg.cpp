@@ -26,7 +26,7 @@
 
 namespace
 {
-	constexpr int TITLE_BAR_HEIGHT = 46;
+	constexpr int TITLE_BAR_HEIGHT = 46; 
 	constexpr int TITLE_ICON_AREA_WIDTH = 56;
 	constexpr int TITLE_ICON_SIZE = 38;
 
@@ -429,6 +429,7 @@ void CXiaoGongPDFDlg::SaveDialogStateToDocument(CPDFDocument* pDoc)
 	pDoc->SetSearchKeyword(searchKeyword);
 
 	pDoc->GetPageRotations() = m_pageRotations;
+	pDoc->SetLayoutMode(m_layoutMode);
 }
 
 void CXiaoGongPDFDlg::LoadDialogStateFromDocument(CPDFDocument* pDoc)
@@ -465,6 +466,9 @@ void CXiaoGongPDFDlg::LoadDialogStateFromDocument(CPDFDocument* pDoc)
 	m_currentMatchIndex = pDoc->GetCurrentMatchIndex();
 	m_searchKeyword = pDoc->GetSearchKeyword();
 	m_pageRotations = pDoc->GetPageRotations();
+	m_layoutMode = pDoc->GetLayoutMode();
+	UpdatePageLayoutButton();
+	UpdateAnnotateButtonColors();
 	RebuildSearchMatchPageIndex();
 }
 
@@ -499,6 +503,23 @@ void CXiaoGongPDFDlg::SaveReadingPosition(CPDFDocument* pDoc)
 		static_cast<int>(pDoc->GetCustomZoom() * 10000.0f));
 	pApp->WriteProfileInt(_T("ReadingPosition"), key + _T("_Scale"),
 		static_cast<int>(pDoc->GetUniformScale() * 10000.0f));
+	pApp->WriteProfileInt(_T("ReadingPosition"), key + _T("_Layout"),
+		static_cast<int>(pDoc->GetLayoutMode()));
+
+	// 持久化单页旋转角度（格式："0:90,3:270"），下次打开自动恢复
+	CString rotSerialized;
+	for (const auto& rotPair : pDoc->GetPageRotations())
+	{
+		const int pageIdx = rotPair.first;
+		const int normDeg = ((rotPair.second % 360) + 360) % 360;
+		if (pageIdx >= 0 && normDeg != 0)
+		{
+			CString item;
+			item.Format(rotSerialized.IsEmpty() ? _T("%d:%d") : _T(",%d:%d"), pageIdx, normDeg);
+			rotSerialized += item;
+		}
+	}
+	pApp->WriteProfileString(_T("ReadingPosition"), key + _T("_Rotations"), rotSerialized);
 }
 
 void CXiaoGongPDFDlg::RestoreReadingPosition(CPDFDocument* pDoc)
@@ -507,6 +528,37 @@ void CXiaoGongPDFDlg::RestoreReadingPosition(CPDFDocument* pDoc)
 		return;
 	CString key = ReadingStateKey(pDoc->GetFilePath());
 	CWinApp* pApp = AfxGetApp();
+
+	// 恢复页面视图模式（单页连续 / 双页并排）
+	int layoutMode = static_cast<int>(pApp->GetProfileInt(_T("ReadingPosition"),
+		key + _T("_Layout"), LAYOUT_SINGLE_CONTINUOUS));
+	if (layoutMode != LAYOUT_SINGLE_CONTINUOUS && layoutMode != LAYOUT_TWO_PAGE_SPREAD)
+		layoutMode = LAYOUT_SINGLE_CONTINUOUS;
+	pDoc->SetLayoutMode(static_cast<PageLayoutMode>(layoutMode));
+
+	// 恢复单页旋转角度（须在计算最大页面宽度与滚动恢复前应用）
+	CString rotSerialized = pApp->GetProfileString(_T("ReadingPosition"), key + _T("_Rotations"));
+	if (!rotSerialized.IsEmpty())
+	{
+		int tokenPos = 0;
+		CString token = rotSerialized.Tokenize(_T(","), tokenPos);
+		while (!token.IsEmpty())
+		{
+			const int colon = token.Find(_T(':'));
+			if (colon > 0)
+			{
+				const int pageIdx = _ttoi(token.Left(colon));
+				const int deg = ((_ttoi(token.Mid(colon + 1)) % 360) + 360) % 360;
+				if (pageIdx >= 0 && pageIdx < pDoc->GetTotalPages() &&
+					(deg == 90 || deg == 180 || deg == 270))
+				{
+					pDoc->SetPageRotation(pageIdx, deg);
+				}
+			}
+			token = rotSerialized.Tokenize(_T(","), tokenPos);
+		}
+	}
+
 	int page = static_cast<int>(pApp->GetProfileInt(_T("ReadingPosition"),
 		key + _T("_Page"), -1));
 	if (page < 0 || page >= pDoc->GetTotalPages())
@@ -690,7 +742,7 @@ void CXiaoGongPDFDlg::SetControlsVisible(bool visible)
 		&m_toolbar, &m_tabCtrl, &m_btnOpen, &m_btnZoomOut, &m_btnFitWidth, &m_btnFitPage,
 		&m_btnZoomIn, &m_btnMore, &m_btnMinimize, &m_btnMaximize,
 		&m_btnCloseWindow, &m_btnFirst, &m_btnPrevPage, &m_btnNextPage,
-		&m_btnLast, &m_btnPrint, &m_btnSnapshot,
+		&m_btnLast, &m_btnPrint, &m_btnSnapshot, &m_btnPageLayout, &m_btnAnnotate,
 		&m_btnFullscreen, &m_btnRotateLeft, &m_btnRotateRight,
 		&m_btnEdit, &m_editCurrent, &m_pageTotal,
 		&m_statusBar, &m_zoomStatus, &m_btnOutline,
@@ -762,18 +814,19 @@ void CXiaoGongPDFDlg::ScrollToMatchVisible(int pageNum, fz_quad quad)
 		needScroll = true;
 	}
 
-	const float effectivePageWidth = (rotation == 90 || rotation == 270) ?
-		(bounds.y1 - bounds.y0) : (bounds.x1 - bounds.x0);
-	const int pagePixelWidth = ClampRenderDimension(effectivePageWidth * m_uniformScale);
-	if (pagePixelWidth > viewRect.Width())
+	int curOffsetX = 0;
+	int curOffsetY = 0;
+	int pagePixelWidth = 0;
+	if (GetPageViewPlacement(pageNum, viewRect.Width(), curOffsetX, curOffsetY, &pagePixelWidth, nullptr))
 	{
-		const int curOffsetX = -min(m_scrollPositionH, pagePixelWidth - viewRect.Width()) + m_panOffset.x;
 		const int matchLeft = matchRect.left + curOffsetX;
 		const int matchRight = matchRect.right + curOffsetX;
-		if (matchLeft < margin || matchRight > viewRect.Width() - margin)
+		if (m_totalScrollWidth > viewRect.Width() &&
+			(matchLeft < margin || matchRight > viewRect.Width() - margin))
 		{
-			m_scrollPositionH = max(0, min(pagePixelWidth - viewRect.Width(),
-				matchRect.left - viewRect.Width() / 3));
+			const int targetDeltaX = matchLeft - viewRect.Width() / 3;
+			m_scrollPositionH = max(0, min(m_totalScrollWidth - viewRect.Width(),
+				m_scrollPositionH + targetDeltaX));
 			needScroll = true;
 		}
 	}
@@ -828,6 +881,14 @@ BEGIN_MESSAGE_MAP(CXiaoGongPDFDlg, CDialogEx)
 	ON_COMMAND(ID_MENU_SHORTCUTS, &CXiaoGongPDFDlg::onMenuShortcuts)
 	ON_COMMAND(ID_MENU_REGION_CAPTURE, &CXiaoGongPDFDlg::OnMenuRegionCapture)
 	ON_COMMAND(ID_MENU_EXPORT_IMAGES, &CXiaoGongPDFDlg::OnMenuExportImages)
+	ON_COMMAND(ID_MENU_DOC_PROPERTIES, &CXiaoGongPDFDlg::OnMenuDocProperties)
+	ON_COMMAND(ID_MENU_SAVE_PDF, &CXiaoGongPDFDlg::OnMenuSavePdf)
+	ON_COMMAND(ID_MENU_SAVE_PDF_AS, &CXiaoGongPDFDlg::OnMenuSavePdfAs)
+	ON_COMMAND_RANGE(ID_MENU_LAYOUT_SINGLE, ID_MENU_LAYOUT_TWO_PAGE, &CXiaoGongPDFDlg::OnMenuPageLayout)
+	ON_COMMAND(ID_MENU_ANNOT_HIGHLIGHT, &CXiaoGongPDFDlg::OnMenuAnnotHighlight)
+	ON_COMMAND(ID_MENU_ANNOT_UNDERLINE, &CXiaoGongPDFDlg::OnMenuAnnotUnderline)
+	ON_COMMAND(ID_MENU_ANNOT_STRIKEOUT, &CXiaoGongPDFDlg::OnMenuAnnotStrikeout)
+	ON_COMMAND(ID_MENU_ANNOT_TEXT_NOTE, &CXiaoGongPDFDlg::OnMenuAnnotTextNote)
 	ON_COMMAND_RANGE(ID_MENU_READING_NORMAL, ID_MENU_READING_EYE, &CXiaoGongPDFDlg::OnReadingMode)
 	ON_COMMAND_RANGE(ID_MENU_RECENT_FILE_1, ID_MENU_RECENT_FILE_10, &CXiaoGongPDFDlg::onMenuRecentFile)
 	ON_NOTIFY(TVN_SELCHANGED, IDC_OUTLINE_TREE, &CXiaoGongPDFDlg::OnOutlineSelectionChanged)
@@ -851,6 +912,8 @@ BEGIN_MESSAGE_MAP(CXiaoGongPDFDlg, CDialogEx)
 	ON_BN_CLICKED(IDC_BTN_NEXT, &CXiaoGongPDFDlg::OnBtnNextPage)
 	ON_BN_CLICKED(IDC_BTN_PRINT, &CXiaoGongPDFDlg::onMenuPrint)
 	ON_BN_CLICKED(IDC_BTN_SNAPSHOT, &CXiaoGongPDFDlg::OnMenuRegionCapture)
+	ON_BN_CLICKED(IDC_BTN_PAGE_LAYOUT, &CXiaoGongPDFDlg::OnBtnPageLayout)
+	ON_BN_CLICKED(IDC_BTN_ANNOTATE, &CXiaoGongPDFDlg::OnBtnAnnotate)
 	ON_BN_CLICKED(IDC_BTN_OPEN, &CXiaoGongPDFDlg::onMenuOpen)
 	ON_BN_CLICKED(IDC_BTN_ZOOM_OUT, &CXiaoGongPDFDlg::OnBtnZoomOut)
 	ON_BN_CLICKED(IDC_BTN_FIT_WIDTH, &CXiaoGongPDFDlg::OnBtnFitWidth)
@@ -870,6 +933,7 @@ BEGIN_MESSAGE_MAP(CXiaoGongPDFDlg, CDialogEx)
 	ON_BN_CLICKED(IDC_CHECK_THUMBNAIL, &CXiaoGongPDFDlg::OnCheckThumbnail)
 	ON_EN_CHANGE(IDC_EDIT_CURRENT, &CXiaoGongPDFDlg::OnEnChangeEditCurrent)
 	ON_EN_KILLFOCUS(IDC_EDIT_CURRENT, &CXiaoGongPDFDlg::OnEditCurrentKillFocus)
+	ON_EN_CHANGE(IDC_INLINE_ANNOT_EDIT, &CXiaoGongPDFDlg::OnEnChangeInlineAnnotEdit)
 	ON_EN_CHANGE(IDC_EDIT_SEARCH, &CXiaoGongPDFDlg::OnEnChangeEditSearch)
 	ON_BN_CLICKED(IDC_BTN_FIND, &CXiaoGongPDFDlg::OnBtnFind)
 	ON_BN_CLICKED(IDC_BTN_PREV_MATCH, &CXiaoGongPDFDlg::OnBtnPrevMatch)
@@ -1177,6 +1241,33 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	m_btnCloseSearchPopup.Create(_T("关闭"), WS_CHILD | BS_OWNERDRAW,
 		CRect(0, 0, 34, 34), this, IDC_BTN_CLOSE_SEARCH_POPUP);
 
+	// 初始化页面内联透明文字批注输入代理（接管中文输入法 IME、剪贴板与光标导航）
+	m_inlineAnnotEdit.CreateHiddenProxy(this, IDC_INLINE_ANNOT_EDIT);
+	m_inlineAnnotEdit.m_onTextOrCaretChanged = [this]()
+	{
+		if (m_inlineAnnot.active)
+		{
+			m_inlineAnnot.caretVisible = true;
+			InvalidateSelection();
+		}
+	};
+	m_inlineAnnotEdit.m_onEscapePressed = [this]()
+	{
+		if (!m_inlineAnnot.active)
+			return;
+		if (m_inlineAnnot.colorPopupOpen)
+		{
+			m_inlineAnnot.colorPopupOpen = false;
+			InvalidateSelection();
+			return;
+		}
+		FinishInlineTextAnnot(false);
+	};
+	m_inlineAnnotEdit.m_onVerticalOrLineNav = [this](UINT vk, bool shift) -> bool
+	{
+		return HandleInlineAnnotKeyNav(vk, shift);
+	};
+
 	// 初始化状态栏
 	m_statusBar.SetWindowText(_T("  就绪"));
 	m_statusBar.ModifyStyle(SS_TYPEMASK | WS_BORDER, SS_LEFT | SS_CENTERIMAGE, SWP_FRAMECHANGED);
@@ -1205,6 +1296,10 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 		CRect(0, 0, 34, 34), this, IDC_BTN_PRINT);
 	m_btnSnapshot.Create(_T("截图"), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW,
 		CRect(0, 0, 34, 34), this, IDC_BTN_SNAPSHOT);
+	m_btnPageLayout.Create(_T("双页"), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW,
+		CRect(0, 0, 34, 34), this, IDC_BTN_PAGE_LAYOUT);
+	m_btnAnnotate.Create(_T("批注"), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW,
+		CRect(0, 0, 34, 34), this, IDC_BTN_ANNOTATE);
 	for (auto& divider : m_toolbarDividers)
 		divider.Create(_T(""), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_ETCHEDVERT,
 			CRect(0, 0, 2, 24), this);
@@ -1280,6 +1375,8 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	m_btnRotateRight.SetColors(normal, hover, pressed);
 	m_btnEdit.SetColors(normal, hover, pressed);
 	m_btnSnapshot.SetColors(normal, hover, pressed);
+	m_btnPageLayout.SetColors(normal, hover, pressed);
+	m_btnAnnotate.SetColors(normal, hover, pressed);
 	m_btnFind.SetColors(normal, hover, pressed);
 	m_btnPrevMatch.SetColors(normal, hover, pressed);
 	m_btnNextMatch.SetColors(normal, hover, pressed);
@@ -1293,6 +1390,8 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	m_btnRotateRight.SetTextColor(RGB(32, 33, 36));
 	m_btnEdit.SetTextColor      (RGB(32, 33, 36));
 	m_btnSnapshot.SetTextColor  (RGB(32, 33, 36));
+	m_btnPageLayout.SetTextColor(RGB(32, 33, 36));
+	m_btnAnnotate.SetTextColor  (RGB(32, 33, 36));
 	m_btnFind.SetTextColor      (RGB(32, 33, 36));
 	m_btnPrevMatch.SetTextColor (RGB(32, 33, 36));
 	m_btnNextMatch.SetTextColor (RGB(32, 33, 36));
@@ -1479,12 +1578,14 @@ void CXiaoGongPDFDlg::GoToPage(int pageNumber)
 		return;
 
 	ClearActiveCaptureRect();
+	m_currentPage = pageNumber;
 
-	// 滚动到目标页面位置
+	// 滚动到目标页面所在排版行的顶部
 	if (!m_pageYPositions.empty() && pageNumber < (int)m_pageYPositions.size())
 	{
-		// 滚动到该页面的顶部
-		m_scrollPosition = m_pageYPositions[pageNumber];
+		const int rowTop = (pageNumber < (int)m_pageRowTops.size()) ?
+			m_pageRowTops[pageNumber] : m_pageYPositions[pageNumber];
+		m_scrollPosition = rowTop;
 
 		// 限制滚动范围
 		CRect viewRect;
@@ -1496,6 +1597,7 @@ void CXiaoGongPDFDlg::GoToPage(int pageNumber)
 		// 更新滚动条和显示
 		UpdateScrollBar();
 		RenderVisiblePages();
+		UpdatePageControls();
 	}
 }
 
@@ -1533,6 +1635,17 @@ void CXiaoGongPDFDlg::OnTimer(UINT_PTR nIDEvent)
 	{
 		KillTimer(TIMER_ID_PAGE_PREFETCH);
 		PrefetchNearbyPages();
+		return;
+	}
+	if (nIDEvent == TIMER_ID_ANNOT_CARET)
+	{
+		if (!m_inlineAnnot.active || !m_doc)
+		{
+			KillTimer(TIMER_ID_ANNOT_CARET);
+			return;
+		}
+		m_inlineAnnot.caretVisible = !m_inlineAnnot.caretVisible;
+		InvalidateSelection();
 		return;
 	}
 
@@ -1623,8 +1736,8 @@ void CXiaoGongPDFDlg::layoutToolbar(int cx)
 	const int normLeftBudget = normCenterLeft - 16 - 16;
 	const int normRightBudget = (cx - 16) - (normCenterRight + 16);
 	const int normFullLeftWidth = 3 * 82 + 2 * 14;
-	const int normFullRightWidth = (34 + 5 + 34 + 5 + 68) + 14 + 34 + 14 + 34 + 14 + 34 + 14 + 34 +
-		14 + (34 + 5 + 34) + 14 + 34 + 14 + 76;
+	const int normFullRightWidth = (34 + 5 + 34 + 5 + 68) + 14 + 34 + 14 + 34 + 14 + 34 +
+		14 + 34 + 14 + 34 + 14 + 34 + 14 + (34 + 5 + 34) + 14 + 34 + 14 + 76;
 	const bool compact = (normLeftBudget < normFullLeftWidth || normRightBudget < normFullRightWidth);
 
 	const int sideMargin = compact ? 12 : 16;
@@ -1730,11 +1843,13 @@ void CXiaoGongPDFDlg::layoutToolbar(int cx)
 	placeLeftBtn(m_btnOutline, showOutline);
 	placeLeftBtn(m_btnFind, showFind);
 
-	// 3. 右侧区域（缩放 | 打印 | 右旋 | 编辑 | 截图 | 首末页 | 全屏 | 更多）：右对齐，压缩时按优先级隐藏
+	// 3. 右侧区域（缩放 | 页面视图 | 打印 | 右旋 | 批注 | 编辑 | 截图 | 首末页 | 全屏 | 更多）：右对齐，压缩时按优先级隐藏
 	bool showZoomStep = true;
 	bool showFitPage = true;
+	bool showPageLayout = true;
 	bool showPrint = true;
 	bool showRotate = true;
+	bool showAnnotate = true;
 	bool showEdit = true;
 	bool showSnapshot = true;
 	bool showFirstLast = true;
@@ -1763,9 +1878,13 @@ void CXiaoGongPDFDlg::layoutToolbar(int cx)
 			zoomW += (zoomW > 0 ? gap : 0) + fitWidth;
 		addGroup(zoomW);
 
+		if (showPageLayout)
+			addGroup(iconWidth);
 		if (showPrint)
 			addGroup(iconWidth);
 		if (showRotate)
+			addGroup(iconWidth);
+		if (showAnnotate)
 			addGroup(iconWidth);
 		if (showEdit)
 			addGroup(iconWidth);
@@ -1794,6 +1913,10 @@ void CXiaoGongPDFDlg::layoutToolbar(int cx)
 	if (calcRightWidth() > rightBudget)
 		showRotate = false;
 	if (calcRightWidth() > rightBudget)
+		showPageLayout = false;
+	if (calcRightWidth() > rightBudget)
+		showAnnotate = false;
+	if (calcRightWidth() > rightBudget)
 		moreIconAndText = false;
 	if (calcRightWidth() > rightBudget)
 		showFitPage = false;
@@ -1806,8 +1929,10 @@ void CXiaoGongPDFDlg::layoutToolbar(int cx)
 	m_btnZoomOut.ShowWindow(showZoomStep ? SW_SHOW : SW_HIDE);
 	m_btnZoomIn.ShowWindow(showZoomStep ? SW_SHOW : SW_HIDE);
 	m_btnFitPage.ShowWindow(showFitPage ? SW_SHOW : SW_HIDE);
+	m_btnPageLayout.ShowWindow(showPageLayout ? SW_SHOW : SW_HIDE);
 	m_btnPrint.ShowWindow(showPrint ? SW_SHOW : SW_HIDE);
 	m_btnRotateRight.ShowWindow(showRotate ? SW_SHOW : SW_HIDE);
+	m_btnAnnotate.ShowWindow(showAnnotate ? SW_SHOW : SW_HIDE);
 	m_btnEdit.ShowWindow(showEdit ? SW_SHOW : SW_HIDE);
 	m_btnSnapshot.ShowWindow(showSnapshot ? SW_SHOW : SW_HIDE);
 	m_btnFirst.ShowWindow(showFirstLast ? SW_SHOW : SW_HIDE);
@@ -1848,6 +1973,12 @@ void CXiaoGongPDFDlg::layoutToolbar(int cx)
 			rightX += fitWidth;
 		}
 	}
+	if (showPageLayout)
+	{
+		beginRightGroup();
+		m_btnPageLayout.MoveWindow(rightX, btnY, iconWidth, BTN_HEIGHT);
+		rightX += iconWidth;
+	}
 	if (showPrint)
 	{
 		beginRightGroup();
@@ -1858,6 +1989,12 @@ void CXiaoGongPDFDlg::layoutToolbar(int cx)
 	{
 		beginRightGroup();
 		m_btnRotateRight.MoveWindow(rightX, btnY, iconWidth, BTN_HEIGHT);
+		rightX += iconWidth;
+	}
+	if (showAnnotate)
+	{
+		beginRightGroup();
+		m_btnAnnotate.MoveWindow(rightX, btnY, iconWidth, BTN_HEIGHT);
 		rightX += iconWidth;
 	}
 	if (showEdit)
@@ -2274,9 +2411,25 @@ void CXiaoGongPDFDlg::SetStatusBarMessage(LPCTSTR message)
 	CPDFDocument* pDoc = GetActiveDocument();
 	CString status(_T("  "));
 	if (pDoc)
+	{
 		status += pDoc->GetFilePath();
+		if (m_currentPage >= 0 && m_currentPage < m_totalPages)
+		{
+			float pageW = 0.0f;
+			float pageH = 0.0f;
+			if (pDoc->GetPageBounds(m_currentPage, pageW, pageH) && pageW > 0.0f && pageH > 0.0f)
+			{
+				status += _T("    |    ");
+				status += FormatPagePhysicalSize(pageW, pageH, false);
+			}
+			if (m_layoutMode == LAYOUT_TWO_PAGE_SPREAD)
+				status += _T("  [双页并排]");
+		}
+	}
 	else
+	{
 		status += _T("就绪");
+	}
 	if (message && *message)
 	{
 		status += _T("    |    ");
@@ -2297,13 +2450,13 @@ void CXiaoGongPDFDlg::OnBtnFirst()
 void CXiaoGongPDFDlg::OnBtnPrevPage()
 {
 	if (m_doc && m_currentPage > 0)
-		GoToPage(m_currentPage - 1);
+		GoToPage(GetPrevSpreadPage(m_currentPage));
 }
 
 void CXiaoGongPDFDlg::OnBtnNextPage()
 {
 	if (m_doc && m_currentPage + 1 < m_totalPages)
-		GoToPage(m_currentPage + 1);
+		GoToPage(GetNextSpreadPage(m_currentPage));
 }
 
 void CXiaoGongPDFDlg::OnBtnLast()
@@ -2374,6 +2527,7 @@ void CXiaoGongPDFDlg::OnBtnEdit()
 	}
 
 	// 停止并等待后台搜索线程退出，避免搜索线程持有同一PDF文件句柄阻塞覆盖保存
+	FinishInlineTextAnnot(false);
 	CancelAreaCaptureMode(false);
 	CleanupSearches();
 
@@ -2401,6 +2555,7 @@ void CXiaoGongPDFDlg::OnBtnEdit()
 		float savedCustomZoom = 1.0f;
 		float savedUniformScale = 0.0f;
 		int savedScroll = 0;
+		PageLayoutMode savedLayoutMode = LAYOUT_SINGLE_CONTINUOUS;
 		std::map<int, int> savedRotations;
 		CString filePath;
 		std::vector<char> password;
@@ -2443,6 +2598,7 @@ void CXiaoGongPDFDlg::OnBtnEdit()
 				state.savedCustomZoom = openDoc->GetCustomZoom();
 				state.savedUniformScale = openDoc->GetUniformScale();
 				state.savedScroll = openDoc->GetScrollPosition();
+				state.savedLayoutMode = openDoc->GetLayoutMode();
 				state.savedRotations = openDoc->GetPageRotations();
 				state.filePath = openDoc->GetFilePath();
 				state.password = openDoc->GetPassword();
@@ -2477,6 +2633,7 @@ void CXiaoGongPDFDlg::OnBtnEdit()
 					state.doc->SetCurrentPage(clampedPage);
 					state.doc->RestoreReadingZoom(state.savedZoomMode, state.savedCustomZoom, state.savedUniformScale);
 					state.doc->SetScrollPosition(state.savedScroll);
+					state.doc->SetLayoutMode(state.savedLayoutMode);
 					if (!moved)
 					{
 						for (const auto& rotPair : state.savedRotations)
@@ -2484,6 +2641,11 @@ void CXiaoGongPDFDlg::OnBtnEdit()
 							if (rotPair.first >= 0 && rotPair.first < totalPages)
 								state.doc->SetPageRotation(rotPair.first, rotPair.second);
 						}
+					}
+					else
+					{
+						AfxGetApp()->WriteProfileString(_T("ReadingPosition"),
+							ReadingStateKey(state.filePath) + _T("_Rotations"), _T(""));
 					}
 				}
 				else
@@ -2524,7 +2686,7 @@ void CXiaoGongPDFDlg::OnBtnEdit()
 					if (it != m_documents.end())
 					{
 						const int failedIdx = static_cast<int>(it - m_documents.begin());
-						CloseDocument(failedIdx);
+						CloseDocument(failedIdx, false);
 					}
 				}
 				MessageBox(_T("重新加载被覆盖的 PDF 文件失败，相关标签页已关闭。"),
@@ -2597,20 +2759,21 @@ void CXiaoGongPDFDlg::RotatePage(int degrees)
 	if (!pDoc)
 		return;
 
+	FinishInlineTextAnnot(false);
 	ClearSelection();
 	ClearActiveCaptureRect();
 	InvalidateLinkCache();
 
-	// 记录旋转前相对当前页的滚动比例，避免旋转改变总高度后视口跳到其他页
+	// 记录旋转前相对当前排版行的滚动比例，避免旋转改变总高度后视口跳到其他页
 	float relPageOffset = 0.0f;
 	bool hasRelPageOffset = false;
 	if (m_currentPage >= 0 &&
-		m_currentPage < static_cast<int>(m_pageYPositions.size()) &&
-		m_currentPage < static_cast<int>(m_pageHeights.size()) &&
-		m_pageHeights[m_currentPage] > 0)
+		m_currentPage < static_cast<int>(m_pageRowTops.size()) &&
+		m_currentPage < static_cast<int>(m_pageRowHeights.size()) &&
+		m_pageRowHeights[m_currentPage] > 0)
 	{
-		relPageOffset = static_cast<float>(m_scrollPosition - m_pageYPositions[m_currentPage]) /
-			static_cast<float>(m_pageHeights[m_currentPage]);
+		relPageOffset = static_cast<float>(m_scrollPosition - m_pageRowTops[m_currentPage]) /
+			static_cast<float>(m_pageRowHeights[m_currentPage]);
 		hasRelPageOffset = true;
 	}
 
@@ -2618,28 +2781,10 @@ void CXiaoGongPDFDlg::RotatePage(int degrees)
 	int currentRotation = GetPageRotation(m_currentPage);
 	// 计算新的旋转角度（保持在0-270范围内）
 	int newRotation = (currentRotation + degrees + 360) % 360;
-	// 更新旋转角度存储，并让文档对象同步失效页面尺寸缓存
+	// 更新旋转角度存储，并让文档对象同步失效页面尺寸缓存与位图缓存
 	m_pageRotations[m_currentPage] = newRotation;
 	pDoc->SetPageRotation(m_currentPage, newRotation);
-
-	// 清除当前页的连续滚动缓存（因为旋转角度变了）
-	auto& docPageCache = pDoc->GetPageCache();
-	auto& docCacheOrder = pDoc->GetCacheOrder();
-	for (auto it = docPageCache.begin(); it != docPageCache.end(); )
-	{
-		if (it->first.pageNumber == m_currentPage)
-		{
-			if (it->second.hBitmap)
-				DeleteObject(it->second.hBitmap);
-
-			docCacheOrder.remove(it->first);
-			it = docPageCache.erase(it);
-		}
-		else
-		{
-			++it;
-		}
-	}
+	pDoc->InvalidatePageRenderCache(m_currentPage);
 
 	// 旋转后重置平移偏移量（因为页面尺寸改变了）
 	m_panOffset.x = 0;
@@ -2649,26 +2794,28 @@ void CXiaoGongPDFDlg::RotatePage(int degrees)
 	TRACE(_T("旋转前重置平移偏移量: (%d, %d)\n"), m_panOffset.x, m_panOffset.y);
 #endif
 
-	// 重新计算页面位置，并按原页内相对位置锚定当前页
+	// 重新计算页面位置，并按原排版行相对位置锚定当前页
 	CalculatePagePositions();
 	if (hasRelPageOffset &&
 		m_currentPage >= 0 &&
-		m_currentPage < static_cast<int>(m_pageYPositions.size()) &&
-		m_currentPage < static_cast<int>(m_pageHeights.size()))
+		m_currentPage < static_cast<int>(m_pageRowTops.size()) &&
+		m_currentPage < static_cast<int>(m_pageRowHeights.size()))
 	{
 		CRect viewRect;
 		m_pdfView.GetClientRect(&viewRect);
 		const int maxScroll = max(0, m_totalScrollHeight - viewRect.Height());
-		const int targetY = m_pageYPositions[m_currentPage] +
-			static_cast<int>(relPageOffset * m_pageHeights[m_currentPage]);
+		const int targetY = m_pageRowTops[m_currentPage] +
+			static_cast<int>(relPageOffset * m_pageRowHeights[m_currentPage]);
 		m_scrollPosition = max(0, min(targetY, maxScroll));
 	}
 	UpdateScrollBar();
 	RenderVisiblePages();
 
-	// 保存当前状态（平移偏移量已重置）
+	// 保存当前状态并立即持久化单页旋转记录，同时刷新底部页面物理尺寸显示
 	SaveCurrentPageZoomState();
-	UpdateZoomStatus();
+	SaveDialogStateToDocument(pDoc);
+	SaveReadingPosition(pDoc);
+	UpdateStatusBar();
 }
 
 int CXiaoGongPDFDlg::GetPageRotation(int pageNumber)
@@ -2774,6 +2921,8 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_btnNextPage.SetFont(&m_buttonFont);
 	m_btnPrint.SetFont(&m_buttonFont);
 	m_btnSnapshot.SetFont(&m_buttonFont);
+	m_btnPageLayout.SetFont(&m_buttonFont);
+	m_btnAnnotate.SetFont(&m_buttonFont);
 	m_btnOpen.SetFont(&m_buttonFont);
 	m_btnZoomOut.SetFont(&m_buttonFont);
 	m_btnFitWidth.SetFont(&m_buttonFont);
@@ -2820,6 +2969,8 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_btnRotateRight.SetWindowText(_T("右旋"));
 	m_btnEdit.SetWindowText(_T("编辑"));
 	m_btnSnapshot.SetWindowText(_T("截图"));
+	m_btnPageLayout.SetWindowText(_T("双页"));
+	m_btnAnnotate.SetWindowText(_T("批注"));
 	m_btnFind.SetWindowText(_T("查找"));
 	m_btnFind.SetIconAndText(true);
 	m_btnFitPage.SetWindowText(_T("适页"));
@@ -2839,6 +2990,8 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_btnRotateRight.SetIconImage(IDR_ROTATE_RIGHT_PNG);
 	m_btnEdit.SetIconGlyph(0xE70F);
 	m_btnSnapshot.SetIconGlyph(0xE7A8);
+	m_btnPageLayout.SetIconGlyph(0xE89A);
+	m_btnAnnotate.SetIconGlyph(0xE929);
 	m_btnFind.SetIconGlyph(0xE721);
 	m_btnPrevMatch.SetIconGlyph(0xE76B);
 	m_btnNextMatch.SetIconGlyph(0xE76C);
@@ -2868,6 +3021,9 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_btnRotateRight.SetToolTipText(_T("向右旋转"));
 	m_btnEdit.SetToolTipText(_T("编辑页面"));
 	m_btnSnapshot.SetToolTipText(_T("区域截图 (Ctrl+Shift+S)"));
+	m_btnPageLayout.SetToolTipText(_T("切换单页连续 / 双页并排视图"));
+	m_btnAnnotate.SetToolTipText(_T("PDF 批注与保存 (Ctrl+S)"));
+	UpdatePageLayoutButton();
 	m_btnFind.SetToolTipText(_T("查找"));
 	m_btnPrevMatch.SetToolTipText(_T("上一个匹配项"));
 	m_btnNextMatch.SetToolTipText(_T("下一个匹配项"));
@@ -2906,6 +3062,8 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_btnRotateRight.SetCornerRadius(6);
 	m_btnEdit.SetCornerRadius(6);
 	m_btnSnapshot.SetCornerRadius(6);
+	m_btnPageLayout.SetCornerRadius(6);
+	m_btnAnnotate.SetCornerRadius(6);
 	m_btnFind.SetCornerRadius(6);
 	m_btnPrevMatch.SetCornerRadius(6);
 	m_btnNextMatch.SetCornerRadius(6);
@@ -2923,24 +3081,24 @@ void CXiaoGongPDFDlg::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 	// 根据按键处理不同的操作
 	switch (nChar)
 	{
-	case VK_LEFT:  // 左方向键 - 上一页
+	case VK_LEFT:  // 左方向键 - 上一页/上一对页
 		if (m_currentPage > 0)
-			GoToPage(m_currentPage - 1);
+			GoToPage(GetPrevSpreadPage(m_currentPage));
 		break;
 
-	case VK_RIGHT:  // 右方向键 - 下一页
+	case VK_RIGHT:  // 右方向键 - 下一页/下一对页
 		if (m_currentPage < m_totalPages - 1)
-			GoToPage(m_currentPage + 1);
+			GoToPage(GetNextSpreadPage(m_currentPage));
 		break;
 
-	case VK_PRIOR:  // Page Up键 - 上一页
+	case VK_PRIOR:  // Page Up键 - 上一页/上一对页
 		if (m_currentPage > 0)
-			GoToPage(m_currentPage - 1);
+			GoToPage(GetPrevSpreadPage(m_currentPage));
 		break;
 
-	case VK_NEXT:  // Page Down键 - 下一页
+	case VK_NEXT:  // Page Down键 - 下一页/下一对页
 		if (m_currentPage < m_totalPages - 1)
-			GoToPage(m_currentPage + 1);
+			GoToPage(GetNextSpreadPage(m_currentPage));
 		break;
 
 	case VK_HOME:  // Home键 - 首页
@@ -3009,6 +3167,19 @@ BOOL CXiaoGongPDFDlg::PreTranslateMessage(MSG* pMsg)
 	}
 
 	// 如果是键盘消息
+	if (pMsg->message == WM_KEYDOWN || pMsg->message == WM_CHAR)
+	{
+		if (m_inlineAnnot.active && m_inlineAnnotEdit.GetSafeHwnd() &&
+			pMsg->hwnd == m_inlineAnnotEdit.GetSafeHwnd() && pMsg->wParam == VK_RETURN &&
+			!(GetKeyState(VK_CONTROL) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000))
+		{
+			if (pMsg->message == WM_KEYDOWN)
+				::TranslateMessage(pMsg);
+			::DispatchMessage(pMsg);
+			return TRUE;
+		}
+	}
+
 	if (pMsg->message == WM_KEYDOWN)
 	{
 		if (pMsg->wParam == VK_SPACE && !IsEditControlFocused() &&
@@ -3030,6 +3201,19 @@ BOOL CXiaoGongPDFDlg::PreTranslateMessage(MSG* pMsg)
 		// 处理ESC键 - 关闭当前临时界面
 		if (pMsg->wParam == VK_ESCAPE)
 		{
+			if (m_inlineAnnot.active)
+			{
+				if (m_inlineAnnot.colorPopupOpen)
+				{
+					m_inlineAnnot.colorPopupOpen = false;
+					InvalidateSelection();
+				}
+				else
+				{
+					FinishInlineTextAnnot(false);
+				}
+				return TRUE;
+			}
 			if (m_isAreaCaptureMode)
 			{
 				CancelAreaCaptureMode(true);
@@ -3070,6 +3254,40 @@ BOOL CXiaoGongPDFDlg::PreTranslateMessage(MSG* pMsg)
 			if (ctrlDown && !shiftDown && pMsg->wParam == 'S')
 			{
 				SaveCapturedRegionAsPng();
+				return TRUE;
+			}
+		}
+
+		// 处理 Ctrl + D - 打开文档属性与页面物理尺寸面板
+		if (ctrlDown && !shiftDown && !altDown && pMsg->wParam == 'D')
+		{
+			OnMenuDocProperties();
+			return TRUE;
+		}
+
+		// 处理 Ctrl + S - 将批注与页面旋转保存写回原 PDF
+		if (ctrlDown && !shiftDown && !altDown && !m_isAreaCaptureMode && pMsg->wParam == 'S')
+		{
+			OnMenuSavePdf();
+			return TRUE;
+		}
+
+		// 处理 Ctrl + H / Ctrl + U / Ctrl + T - 选中文本高亮 / 下划线 / 添加文字批注
+		if (ctrlDown && !shiftDown && !altDown && !IsEditControlFocused())
+		{
+			if (pMsg->wParam == 'H')
+			{
+				OnMenuAnnotHighlight();
+				return TRUE;
+			}
+			if (pMsg->wParam == 'U')
+			{
+				OnMenuAnnotUnderline();
+				return TRUE;
+			}
+			if (pMsg->wParam == 'T')
+			{
+				OnMenuAnnotTextNote();
 				return TRUE;
 			}
 		}
@@ -3163,10 +3381,7 @@ BOOL CXiaoGongPDFDlg::PreTranslateMessage(MSG* pMsg)
 		// 处理Ctrl+C - 复制选中文本
 		if ((GetKeyState(VK_CONTROL) & 0x8000) && pMsg->wParam == 'C')
 		{
-			HWND focusWnd = ::GetFocus();
-			bool editingText = focusWnd == m_editSearch.GetSafeHwnd() ||
-				focusWnd == m_editCurrent.GetSafeHwnd();
-			if (m_hasSelection && !editingText)
+			if (m_hasSelection && !IsEditControlFocused())
 			{
 				CopySelectionToClipboard();
 				return TRUE;
@@ -3479,8 +3694,8 @@ void CXiaoGongPDFDlg::ExitFullscreen()
 		CRect viewRect;
 		m_pdfView.GetClientRect(&viewRect);
 		const int maxScroll = max(0, m_totalScrollHeight - viewRect.Height());
-		if (pageChangedInFullscreen && m_currentPage < static_cast<int>(m_pageYPositions.size()))
-			m_scrollPosition = max(0, min(m_pageYPositions[m_currentPage], maxScroll));
+		if (pageChangedInFullscreen && m_currentPage < static_cast<int>(m_pageRowTops.size()))
+			m_scrollPosition = max(0, min(m_pageRowTops[m_currentPage], maxScroll));
 		else
 			m_scrollPosition = max(0, min(m_savedScrollPosition, maxScroll));
 		m_scrollPositionH = pageChangedInFullscreen ? 0 : max(0, m_savedPanOffset.x);
@@ -3574,10 +3789,39 @@ float CXiaoGongPDFDlg::GetCurrentZoomBaseForStep() const
 	if (viewRect.Width() <= 0 || viewRect.Height() <= 0)
 		return m_customZoom;
 
-	const float maxPageWidth = pDoc->GetMaxPageWidth();
-	const int contentViewWidth = max(1, viewRect.Width() - 40);
-	const float baseScale = (maxPageWidth > 0.0f) ?
-		(static_cast<float>(contentViewWidth) / maxPageWidth * 0.95f) : 1.0f;
+	float maxRowPtWidth = pDoc->GetMaxPageWidth();
+	int rowGapPx = 0;
+	if (m_layoutMode == LAYOUT_TWO_PAGE_SPREAD && pDoc->HasPageBoundsCache())
+	{
+		maxRowPtWidth = 0.0f;
+		int idx = 0;
+		while (idx < m_totalPages)
+		{
+			int leftP = idx;
+			int rightP = -1;
+			GetLayoutRowPages(idx, leftP, rightP);
+			float wL = 0.0f, hL = 0.0f;
+			pDoc->GetPageBounds(leftP, wL, hL);
+			float rowW = wL;
+			if (rightP >= 0)
+			{
+				float wR = 0.0f, hR = 0.0f;
+				pDoc->GetPageBounds(rightP, wR, hR);
+				rowW += wR;
+			}
+			else
+			{
+				rowW += wL;
+			}
+			if (rowW > maxRowPtWidth)
+				maxRowPtWidth = rowW;
+			idx = (rightP >= 0) ? (rightP + 1) : (leftP + 1);
+		}
+		rowGapPx = SPREAD_GAP;
+	}
+	const int contentViewWidth = max(1, viewRect.Width() - 40 - rowGapPx);
+	const float baseScale = (maxRowPtWidth > 0.0f) ?
+		(static_cast<float>(contentViewWidth) / maxRowPtWidth * 0.95f) : 1.0f;
 	if (baseScale > 0.0f && m_uniformScale > 0.0f)
 		return m_uniformScale / baseScale;
 	return m_customZoom;
@@ -3688,6 +3932,44 @@ void CXiaoGongPDFDlg::OnBtnMore()
 		appendOverflowItem(0, IDC_BTN_FULLSCREEN, _T("全屏"));
 	if (hasOverflowItems)
 		menu.AppendMenu(MF_SEPARATOR);
+
+	// 页面视图模式子菜单（单页连续 / 双页并排）
+	CMenu layoutMenu;
+	if (layoutMenu.CreatePopupMenu())
+	{
+		layoutMenu.AppendMenu(MF_STRING | docFlag, ID_MENU_LAYOUT_SINGLE, _T("单页连续视图"));
+		layoutMenu.AppendMenu(MF_STRING | docFlag, ID_MENU_LAYOUT_TWO_PAGE, _T("双页并排视图"));
+		layoutMenu.CheckMenuRadioItem(ID_MENU_LAYOUT_SINGLE, ID_MENU_LAYOUT_TWO_PAGE,
+			ID_MENU_LAYOUT_SINGLE + static_cast<int>(m_layoutMode), MF_BYCOMMAND);
+		if (menu.AppendMenu(MF_POPUP, reinterpret_cast<UINT_PTR>(layoutMenu.GetSafeHmenu()),
+			_T("页面视图")))
+		{
+			layoutMenu.Detach();
+		}
+	}
+
+	// PDF 批注与保存子菜单
+	CMenu annotMenu;
+	if (annotMenu.CreatePopupMenu())
+	{
+		const UINT selFlag = (m_doc && m_hasSelection && !m_selectionQuads.empty()) ? 0 : MF_GRAYED;
+		annotMenu.AppendMenu(MF_STRING | selFlag, ID_MENU_ANNOT_HIGHLIGHT, _T("高亮选中文本\tCtrl+H"));
+		annotMenu.AppendMenu(MF_STRING | selFlag, ID_MENU_ANNOT_UNDERLINE, _T("下划线选中文本\tCtrl+U"));
+		annotMenu.AppendMenu(MF_STRING | selFlag, ID_MENU_ANNOT_STRIKEOUT, _T("删除线选中文本"));
+		annotMenu.AppendMenu(MF_SEPARATOR);
+		annotMenu.AppendMenu(MF_STRING | docFlag, ID_MENU_ANNOT_TEXT_NOTE, _T("添加文字批注\tCtrl+T"));
+		annotMenu.AppendMenu(MF_SEPARATOR);
+		annotMenu.AppendMenu(MF_STRING | docFlag, ID_MENU_SAVE_PDF, _T("保存批注与旋转回原 PDF\tCtrl+S"));
+		annotMenu.AppendMenu(MF_STRING | docFlag, ID_MENU_SAVE_PDF_AS, _T("另存为新 PDF..."));
+		if (menu.AppendMenu(MF_POPUP, reinterpret_cast<UINT_PTR>(annotMenu.GetSafeHmenu()),
+			_T("PDF 批注")))
+		{
+			annotMenu.Detach();
+		}
+	}
+	menu.AppendMenu(MF_STRING | docFlag, ID_MENU_SAVE_PDF, _T("保存修改\tCtrl+S"));
+	menu.AppendMenu(MF_STRING | docFlag, ID_MENU_DOC_PROPERTIES, _T("文档属性与幅面...\tCtrl+D"));
+	menu.AppendMenu(MF_SEPARATOR);
 	menu.AppendMenu(MF_STRING | docFlag | (m_isAreaCaptureMode ? MF_CHECKED : 0),
 		ID_MENU_REGION_CAPTURE, _T("区域截图\tCtrl+Shift+S"));
 	menu.AppendMenu(MF_STRING | docFlag,
@@ -3768,6 +4050,7 @@ void CXiaoGongPDFDlg::ApplyReadingMode(ReadingMode mode)
 	CCustomButton* buttons[] = { &m_btnOpen, &m_btnZoomOut, &m_btnFitWidth,
 		&m_btnFitPage, &m_btnZoomIn, &m_btnOutline, &m_btnFirst, &m_btnLast,
 		&m_btnPrevPage, &m_btnNextPage, &m_btnPrint, &m_btnSnapshot,
+		&m_btnPageLayout, &m_btnAnnotate,
 		&m_btnFullscreen, &m_btnRotateLeft, &m_btnRotateRight, &m_btnEdit,
 		&m_btnFind, &m_btnPrevMatch, &m_btnNextMatch, &m_btnMore,
 		&m_btnCloseSearchResults };
@@ -3786,6 +4069,8 @@ void CXiaoGongPDFDlg::ApplyReadingMode(ReadingMode mode)
 	}
 	UpdateOutlineButtonColors();
 	UpdateSnapshotButtonColors();
+	UpdatePageLayoutButton();
+	UpdateAnnotateButtonColors();
 	CCustomButton* titleButtons[] = { &m_btnMinimize, &m_btnMaximize };
 	for (CCustomButton* pButton : titleButtons)
 	{
@@ -3839,6 +4124,56 @@ void CXiaoGongPDFDlg::UpdateSnapshotButtonColors()
 			(dark ? RGB(39, 43, 47) : RGB(255, 255, 255)),
 		dark ? RGB(55, 65, 72) : RGB(236, 244, 255),
 		dark ? RGB(69, 82, 91) : RGB(219, 235, 255));
+}
+
+void CXiaoGongPDFDlg::UpdatePageLayoutButton()
+{
+	if (!m_btnPageLayout.GetSafeHwnd())
+		return;
+	const bool dark = m_readingMode == READING_NIGHT;
+	const bool twoPageActive = (m_layoutMode == LAYOUT_TWO_PAGE_SPREAD);
+	m_btnPageLayout.SetIconGlyph(twoPageActive ? 0xE89A : 0xE7C3);
+	m_btnPageLayout.SetToolTipText(twoPageActive ?
+		_T("当前：双页并排视图（点击切换为单页连续）") :
+		_T("当前：单页连续视图（点击切换为双页并排）"));
+
+	m_btnPageLayout.SetColors(
+		twoPageActive ? (dark ? RGB(65, 82, 88) : RGB(221, 235, 252)) :
+			(dark ? RGB(39, 43, 47) : RGB(255, 255, 255)),
+		dark ? RGB(55, 65, 72) : RGB(236, 244, 255),
+		dark ? RGB(69, 82, 91) : RGB(219, 235, 255));
+	m_btnPageLayout.Invalidate(FALSE);
+}
+
+void CXiaoGongPDFDlg::UpdateAnnotateButtonColors()
+{
+	if (!m_btnAnnotate.GetSafeHwnd())
+		return;
+	const bool dark = m_readingMode == READING_NIGHT;
+	CPDFDocument* pDoc = GetActiveDocument();
+	const bool hasDirty = (pDoc && pDoc->HasUnsavedAnnotations());
+	m_btnAnnotate.SetColors(
+		hasDirty ? (dark ? RGB(65, 82, 88) : RGB(221, 235, 252)) :
+			(dark ? RGB(39, 43, 47) : RGB(255, 255, 255)),
+		dark ? RGB(55, 65, 72) : RGB(236, 244, 255),
+		dark ? RGB(69, 82, 91) : RGB(219, 235, 255));
+	m_btnAnnotate.Invalidate(FALSE);
+}
+
+void CXiaoGongPDFDlg::UpdateDocumentDirtyTitle()
+{
+	UpdateTabControl();
+	if (m_tabCtrl.GetSafeHwnd())
+		m_tabCtrl.Invalidate(FALSE);
+	if (CPDFDocument* pDoc = GetActiveDocument())
+	{
+		CString title;
+		title.Format(pDoc->HasUnsavedAnnotations() ?
+			_T("小龚PDF阅读器 - * %s") : _T("小龚PDF阅读器 - %s"),
+			pDoc->GetFileName().GetString());
+		SetWindowText(title);
+	}
+	UpdateAnnotateButtonColors();
 }
 
 void CXiaoGongPDFDlg::OnBtnMinimize()
@@ -4610,7 +4945,8 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 	if (index != m_activeDocIndex)
 		StopSearch();
 
-	// 切换文档时清除文本选择与截图模式
+	// 切换文档时提交当前内联文字批注并清除文本选择与截图模式
+	FinishInlineTextAnnot(false);
 	ClearSelection();
 	CancelAreaCaptureMode(false);
 	InvalidateLinkCache();
@@ -4652,6 +4988,8 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 	// ★★★ 立即清空页面位置缓存，防止在CalculatePagePositions()调用前触发RenderVisiblePages()导致越界
 	m_pageYPositions.clear();
 	m_pageHeights.clear();
+	m_pageRowTops.clear();
+	m_pageRowHeights.clear();
 
 #ifdef _DEBUG
 	TRACE(_T("m_doc: %p, 总页数: %d, 当前页: %d\n"), m_doc, m_totalPages, m_currentPage);
@@ -4667,10 +5005,8 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 		m_zoom, m_zoomMode, m_customZoom);
 #endif
 
-	// 更新窗口标题
-	CString title;
-	title.Format(_T("小龚PDF阅读器 - %s"), newDoc->GetFileName());
-	SetWindowText(title);
+	// 更新窗口标题与未保存星标
+	UpdateDocumentDirtyTitle();
 
 	// ★★★ 恢复搜索信息（每个文档的搜索结果应该独立），同步文本时屏蔽 EN_CHANGE 防止清空搜索结果
 	const bool hadSearchPanel = m_searchResultsVisible;
@@ -4738,7 +5074,7 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 		m_outlineTree.DeleteAllItems();
 }
 
-void CXiaoGongPDFDlg::CloseDocument(int index)
+bool CXiaoGongPDFDlg::CloseDocument(int index, bool promptUnsaved)
 {
 #ifdef _DEBUG
 	TRACE(_T("CloseDocument: %d\n"), index);
@@ -4746,12 +5082,26 @@ void CXiaoGongPDFDlg::CloseDocument(int index)
 
 	if (index < 0 || index >= (int)m_documents.size())
 	{
-		return;
+		return false;
+	}
+
+	if (index == m_activeDocIndex)
+		FinishInlineTextAnnot(false);
+
+	CPDFDocument* doc = m_documents[index];
+	if (promptUnsaved && doc && doc->HasUnsavedAnnotations())
+	{
+		if (!PromptSaveUnsavedAnnotations(doc))
+			return false;
+		// PromptSaveUnsavedAnnotations 内部写回重开期间可能调整状态，重新确认索引
+		auto curIt = std::find(m_documents.begin(), m_documents.end(), doc);
+		if (curIt == m_documents.end())
+			return true;
+		index = static_cast<int>(curIt - m_documents.begin());
 	}
 
 	bool isActiveDocument = (index == m_activeDocIndex);
 	const bool closingLastDocument = isActiveDocument && m_documents.size() == 1;
-	CPDFDocument* doc = m_documents[index];
 
 	// 取消文件变化监听
 	if (doc && !doc->GetFilePath().IsEmpty())
@@ -4820,6 +5170,11 @@ void CXiaoGongPDFDlg::CloseDocument(int index)
 			m_currentPage = 0;
 			m_pageYPositions.clear();
 			m_pageHeights.clear();
+			m_pageRowTops.clear();
+			m_pageRowHeights.clear();
+			m_layoutMode = LAYOUT_SINGLE_CONTINUOUS;
+			UpdatePageLayoutButton();
+			UpdateAnnotateButtonColors();
 			m_totalScrollHeight = 0;
 			m_totalScrollWidth = 0;
 
@@ -4880,6 +5235,7 @@ void CXiaoGongPDFDlg::CloseDocument(int index)
 		// 关闭的文档在当前文档之前，需要调整索引
 		m_activeDocIndex--;
 	}
+	return true;
 }
 
 void CXiaoGongPDFDlg::CloseCurrentDocument()
@@ -4911,6 +5267,9 @@ void CXiaoGongPDFDlg::UpdateTabControl()
 			if (ext == _T(".pdf"))
 				tabTitle = tabTitle.Left(dotPos);
 		}
+
+		if (pDoc->HasUnsavedAnnotations())
+			tabTitle = _T("* ") + tabTitle;
 
 		TCITEM tci = { 0 };
 		tci.mask = TCIF_TEXT | TCIF_PARAM;
@@ -5118,6 +5477,8 @@ LRESULT CXiaoGongPDFDlg::OnTabContextMenu(WPARAM wParam, LPARAM lParam)
 		CMD_TAB_CLOSE = 1,
 		CMD_TAB_CLOSE_OTHERS,
 		CMD_TAB_CLOSE_RIGHT,
+		CMD_TAB_SAVE_PDF,
+		CMD_TAB_DOC_PROPS,
 		CMD_TAB_COPY_PATH,
 		CMD_TAB_OPEN_FOLDER
 	};
@@ -5132,6 +5493,9 @@ LRESULT CXiaoGongPDFDlg::OnTabContextMenu(WPARAM wParam, LPARAM lParam)
 		CMD_TAB_CLOSE_OTHERS, _T("关闭其他标签页"));
 	menu.AppendMenu(MF_STRING | (tabIndex < docCount - 1 ? 0 : MF_GRAYED),
 		CMD_TAB_CLOSE_RIGHT, _T("关闭右侧标签页"));
+	menu.AppendMenu(MF_SEPARATOR);
+	menu.AppendMenu(MF_STRING, CMD_TAB_SAVE_PDF, _T("保存批注与旋转\tCtrl+S"));
+	menu.AppendMenu(MF_STRING, CMD_TAB_DOC_PROPS, _T("文档属性与幅面...\tCtrl+D"));
 	menu.AppendMenu(MF_SEPARATOR);
 	menu.AppendMenu(MF_STRING, CMD_TAB_COPY_PATH, _T("复制完整路径"));
 	menu.AppendMenu(MF_STRING, CMD_TAB_OPEN_FOLDER, _T("打开文件所在位置"));
@@ -5163,7 +5527,10 @@ LRESULT CXiaoGongPDFDlg::OnTabContextMenu(WPARAM wParam, LPARAM lParam)
 		for (int i = static_cast<int>(m_documents.size()) - 1; i >= 0; --i)
 		{
 			if (m_documents[i] != pTargetDoc)
-				CloseDocument(i);
+			{
+				if (!CloseDocument(i))
+					break;
+			}
 		}
 		break;
 
@@ -5176,8 +5543,23 @@ LRESULT CXiaoGongPDFDlg::OnTabContextMenu(WPARAM wParam, LPARAM lParam)
 		}
 		for (int i = static_cast<int>(m_documents.size()) - 1; i > curTabIndex; --i)
 		{
-			CloseDocument(i);
+			if (!CloseDocument(i))
+				break;
 		}
+		break;
+
+	case CMD_TAB_SAVE_PDF:
+		SaveDocumentEdits(pTargetDoc, false);
+		break;
+
+	case CMD_TAB_DOC_PROPS:
+		if (m_activeDocIndex != curTabIndex)
+		{
+			if (m_tabCtrl.GetSafeHwnd())
+				m_tabCtrl.SetCurSel(curTabIndex);
+			SwitchToDocument(curTabIndex);
+		}
+		OnMenuDocProperties();
 		break;
 
 	case CMD_TAB_COPY_PATH:
@@ -5244,6 +5626,19 @@ void CXiaoGongPDFDlg::OnOK()
 // 自定义Cancel函数,防止关闭时发出警告音
 void CXiaoGongPDFDlg::OnCancel()
 {
+	FinishInlineTextAnnot(false);
+
+	// 退出程序前检查所有已打开标签页是否有未保存的批注修改
+	for (size_t i = 0; i < m_documents.size(); ++i)
+	{
+		CPDFDocument* pDoc = m_documents[i];
+		if (pDoc && pDoc->HasUnsavedAnnotations())
+		{
+			if (!PromptSaveUnsavedAnnotations(pDoc))
+				return;
+		}
+	}
+
 	if (!m_pendingLoads.empty() || m_pSearchParams || !m_retiredSearches.empty())
 	{
 		m_closePending = true;
@@ -5279,6 +5674,7 @@ void CXiaoGongPDFDlg::OnDestroy()
 	KillTimer(TIMER_ID_PAGE_PREFETCH);
 	if (m_sessionRestoreStarted)
 		SaveOpenTabs();
+	FinishInlineTextAnnot(true);
 	ClearSelection();
 	CancelAreaCaptureMode(false);
 	InvalidateLinkCache();
@@ -5442,11 +5838,166 @@ void CXiaoGongPDFDlg::OnLButtonDown(UINT nFlags, CPoint point)
 			return;
 		}
 
+		// 选中文本浮动快捷操作条点击检测
+		if (!temporarySpacePan && IsSelectionActionBarVisible())
+		{
+			const int hitSelAct = HitTestSelectionActionBar(pdfViewPoint);
+			if (hitSelAct != SEL_BAR_NONE)
+			{
+				SetFocus();
+				m_pressedSelectionAction = hitSelAct;
+				SetCapture();
+				InvalidateSelection();
+				return;
+			}
+		}
+
+		// 页面内联文字批注编辑框与顶部悬浮样式栏交互处理
+		if (!temporarySpacePan && IsInlineTextAnnotVisible())
+		{
+			if (m_inlineAnnot.colorPopupOpen)
+			{
+				const int hitSwatch = HitTestInlineAnnotColorSwatch(pdfViewPoint);
+				if (hitSwatch >= 0)
+				{
+					m_inlineAnnot.pressedColorSwatch = hitSwatch;
+					SetCapture();
+					InvalidateSelection();
+					return;
+				}
+				if (!m_inlineAnnot.colorPopupViewRect.IsRectEmpty() &&
+					m_inlineAnnot.colorPopupViewRect.PtInRect(pdfViewPoint))
+				{
+					if (m_inlineAnnotEdit.GetSafeHwnd())
+						m_inlineAnnotEdit.SetFocus();
+					return;
+				}
+				if (HitTestInlineAnnotToolbar(pdfViewPoint) != INLINE_ANNOT_BTN_COLOR)
+				{
+					m_inlineAnnot.colorPopupOpen = false;
+					InvalidateSelection();
+				}
+			}
+
+			const int hitBarBtn = HitTestInlineAnnotToolbar(pdfViewPoint);
+			if (hitBarBtn != INLINE_ANNOT_BTN_NONE)
+			{
+				m_inlineAnnot.pressedToolbarBtn = hitBarBtn;
+				SetCapture();
+				InvalidateSelection();
+				return;
+			}
+			if (!m_inlineAnnot.toolbarViewRect.IsRectEmpty() &&
+				m_inlineAnnot.toolbarViewRect.PtInRect(pdfViewPoint))
+			{
+				if (m_inlineAnnotEdit.GetSafeHwnd())
+					m_inlineAnnotEdit.SetFocus();
+				return;
+			}
+
+			CRect resizeHit = m_inlineAnnot.resizeHandleViewRect;
+			if (!resizeHit.IsRectEmpty())
+				resizeHit.InflateRect(4, 4);
+			if (!resizeHit.IsRectEmpty() && resizeHit.PtInRect(pdfViewPoint))
+			{
+				m_inlineAnnot.draggingResizeW = true;
+				m_inlineAnnot.justCreatedFromMenu = false;
+				m_inlineAnnot.dragStartView = pdfViewPoint;
+				m_inlineAnnot.dragStartWidthPt = m_inlineAnnot.widthPt;
+				SetCapture();
+				::SetCursor(::LoadCursor(nullptr, IDC_SIZEWE));
+				return;
+			}
+
+			if ((!m_inlineAnnot.moveHandleViewRect.IsRectEmpty() &&
+				m_inlineAnnot.moveHandleViewRect.PtInRect(pdfViewPoint)) ||
+				HitTestInlineAnnotMoveBorder(pdfViewPoint))
+			{
+				m_inlineAnnot.draggingMove = true;
+				m_inlineAnnot.justCreatedFromMenu = false;
+				m_inlineAnnot.dragStartView = pdfViewPoint;
+				m_inlineAnnot.dragStartLocalXPt = m_inlineAnnot.localXPt;
+				m_inlineAnnot.dragStartLocalYPt = m_inlineAnnot.localYPt;
+				SetCapture();
+				::SetCursor(::LoadCursor(nullptr, IDC_SIZEALL));
+				return;
+			}
+
+			if (!m_inlineAnnot.boxViewRect.IsRectEmpty() &&
+				m_inlineAnnot.boxViewRect.PtInRect(pdfViewPoint))
+			{
+				m_inlineAnnot.justCreatedFromMenu = false;
+				const int charIdx = HitTestInlineAnnotCharIndex(pdfViewPoint);
+				if (m_inlineAnnotEdit.GetSafeHwnd())
+				{
+					if (nFlags & MK_SHIFT)
+					{
+						int curStart = 0, curEnd = 0;
+						m_inlineAnnotEdit.GetSel(curStart, curEnd);
+						m_inlineAnnotEdit.SetSel(curStart, charIdx);
+						m_inlineAnnot.selectAnchorChar = curStart;
+					}
+					else
+					{
+						m_inlineAnnotEdit.SetSel(charIdx, charIdx);
+						m_inlineAnnot.selectAnchorChar = charIdx;
+					}
+					m_inlineAnnotEdit.SetFocus();
+				}
+				m_inlineAnnot.selectingText = true;
+				m_inlineAnnot.caretVisible = true;
+				SetCapture();
+				InvalidateSelection();
+				return;
+			}
+
+			// 若刚通过菜单新建且尚未输入文字，点击页面任意空白位置可直接将该输入框定位到点击处
+			CString curAnnotText;
+			if (m_inlineAnnotEdit.GetSafeHwnd())
+				m_inlineAnnotEdit.GetWindowText(curAnnotText);
+			int clickAnnotPage = -1;
+			PageAnnotHitInfo clickAnnotHit;
+			const bool hitOtherFreeText = HitTestAnnotationAtViewPoint(pdfViewPoint, clickAnnotPage, clickAnnotHit) &&
+				clickAnnotHit.type == PDF_ANNOT_FREE_TEXT;
+
+			if (m_inlineAnnot.justCreatedFromMenu && curAnnotText.IsEmpty() && !hitOtherFreeText)
+			{
+				const int targetPage = GetPageAtViewPoint(pdfViewPoint, false);
+				float targetFitzX = 0.0f, targetFitzY = 0.0f;
+				if (targetPage >= 0 && ScreenPointToPdfCoords(pdfViewPoint, targetPage, targetFitzX, targetFitzY))
+				{
+					StartInlineTextAnnotAt(targetPage, targetFitzX, targetFitzY, CString(), false);
+					return;
+				}
+			}
+
+			FinishInlineTextAnnot(false);
+			if (hitOtherFreeText)
+			{
+				StartInlineTextAnnotFromExisting(clickAnnotPage, clickAnnotHit);
+			}
+			return;
+		}
+
 		if (!temporarySpacePan && m_totalPages > 0)
 		{
 			m_linkPressPoint = pdfViewPoint;
 			if (HitTestLink(pdfViewPoint, m_pendingLinkHit))
 				m_pendingLinkDocument = m_doc;
+		}
+
+		// 点击页面上已有的文字批注时直接进入内联编辑/移动状态
+		if (!temporarySpacePan && m_pendingLinkHit.kind == PdfLinkKind::None && m_totalPages > 0)
+		{
+			int hitAnnotPage = -1;
+			PageAnnotHitInfo hitAnnot;
+			if (HitTestAnnotationAtViewPoint(pdfViewPoint, hitAnnotPage, hitAnnot) &&
+				hitAnnot.type == PDF_ANNOT_FREE_TEXT)
+			{
+				ClearSelection();
+				StartInlineTextAnnotFromExisting(hitAnnotPage, hitAnnot);
+				return;
+			}
 		}
 
 		// 未按住空格临时抓手时：开始文本选择
@@ -5458,7 +6009,7 @@ void CXiaoGongPDFDlg::OnLButtonDown(UINT nFlags, CPoint point)
 			m_selStartView = pdfViewPoint;
 			m_selEndView = pdfViewPoint;
 
-			m_selPageNumber = GetPageAtPosition(pdfViewPoint.y + m_scrollPosition - m_panOffset.y);
+			m_selPageNumber = GetPageAtViewPoint(pdfViewPoint, true);
 
 			if (m_selPageNumber < 0 || m_selPageNumber >= m_totalPages)
 				m_selPageNumber = m_currentPage;
@@ -5542,6 +6093,157 @@ void CXiaoGongPDFDlg::OnLButtonUp(UINT nFlags, CPoint point)
 	ScreenToClient(&linkViewRect);
 	CPoint linkReleasePoint = point;
 	linkReleasePoint.Offset(-linkViewRect.left, -linkViewRect.top);
+
+	// 处理页面内联文字批注浮动栏点击、调色板选择、手柄拖拽与框内选字释放
+	if (IsInlineTextAnnotVisible())
+	{
+		if (m_inlineAnnot.pressedColorSwatch >= 0)
+		{
+			const int pressedIdx = m_inlineAnnot.pressedColorSwatch;
+			m_inlineAnnot.pressedColorSwatch = -1;
+			if (::GetCapture() == GetSafeHwnd())
+				::ReleaseCapture();
+			const int releaseIdx = HitTestInlineAnnotColorSwatch(linkReleasePoint);
+			if (releaseIdx == pressedIdx)
+			{
+				static const COLORREF kAnnotPalette[INLINE_ANNOT_SWATCH_COUNT] = {
+					RGB(0, 114, 206),
+					RGB(216, 43, 43),
+					RGB(32, 33, 36),
+					RGB(22, 148, 72),
+					RGB(230, 106, 18),
+					RGB(124, 58, 202),
+					RGB(198, 32, 104),
+					RGB(95, 107, 122)
+				};
+				m_inlineAnnot.color = kAnnotPalette[releaseIdx];
+				m_defaultAnnotTextColor = m_inlineAnnot.color;
+				m_inlineAnnot.colorPopupOpen = false;
+				SetStatusBarMessage(_T("文字批注：已更新字体颜色"));
+			}
+			if (m_inlineAnnotEdit.GetSafeHwnd())
+				m_inlineAnnotEdit.SetFocus();
+			InvalidateSelection();
+			return;
+		}
+
+		if (m_inlineAnnot.pressedToolbarBtn != INLINE_ANNOT_BTN_NONE)
+		{
+			const int pressedBtn = m_inlineAnnot.pressedToolbarBtn;
+			m_inlineAnnot.pressedToolbarBtn = INLINE_ANNOT_BTN_NONE;
+			if (::GetCapture() == GetSafeHwnd())
+				::ReleaseCapture();
+			const int releaseBtn = HitTestInlineAnnotToolbar(linkReleasePoint);
+			if (releaseBtn == pressedBtn)
+			{
+				if (releaseBtn == INLINE_ANNOT_BTN_COLOR)
+				{
+					m_inlineAnnot.colorPopupOpen = !m_inlineAnnot.colorPopupOpen;
+				}
+				else if (releaseBtn == INLINE_ANNOT_BTN_FONT_INC)
+				{
+					m_inlineAnnot.colorPopupOpen = false;
+					m_inlineAnnot.fontSizePt = min(48.0f, m_inlineAnnot.fontSizePt + 2.0f);
+					m_defaultAnnotFontSizePt = m_inlineAnnot.fontSizePt;
+					CString tip;
+					tip.Format(_T("文字批注：字号 %.0f pt"), m_inlineAnnot.fontSizePt);
+					SetStatusBarMessage(tip);
+				}
+				else if (releaseBtn == INLINE_ANNOT_BTN_FONT_DEC)
+				{
+					m_inlineAnnot.colorPopupOpen = false;
+					m_inlineAnnot.fontSizePt = max(8.0f, m_inlineAnnot.fontSizePt - 2.0f);
+					m_defaultAnnotFontSizePt = m_inlineAnnot.fontSizePt;
+					CString tip;
+					tip.Format(_T("文字批注：字号 %.0f pt"), m_inlineAnnot.fontSizePt);
+					SetStatusBarMessage(tip);
+				}
+				else if (releaseBtn == INLINE_ANNOT_BTN_CHAR_SPACE_INC)
+				{
+					m_inlineAnnot.colorPopupOpen = false;
+					m_inlineAnnot.charSpacingPt = min(24.0f, m_inlineAnnot.charSpacingPt + 1.2f);
+					m_defaultAnnotCharSpacingPt = m_inlineAnnot.charSpacingPt;
+					CString tip;
+					tip.Format(_T("文字批注：文字间距 +%.1f pt"), m_inlineAnnot.charSpacingPt);
+					SetStatusBarMessage(tip);
+				}
+				else if (releaseBtn == INLINE_ANNOT_BTN_CHAR_SPACE_DEC)
+				{
+					m_inlineAnnot.colorPopupOpen = false;
+					m_inlineAnnot.charSpacingPt = max(0.0f, m_inlineAnnot.charSpacingPt - 1.2f);
+					m_defaultAnnotCharSpacingPt = m_inlineAnnot.charSpacingPt;
+					CString tip;
+					tip.Format(_T("文字批注：文字间距 +%.1f pt"), m_inlineAnnot.charSpacingPt);
+					SetStatusBarMessage(tip);
+				}
+				else if (releaseBtn == INLINE_ANNOT_BTN_DELETE)
+				{
+					DeleteActiveInlineTextAnnot();
+					return;
+				}
+				else if (releaseBtn == INLINE_ANNOT_BTN_EXIT)
+				{
+					FinishInlineTextAnnot(false);
+					return;
+				}
+			}
+			if (m_inlineAnnot.active && m_inlineAnnotEdit.GetSafeHwnd())
+				m_inlineAnnotEdit.SetFocus();
+			InvalidateSelection();
+			return;
+		}
+
+		if (m_inlineAnnot.draggingMove || m_inlineAnnot.draggingResizeW || m_inlineAnnot.selectingText)
+		{
+			m_inlineAnnot.draggingMove = false;
+			m_inlineAnnot.draggingResizeW = false;
+			m_inlineAnnot.selectingText = false;
+			if (::GetCapture() == GetSafeHwnd())
+				::ReleaseCapture();
+			if (m_inlineAnnotEdit.GetSafeHwnd())
+				m_inlineAnnotEdit.SetFocus();
+			InvalidateSelection();
+			if (m_pdfView.GetSafeHwnd())
+			{
+				SendMessage(WM_SETCURSOR,
+					reinterpret_cast<WPARAM>(m_pdfView.GetSafeHwnd()),
+					MAKELPARAM(HTCLIENT, WM_MOUSEMOVE));
+			}
+			return;
+		}
+	}
+
+	// 处理选中文本快捷操作条按钮释放
+	if (m_pressedSelectionAction != SEL_BAR_NONE)
+	{
+		const int pressedSel = m_pressedSelectionAction;
+		m_pressedSelectionAction = SEL_BAR_NONE;
+		if (::GetCapture() == GetSafeHwnd())
+			::ReleaseCapture();
+		const int releaseSel = HitTestSelectionActionBar(linkReleasePoint);
+		InvalidateSelection();
+		if (releaseSel == pressedSel)
+		{
+			if (releaseSel == SEL_BAR_COPY)
+			{
+				CopySelectionToClipboard();
+				SetStatusBarMessage(_T("已复制选中文本"));
+			}
+			else if (releaseSel == SEL_BAR_HIGHLIGHT)
+			{
+				OnMenuAnnotHighlight();
+			}
+			else if (releaseSel == SEL_BAR_UNDERLINE)
+			{
+				OnMenuAnnotUnderline();
+			}
+			else if (releaseSel == SEL_BAR_NOTE)
+			{
+				OnMenuAnnotTextNote();
+			}
+		}
+		return;
+	}
 
 	// 处理区域截图浮动工具栏点击或框选拖拽完成
 	if (m_isAreaCaptureMode)
@@ -5781,6 +6483,12 @@ void CXiaoGongPDFDlg::OnCaptureChanged(CWnd* pWnd)
 		m_pendingLinkHit = PdfLinkHit{};
 		m_pendingLinkDocument = nullptr;
 		m_pressedCaptureAction = CAPTURE_ACT_NONE;
+		m_pressedSelectionAction = SEL_BAR_NONE;
+		m_inlineAnnot.pressedToolbarBtn = INLINE_ANNOT_BTN_NONE;
+		m_inlineAnnot.pressedColorSwatch = -1;
+		m_inlineAnnot.draggingMove = false;
+		m_inlineAnnot.draggingResizeW = false;
+		m_inlineAnnot.selectingText = false;
 		if (m_isDraggingCaptureRect)
 		{
 			m_isDraggingCaptureRect = false;
@@ -5832,6 +6540,106 @@ void CXiaoGongPDFDlg::OnMouseMove(UINT nFlags, CPoint point)
 				m_windowDragStartRect.top + cursor.y - m_windowDragStartScreen.y,
 				0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 			return;
+		}
+	}
+
+	// ★★★ 页面内联文字批注拖拽移动、右侧圆柄调宽、框内拖选与浮动栏悬停
+	if (IsInlineTextAnnotVisible() && m_pdfView.GetSafeHwnd())
+	{
+		CRect pdfRect;
+		m_pdfView.GetWindowRect(&pdfRect);
+		ScreenToClient(&pdfRect);
+		CPoint pdfViewPoint = point;
+		pdfViewPoint.Offset(-pdfRect.left, -pdfRect.top);
+
+		if (m_inlineAnnot.draggingMove && (nFlags & MK_LBUTTON))
+		{
+			fz_rect bounds = {};
+			float scale = 0.0f;
+			int offsetX = 0, offsetY = 0;
+			if (GetSelectionPageTransform(m_inlineAnnot.pageNumber, bounds, scale, offsetX, offsetY) &&
+				scale > 0.01f)
+			{
+				const int rot = GetPageRotation(m_inlineAnnot.pageNumber);
+				const float origW = bounds.x1 - bounds.x0;
+				const float origH = bounds.y1 - bounds.y0;
+				const float effW = (rot == 90 || rot == 270) ? origH : origW;
+				const float effH = (rot == 90 || rot == 270) ? origW : origH;
+				const float dxPt = static_cast<float>(pdfViewPoint.x - m_inlineAnnot.dragStartView.x) / scale;
+				const float dyPt = static_cast<float>(pdfViewPoint.y - m_inlineAnnot.dragStartView.y) / scale;
+				const float estH = max(m_inlineAnnot.fontSizePt * 1.5f,
+					m_inlineAnnot.boxViewRect.Height() / scale);
+				m_inlineAnnot.localXPt = max(2.0f, min(max(2.0f, effW - m_inlineAnnot.widthPt - 2.0f),
+					m_inlineAnnot.dragStartLocalXPt + dxPt));
+				m_inlineAnnot.localYPt = max(2.0f, min(max(2.0f, effH - estH - 2.0f),
+					m_inlineAnnot.dragStartLocalYPt + dyPt));
+				InvalidateSelection();
+			}
+			return;
+		}
+
+		if (m_inlineAnnot.draggingResizeW && (nFlags & MK_LBUTTON))
+		{
+			fz_rect bounds = {};
+			float scale = 0.0f;
+			int offsetX = 0, offsetY = 0;
+			if (GetSelectionPageTransform(m_inlineAnnot.pageNumber, bounds, scale, offsetX, offsetY) &&
+				scale > 0.01f)
+			{
+				const int rot = GetPageRotation(m_inlineAnnot.pageNumber);
+				const float origW = bounds.x1 - bounds.x0;
+				const float origH = bounds.y1 - bounds.y0;
+				const float effW = (rot == 90 || rot == 270) ? origH : origW;
+				const float dxPt = static_cast<float>(pdfViewPoint.x - m_inlineAnnot.dragStartView.x) / scale;
+				const float minW = max(44.0f, m_inlineAnnot.fontSizePt * 2.5f + 10.0f);
+				const float maxW = max(minW, effW - m_inlineAnnot.localXPt - 4.0f);
+				m_inlineAnnot.widthPt = max(minW, min(maxW, m_inlineAnnot.dragStartWidthPt + dxPt));
+				m_inlineAnnot.userResizedWidth = true;
+				InvalidateSelection();
+			}
+			return;
+		}
+
+		if (m_inlineAnnot.selectingText && (nFlags & MK_LBUTTON))
+		{
+			const int charIdx = HitTestInlineAnnotCharIndex(pdfViewPoint);
+			if (m_inlineAnnotEdit.GetSafeHwnd())
+			{
+				m_inlineAnnotEdit.SetSel(m_inlineAnnot.selectAnchorChar, charIdx);
+				m_inlineAnnot.caretVisible = true;
+			}
+			InvalidateSelection();
+			return;
+		}
+
+		if (!m_isDragging)
+		{
+			const int hoverBtn = HitTestInlineAnnotToolbar(pdfViewPoint);
+			const int hoverSwatch = m_inlineAnnot.colorPopupOpen ?
+				HitTestInlineAnnotColorSwatch(pdfViewPoint) : -1;
+			CRect resizeHit = m_inlineAnnot.resizeHandleViewRect;
+			if (!resizeHit.IsRectEmpty())
+				resizeHit.InflateRect(4, 4);
+			const bool hoverResize = !resizeHit.IsRectEmpty() && resizeHit.PtInRect(pdfViewPoint);
+			const bool hoverMove = !hoverResize &&
+				!m_inlineAnnot.moveHandleViewRect.IsRectEmpty() &&
+				m_inlineAnnot.moveHandleViewRect.PtInRect(pdfViewPoint);
+			const bool hoverBorder = !hoverResize && !hoverMove &&
+				HitTestInlineAnnotMoveBorder(pdfViewPoint);
+
+			if (hoverBtn != m_inlineAnnot.hoverToolbarBtn ||
+				hoverSwatch != m_inlineAnnot.hoverColorSwatch ||
+				hoverResize != m_inlineAnnot.hoverResizeHandle ||
+				hoverMove != m_inlineAnnot.hoverMoveHandle ||
+				hoverBorder != m_inlineAnnot.hoverBorderMove)
+			{
+				m_inlineAnnot.hoverToolbarBtn = hoverBtn;
+				m_inlineAnnot.hoverColorSwatch = hoverSwatch;
+				m_inlineAnnot.hoverResizeHandle = hoverResize;
+				m_inlineAnnot.hoverMoveHandle = hoverMove;
+				m_inlineAnnot.hoverBorderMove = hoverBorder;
+				InvalidateSelection();
+			}
 		}
 	}
 
@@ -5929,9 +6737,9 @@ void CXiaoGongPDFDlg::OnMouseMove(UINT nFlags, CPoint point)
 		}
 	}
 
-	// 普通悬停移动：检测链接并在底部状态栏实时预览目标页码或 URL
-	if (m_doc && m_totalPages > 0 && !m_isAreaCaptureMode && !m_isSelecting &&
-		!m_isDragging && m_pdfView.GetSafeHwnd())
+	// 普通悬停移动：更新选中文本浮动条高亮，并检测链接/批注在状态栏实时预览
+	if (m_doc && m_totalPages > 0 && !m_isAreaCaptureMode &&
+		!m_isSelecting && !m_isDragging && m_pdfView.GetSafeHwnd())
 	{
 		CRect pdfRect;
 		m_pdfView.GetWindowRect(&pdfRect);
@@ -5940,10 +6748,24 @@ void CXiaoGongPDFDlg::OnMouseMove(UINT nFlags, CPoint point)
 		{
 			CPoint pdfViewPoint = point;
 			pdfViewPoint.Offset(-pdfRect.left, -pdfRect.top);
+			if (IsSelectionActionBarVisible())
+			{
+				const int hoverSel = HitTestSelectionActionBar(pdfViewPoint);
+				if (hoverSel != m_hoverSelectionAction)
+				{
+					m_hoverSelectionAction = hoverSel;
+					InvalidateSelection();
+				}
+			}
 			UpdateHoverLinkFeedback(pdfViewPoint);
 		}
 		else
 		{
+			if (m_hoverSelectionAction != SEL_BAR_NONE)
+			{
+				m_hoverSelectionAction = SEL_BAR_NONE;
+				InvalidateSelection();
+			}
 			ClearHoverLinkFeedback();
 		}
 	}
@@ -5959,7 +6781,7 @@ void CXiaoGongPDFDlg::OnContextMenu(CWnd* pWnd, CPoint point)
 		return;
 	}
 
-	// 区域截图模式下右键即取消截图（符合主流截图工具操作直觉）
+	// 区域截图模式下右键即取消当前操作（符合主流交互直觉）
 	if (m_isAreaCaptureMode)
 	{
 		CancelAreaCaptureMode(true);
@@ -5977,17 +6799,97 @@ void CXiaoGongPDFDlg::OnContextMenu(CWnd* pWnd, CPoint point)
 
 	CPoint viewPt = menuScreenPt;
 	m_pdfView.ScreenToClient(&viewPt);
+
+	// 在内联文字批注输入框内右键时弹出标准文本编辑菜单
+	if (IsInlineTextAnnotVisible() &&
+		!m_inlineAnnot.boxViewRect.IsRectEmpty() &&
+		m_inlineAnnot.boxViewRect.PtInRect(viewPt) &&
+		m_inlineAnnotEdit.GetSafeHwnd())
+	{
+		enum InlineEditMenuCmd
+		{
+			CMD_INLINE_CUT = 1,
+			CMD_INLINE_COPY,
+			CMD_INLINE_PASTE,
+			CMD_INLINE_SELECT_ALL,
+			CMD_INLINE_DELETE_ANNOT,
+			CMD_INLINE_FINISH
+		};
+		int selS = 0, selE = 0;
+		m_inlineAnnotEdit.GetSel(selS, selE);
+		const UINT hasSelFlag = (selS != selE) ? 0 : MF_GRAYED;
+		const UINT canPasteFlag = ::IsClipboardFormatAvailable(CF_UNICODETEXT) ? 0 : MF_GRAYED;
+		CMenu editPopup;
+		if (editPopup.CreatePopupMenu())
+		{
+			editPopup.AppendMenu(MF_STRING | hasSelFlag, CMD_INLINE_CUT, _T("剪切\tCtrl+X"));
+			editPopup.AppendMenu(MF_STRING | hasSelFlag, CMD_INLINE_COPY, _T("复制\tCtrl+C"));
+			editPopup.AppendMenu(MF_STRING | canPasteFlag, CMD_INLINE_PASTE, _T("粘贴\tCtrl+V"));
+			editPopup.AppendMenu(MF_STRING, CMD_INLINE_SELECT_ALL, _T("全选\tCtrl+A"));
+			editPopup.AppendMenu(MF_SEPARATOR);
+			editPopup.AppendMenu(MF_STRING, CMD_INLINE_DELETE_ANNOT, _T("删除该文字批注"));
+			editPopup.AppendMenu(MF_STRING, CMD_INLINE_FINISH, _T("完成并退出编辑\tEsc"));
+			const UINT editCmd = static_cast<UINT>(editPopup.TrackPopupMenu(
+				TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+				menuScreenPt.x, menuScreenPt.y, this));
+			if (editCmd == CMD_INLINE_CUT)
+				m_inlineAnnotEdit.SendMessage(WM_CUT);
+			else if (editCmd == CMD_INLINE_COPY)
+				m_inlineAnnotEdit.SendMessage(WM_COPY);
+			else if (editCmd == CMD_INLINE_PASTE)
+				m_inlineAnnotEdit.SendMessage(WM_PASTE);
+			else if (editCmd == CMD_INLINE_SELECT_ALL)
+			{
+				m_inlineAnnotEdit.SetSel(0, -1);
+				InvalidateSelection();
+			}
+			else if (editCmd == CMD_INLINE_DELETE_ANNOT)
+			{
+				DeleteActiveInlineTextAnnot();
+				return;
+			}
+			else if (editCmd == CMD_INLINE_FINISH)
+			{
+				FinishInlineTextAnnot(false);
+				return;
+			}
+			if (m_inlineAnnot.active && m_inlineAnnotEdit.GetSafeHwnd())
+				m_inlineAnnotEdit.SetFocus();
+		}
+		return;
+	}
+
 	PdfLinkHit linkHit;
 	HitTestLink(viewPt, linkHit);
+
+	const int ctxPage = GetPageAtViewPoint(viewPt, true);
+	float ctxFitzX = 0.0f;
+	float ctxFitzY = 0.0f;
+	const bool hasCtxPdfPt = (ctxPage >= 0) &&
+		ScreenPointToPdfCoords(viewPt, ctxPage, ctxFitzX, ctxFitzY);
+
+	int hitAnnotPage = -1;
+	PageAnnotHitInfo hitAnnot;
+	const bool hasHitAnnot = HitTestAnnotationAtViewPoint(viewPt, hitAnnotPage, hitAnnot);
 
 	enum PageContextCmd
 	{
 		CMD_CTX_COPY_TEXT = 1,
+		CMD_CTX_ANNOT_HIGHLIGHT,
+		CMD_CTX_ANNOT_UNDERLINE,
+		CMD_CTX_ANNOT_STRIKEOUT,
+		CMD_CTX_ANNOT_SEL_NOTE,
+		CMD_CTX_EDIT_HIT_ANNOT,
+		CMD_CTX_DELETE_HIT_ANNOT,
 		CMD_CTX_OPEN_LINK,
 		CMD_CTX_COPY_LINK,
+		CMD_CTX_ADD_NOTE_HERE,
 		CMD_CTX_AREA_CAPTURE,
 		CMD_CTX_COPY_PAGE_IMG,
-		CMD_CTX_EXPORT_IMAGES
+		CMD_CTX_EXPORT_IMAGES,
+		CMD_CTX_SAVE_PDF,
+		CMD_CTX_SAVE_PDF_AS,
+		CMD_CTX_DOC_PROPERTIES
 	};
 
 	CMenu popup;
@@ -5995,13 +6897,35 @@ void CXiaoGongPDFDlg::OnContextMenu(CWnd* pWnd, CPoint point)
 		return;
 
 	bool hasTopGroup = false;
-	if (m_hasSelection && !m_selectedText.IsEmpty())
+	if (m_hasSelection && !m_selectionQuads.empty())
 	{
-		popup.AppendMenu(MF_STRING, CMD_CTX_COPY_TEXT, _T("复制选中文本\tCtrl+C"));
+		if (!m_selectedText.IsEmpty())
+			popup.AppendMenu(MF_STRING, CMD_CTX_COPY_TEXT, _T("复制选中文本\tCtrl+C"));
+		popup.AppendMenu(MF_STRING, CMD_CTX_ANNOT_HIGHLIGHT, _T("高亮选中文本\tCtrl+H"));
+		popup.AppendMenu(MF_STRING, CMD_CTX_ANNOT_UNDERLINE, _T("下划线选中文本\tCtrl+U"));
+		popup.AppendMenu(MF_STRING, CMD_CTX_ANNOT_STRIKEOUT, _T("删除线选中文本"));
+		popup.AppendMenu(MF_STRING, CMD_CTX_ANNOT_SEL_NOTE, _T("为选中内容添加批注..."));
+		hasTopGroup = true;
+	}
+	if (hasHitAnnot)
+	{
+		if (hasTopGroup)
+			popup.AppendMenu(MF_SEPARATOR);
+		if (hitAnnot.type != PDF_ANNOT_STAMP)
+		{
+			CString editLabel;
+			editLabel.Format(_T("编辑该%s内容..."), hitAnnot.typeLabel.GetString());
+			popup.AppendMenu(MF_STRING, CMD_CTX_EDIT_HIT_ANNOT, editLabel);
+		}
+		CString delLabel;
+		delLabel.Format(_T("删除该%s"), hitAnnot.typeLabel.GetString());
+		popup.AppendMenu(MF_STRING, CMD_CTX_DELETE_HIT_ANNOT, delLabel);
 		hasTopGroup = true;
 	}
 	if (linkHit.kind == PdfLinkKind::External && !linkHit.externalUri.IsEmpty())
 	{
+		if (hasTopGroup)
+			popup.AppendMenu(MF_SEPARATOR);
 		popup.AppendMenu(MF_STRING, CMD_CTX_OPEN_LINK, _T("打开外部链接..."));
 		popup.AppendMenu(MF_STRING, CMD_CTX_COPY_LINK, _T("复制链接地址"));
 		hasTopGroup = true;
@@ -6009,18 +6933,96 @@ void CXiaoGongPDFDlg::OnContextMenu(CWnd* pWnd, CPoint point)
 	if (hasTopGroup)
 		popup.AppendMenu(MF_SEPARATOR);
 
+	popup.AppendMenu(MF_STRING | (hasCtxPdfPt ? 0 : MF_GRAYED),
+		CMD_CTX_ADD_NOTE_HERE, _T("在此处添加文字批注..."));
+	popup.AppendMenu(MF_SEPARATOR);
+
+	CMenu layoutSubMenu;
+	if (layoutSubMenu.CreatePopupMenu())
+	{
+		layoutSubMenu.AppendMenu(MF_STRING, ID_MENU_LAYOUT_SINGLE, _T("单页连续视图"));
+		layoutSubMenu.AppendMenu(MF_STRING, ID_MENU_LAYOUT_TWO_PAGE, _T("双页并排视图"));
+		layoutSubMenu.CheckMenuRadioItem(ID_MENU_LAYOUT_SINGLE, ID_MENU_LAYOUT_TWO_PAGE,
+			ID_MENU_LAYOUT_SINGLE + static_cast<int>(m_layoutMode), MF_BYCOMMAND);
+		if (popup.AppendMenu(MF_POPUP, reinterpret_cast<UINT_PTR>(layoutSubMenu.GetSafeHmenu()),
+			_T("页面视图")))
+		{
+			layoutSubMenu.Detach();
+		}
+		popup.AppendMenu(MF_SEPARATOR);
+	}
+
 	popup.AppendMenu(MF_STRING, CMD_CTX_AREA_CAPTURE, _T("区域截图\tCtrl+Shift+S"));
 	popup.AppendMenu(MF_STRING, CMD_CTX_COPY_PAGE_IMG, _T("复制当前页为图片"));
 	popup.AppendMenu(MF_STRING, CMD_CTX_EXPORT_IMAGES, _T("导出页面为图片...\tCtrl+Shift+E"));
+	popup.AppendMenu(MF_SEPARATOR);
+	popup.AppendMenu(MF_STRING, CMD_CTX_SAVE_PDF, _T("保存批注与旋转回原 PDF\tCtrl+S"));
+	popup.AppendMenu(MF_STRING, CMD_CTX_SAVE_PDF_AS, _T("另存为新 PDF..."));
+	popup.AppendMenu(MF_STRING, CMD_CTX_DOC_PROPERTIES, _T("文档属性与幅面...\tCtrl+D"));
 
 	const UINT cmd = static_cast<UINT>(popup.TrackPopupMenu(
 		TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
 		menuScreenPt.x, menuScreenPt.y, this));
 
+	if (cmd >= ID_MENU_LAYOUT_SINGLE && cmd <= ID_MENU_LAYOUT_TWO_PAGE)
+	{
+		OnMenuPageLayout(cmd);
+		return;
+	}
+
 	switch (cmd)
 	{
 	case CMD_CTX_COPY_TEXT:
 		CopySelectionToClipboard();
+		break;
+	case CMD_CTX_ANNOT_HIGHLIGHT:
+		OnMenuAnnotHighlight();
+		break;
+	case CMD_CTX_ANNOT_UNDERLINE:
+		OnMenuAnnotUnderline();
+		break;
+	case CMD_CTX_ANNOT_STRIKEOUT:
+		OnMenuAnnotStrikeout();
+		break;
+	case CMD_CTX_ANNOT_SEL_NOTE:
+		OnMenuAnnotTextNote();
+		break;
+	case CMD_CTX_EDIT_HIT_ANNOT:
+		if (hitAnnot.type == PDF_ANNOT_FREE_TEXT)
+		{
+			StartInlineTextAnnotFromExisting(hitAnnotPage, hitAnnot);
+		}
+		else if (CPDFDocument* pDoc = GetActiveDocument())
+		{
+			ScopedFileWatchSuspend suspendWatch(this);
+			CPDFAnnotNoteDlg noteDlg(true, hitAnnot.contents, this);
+			if (noteDlg.DoModal() == IDOK)
+			{
+				CSingleLock lock(&m_renderLock, TRUE);
+				if (UpdatePageAnnotationContents(pDoc, hitAnnotPage, hitAnnot.annotIndex, noteDlg.m_noteText))
+				{
+					lock.Unlock();
+					UpdateDocumentDirtyTitle();
+					RenderVisiblePages();
+					SetStatusBarMessage(_T("已更新批注内容（按 Ctrl+S 保存写回原 PDF）"));
+				}
+			}
+		}
+		break;
+	case CMD_CTX_DELETE_HIT_ANNOT:
+		if (CPDFDocument* pDoc = GetActiveDocument())
+		{
+			CSingleLock lock(&m_renderLock, TRUE);
+			if (DeletePageAnnotationAt(pDoc, hitAnnotPage, hitAnnot.annotIndex))
+			{
+				lock.Unlock();
+				UpdateDocumentDirtyTitle();
+				RenderVisiblePages();
+				CString tip;
+				tip.Format(_T("已删除%s（按 Ctrl+S 保存写回原 PDF）"), hitAnnot.typeLabel.GetString());
+				SetStatusBarMessage(tip);
+			}
+		}
 		break;
 	case CMD_CTX_OPEN_LINK:
 		OpenExternalLinkWithConfirm(linkHit.externalUri);
@@ -6028,6 +7030,10 @@ void CXiaoGongPDFDlg::OnContextMenu(CWnd* pWnd, CPoint point)
 	case CMD_CTX_COPY_LINK:
 		if (CopyTextToClipboard(linkHit.externalUri))
 			SetStatusBarMessage(_T("已复制链接地址到剪贴板"));
+		break;
+	case CMD_CTX_ADD_NOTE_HERE:
+		if (hasCtxPdfPt)
+			PromptAddTextNoteAt(ctxPage, ctxFitzX, ctxFitzY);
 		break;
 	case CMD_CTX_AREA_CAPTURE:
 		StartAreaCaptureMode();
@@ -6037,6 +7043,15 @@ void CXiaoGongPDFDlg::OnContextMenu(CWnd* pWnd, CPoint point)
 		break;
 	case CMD_CTX_EXPORT_IMAGES:
 		OnMenuExportImages();
+		break;
+	case CMD_CTX_SAVE_PDF:
+		OnMenuSavePdf();
+		break;
+	case CMD_CTX_SAVE_PDF_AS:
+		OnMenuSavePdfAs();
+		break;
+	case CMD_CTX_DOC_PROPERTIES:
+		OnMenuDocProperties();
 		break;
 	default:
 		break;
@@ -6107,37 +7122,96 @@ BOOL CXiaoGongPDFDlg::OnSetCursor(CWnd* pWnd, UINT nHitTest, UINT message)
 		return TRUE;
 	}
 
+	if (m_doc && m_totalPages > 0 && IsInlineTextAnnotVisible())
+	{
+		if (m_inlineAnnot.draggingMove)
+		{
+			::SetCursor(::LoadCursor(nullptr, IDC_SIZEALL));
+			return TRUE;
+		}
+		if (m_inlineAnnot.draggingResizeW)
+		{
+			::SetCursor(::LoadCursor(nullptr, IDC_SIZEWE));
+			return TRUE;
+		}
+		if (m_inlineAnnot.colorPopupOpen && HitTestInlineAnnotColorSwatch(point) >= 0)
+		{
+			::SetCursor(m_hHandCursor ? m_hHandCursor : ::LoadCursor(nullptr, IDC_HAND));
+			return TRUE;
+		}
+		const int hitAnnotBtn = HitTestInlineAnnotToolbar(point);
+		if (hitAnnotBtn != INLINE_ANNOT_BTN_NONE)
+		{
+			const bool btnDisabled =
+				(hitAnnotBtn == INLINE_ANNOT_BTN_FONT_INC && m_inlineAnnot.fontSizePt >= 47.9f) ||
+				(hitAnnotBtn == INLINE_ANNOT_BTN_FONT_DEC && m_inlineAnnot.fontSizePt <= 8.1f) ||
+				(hitAnnotBtn == INLINE_ANNOT_BTN_CHAR_SPACE_INC && m_inlineAnnot.charSpacingPt >= 23.9f) ||
+				(hitAnnotBtn == INLINE_ANNOT_BTN_CHAR_SPACE_DEC && m_inlineAnnot.charSpacingPt <= 0.01f);
+			::SetCursor(btnDisabled ? ::LoadCursor(nullptr, IDC_ARROW) :
+				(m_hHandCursor ? m_hHandCursor : ::LoadCursor(nullptr, IDC_HAND)));
+			return TRUE;
+		}
+		if (!m_inlineAnnot.toolbarViewRect.IsRectEmpty() && m_inlineAnnot.toolbarViewRect.PtInRect(point))
+		{
+			::SetCursor(::LoadCursor(nullptr, IDC_ARROW));
+			return TRUE;
+		}
+		CRect resizeHit = m_inlineAnnot.resizeHandleViewRect;
+		if (!resizeHit.IsRectEmpty())
+			resizeHit.InflateRect(4, 4);
+		if (!resizeHit.IsRectEmpty() && resizeHit.PtInRect(point))
+		{
+			::SetCursor(::LoadCursor(nullptr, IDC_SIZEWE));
+			return TRUE;
+		}
+		if ((!m_inlineAnnot.moveHandleViewRect.IsRectEmpty() && m_inlineAnnot.moveHandleViewRect.PtInRect(point)) ||
+			HitTestInlineAnnotMoveBorder(point))
+		{
+			::SetCursor(::LoadCursor(nullptr, IDC_SIZEALL));
+			return TRUE;
+		}
+		if (!m_inlineAnnot.boxViewRect.IsRectEmpty() && m_inlineAnnot.boxViewRect.PtInRect(point))
+		{
+			::SetCursor(::LoadCursor(nullptr, IDC_IBEAM));
+			return TRUE;
+		}
+	}
+
+	if (m_doc && m_totalPages > 0 && IsSelectionActionBarVisible() &&
+		HitTestSelectionActionBar(point) != SEL_BAR_NONE)
+	{
+		::SetCursor(m_hHandCursor ? m_hHandCursor : ::LoadCursor(nullptr, IDC_HAND));
+		return TRUE;
+	}
+
 	bool overPage = false;
 	bool overLink = false;
+	bool overFreeTextAnnot = false;
 	if (m_doc && m_totalPages > 0)
 	{
-		const int pageNumber = GetPageAtPosition(point.y + m_scrollPosition - m_panOffset.y);
-
-		fz_rect bounds;
-		float scale = 0.0f;
-		int offsetX = 0;
-		int offsetY = 0;
-		if (pageNumber >= 0 && pageNumber < m_totalPages &&
-			GetSelectionPageTransform(pageNumber, bounds, scale, offsetX, offsetY))
+		const int pageNumber = GetPageAtViewPoint(point, false);
+		if (pageNumber >= 0 && pageNumber < m_totalPages)
 		{
-			const int rotation = GetPageRotation(pageNumber);
-			const float pageW = (rotation == 90 || rotation == 270) ?
-				(bounds.y1 - bounds.y0) : (bounds.x1 - bounds.x0);
-			const float pageH = (rotation == 90 || rotation == 270) ?
-				(bounds.x1 - bounds.x0) : (bounds.y1 - bounds.y0);
-			const int width = ClampRenderDimension(pageW * scale);
-			const int height = ClampRenderDimension(pageH * scale);
-			CRect pageRect(offsetX, offsetY, offsetX + width, offsetY + height);
-			overPage = pageRect.PtInRect(point) != FALSE;
-			if (overPage && !m_isSelecting)
+			overPage = true;
+			if (!m_isSelecting)
 			{
 				PdfLinkHit linkHit;
 				overLink = HitTestLink(point, linkHit);
+				if (!overLink && !IsInlineTextAnnotVisible())
+				{
+					int hitPage = -1;
+					PageAnnotHitInfo hitInfo;
+					if (HitTestAnnotationAtViewPoint(point, hitPage, hitInfo) &&
+						hitInfo.type == PDF_ANNOT_FREE_TEXT)
+					{
+						overFreeTextAnnot = true;
+					}
+				}
 			}
 		}
 	}
 
-	if (overLink)
+	if (overLink || overFreeTextAnnot)
 		::SetCursor(m_hHandCursor ? m_hHandCursor : ::LoadCursor(nullptr, IDC_HAND));
 	else if (overPage)
 		::SetCursor(::LoadCursor(nullptr, IDC_IBEAM));
@@ -6156,192 +7230,225 @@ void CXiaoGongPDFDlg::ResetPanOffset()
 // 连续滚动模式实现
 // ============================================================================
 
-// 计算所有页面的位置和高度（使用统一缩放比例确保宽度一致）
+// 计算所有页面的位置和高度（支持单页连续与双页并排两种排版模式）
 void CXiaoGongPDFDlg::CalculatePagePositions(bool recalcScale)
 {
 	if (!m_doc || m_totalPages <= 0)
 		return;
 
-	m_pageYPositions.clear();
-	m_pageHeights.clear();
-	m_pageYPositions.resize(m_totalPages);
-	m_pageHeights.resize(m_totalPages);
+	m_pageYPositions.assign(m_totalPages, 0);
+	m_pageHeights.assign(m_totalPages, 0);
+	m_pageRowTops.assign(m_totalPages, 0);
+	m_pageRowHeights.assign(m_totalPages, 0);
 
 	// 获取预览区域宽度
 	CRect viewRect;
 	m_pdfView.GetClientRect(&viewRect);
 	int viewWidth = max(1, viewRect.Width() - 40);  // 留出左右边距各20像素
 
-	// ★★★ P1优化：优先使用 CPDFDocument 中的页面尺寸缓存，避免每次全量 fz_load_page
-	// 若缓存失效（首次加载、旋转后），则重建缓存（仅需一次全量加载）
 	CPDFDocument* pDoc = GetActiveDocument();
 	if (pDoc && !pDoc->HasPageBoundsCache())
 	{
 		pDoc->CachePageseBounds();
 	}
 
-	// ★★★ 第一步：从缓存中获取最大页面宽度（O(1)，不再调用 MuPDF）
-	float maxPageWidth = 0.0f;
-	if (pDoc && pDoc->HasPageBoundsCache())
+	auto getEffectivePagePtSize = [&](int pageIdx, float& outWidth, float& outHeight) -> bool
 	{
-		// 直接使用缓存中已计算好的最大宽度
-		maxPageWidth = pDoc->GetMaxPageWidth();
-	}
-	else
-	{
-		// 回退：缓存不可用时仍遍历（兼容 m_doc 与 pDoc 不一致的极端情况）
-		for (int i = 0; i < m_totalPages; i++)
+		outWidth = 0.0f;
+		outHeight = 0.0f;
+		if (pDoc && pDoc->GetPageBounds(pageIdx, outWidth, outHeight) &&
+			outWidth > 0.0f && outHeight > 0.0f)
 		{
-			fz_page* page = nullptr;
-			fz_var(page);
-			fz_try(m_ctx)
+			return true;
+		}
+		fz_page* page = nullptr;
+		bool ok = false;
+		fz_var(page);
+		fz_var(ok);
+		fz_try(m_ctx)
+		{
+			page = fz_load_page(m_ctx, m_doc, pageIdx);
+			if (page)
 			{
-				page = fz_load_page(m_ctx, m_doc, i);
-				if (page)
-				{
-					fz_rect bounds = fz_bound_page(m_ctx, page);
-					float pageWidth = bounds.x1 - bounds.x0;
-					float pageHeight = bounds.y1 - bounds.y0;
-
-					int rotation = GetPageRotation(i);
-					if (rotation == 90 || rotation == 270)
-					{
-						float temp = pageWidth;
-						pageWidth = pageHeight;
-						pageHeight = temp;
-					}
-
-					if (pageWidth > maxPageWidth)
-						maxPageWidth = pageWidth;
-				}
+				fz_rect bounds = fz_bound_page(m_ctx, page);
+				float w = bounds.x1 - bounds.x0;
+				float h = bounds.y1 - bounds.y0;
+				const int rotation = GetPageRotation(pageIdx);
+				if (rotation == 90 || rotation == 270)
+					std::swap(w, h);
+				outWidth = w;
+				outHeight = h;
+				ok = (w > 0.0f && h > 0.0f);
 			}
-			fz_always(m_ctx)
+		}
+		fz_always(m_ctx)
+		{
+			if (page)
+				fz_drop_page(m_ctx, page);
+		}
+		fz_catch(m_ctx)
+		{
+			ok = false;
+		}
+		return ok;
+	};
+
+	// 第一步：扫描所有排版行，获取最大行物理点宽度（双页模式下尾页单张亦预留双栏总宽）
+	float maxRowPtWidth = 0.0f;
+	const bool isTwoPageSpread = (m_layoutMode == LAYOUT_TWO_PAGE_SPREAD);
+	if (!isTwoPageSpread)
+	{
+		if (pDoc && pDoc->HasPageBoundsCache())
+		{
+			maxRowPtWidth = pDoc->GetMaxPageWidth();
+		}
+		else
+		{
+			for (int i = 0; i < m_totalPages; ++i)
 			{
-				if (page)
-				{
-					fz_drop_page(m_ctx, page);
-					page = nullptr;
-				}
-			}
-			fz_catch(m_ctx)
-			{
+				float w = 0.0f, h = 0.0f;
+				if (getEffectivePagePtSize(i, w, h) && w > maxRowPtWidth)
+					maxRowPtWidth = w;
 			}
 		}
 	}
+	else
+	{
+		int idx = 0;
+		while (idx < m_totalPages)
+		{
+			int leftP = idx;
+			int rightP = -1;
+			GetLayoutRowPages(idx, leftP, rightP);
+			float wL = 0.0f, hL = 0.0f;
+			getEffectivePagePtSize(leftP, wL, hL);
+			float rowW = wL;
+			if (rightP >= 0)
+			{
+				float wR = 0.0f, hR = 0.0f;
+				getEffectivePagePtSize(rightP, wR, hR);
+				rowW += wR;
+			}
+			else
+			{
+				rowW += wL;
+			}
+			if (rowW > maxRowPtWidth)
+				maxRowPtWidth = rowW;
+			idx = (rightP >= 0) ? (rightP + 1) : (leftP + 1);
+		}
+	}
 
-	// ★★★ 仅在需要时重新计算缩放比例（用户主动缩放或首次加载时）
-	// 窗口大小改变时传 recalcScale=false，保持用户设定的缩放不变
+	// 仅在需要时重新计算统一缩放比例
 	if (recalcScale)
 	{
-		float baseScale = (maxPageWidth > 0) ? ((float)viewWidth / maxPageWidth * 0.95f) : 1.0f;
+		const int rowGapPx = isTwoPageSpread ? SPREAD_GAP : 0;
+		const int availViewWidth = max(1, viewWidth - rowGapPx);
+		float baseScale = (maxRowPtWidth > 0.0f) ? ((float)availViewWidth / maxRowPtWidth * 0.95f) : 1.0f;
 		m_uniformScale = baseScale * m_customZoom;
 		if (m_zoomMode == ZOOM_FIT_WIDTH)
-			m_uniformScale = FitWidthScale(viewRect.Width(), maxPageWidth);
-		if (m_zoomMode == ZOOM_FIT_PAGE && pDoc && pDoc->HasPageBoundsCache())
+		{
+			m_uniformScale = FitWidthScale(max(1, viewRect.Width() - rowGapPx), maxRowPtWidth);
+		}
+		if (m_zoomMode == ZOOM_FIT_PAGE)
 		{
 			const int viewHeight = max(1, viewRect.Height() - 40);
 			float fitScale = 0.0f;
-			for (int i = 0; i < m_totalPages; ++i)
+			int idx = 0;
+			while (idx < m_totalPages)
 			{
-				float pageWidth = 0.0f;
-				float pageHeight = 0.0f;
-				if (!pDoc->GetPageBounds(i, pageWidth, pageHeight) ||
-					pageWidth <= 0.0f || pageHeight <= 0.0f)
-					continue;
-				const float pageScale = min((float)viewWidth / pageWidth,
-					(float)viewHeight / pageHeight);
-				if (fitScale == 0.0f || pageScale < fitScale)
-					fitScale = pageScale;
+				int leftP = idx;
+				int rightP = -1;
+				GetLayoutRowPages(idx, leftP, rightP);
+				float wL = 0.0f, hL = 0.0f;
+				const bool okL = getEffectivePagePtSize(leftP, wL, hL);
+				float rowPtW = wL;
+				float rowPtH = hL;
+				if (rightP >= 0)
+				{
+					float wR = 0.0f, hR = 0.0f;
+					if (getEffectivePagePtSize(rightP, wR, hR))
+					{
+						rowPtW += wR;
+						rowPtH = max(rowPtH, hR);
+					}
+				}
+				else if (isTwoPageSpread)
+				{
+					rowPtW += wL;
+				}
+				if (okL && rowPtW > 0.0f && rowPtH > 0.0f)
+				{
+					const int rowAvailW = max(1, viewWidth - (isTwoPageSpread ? SPREAD_GAP : 0));
+					const float rowScale = min((float)rowAvailW / rowPtW, (float)viewHeight / rowPtH);
+					if (fitScale == 0.0f || rowScale < fitScale)
+						fitScale = rowScale;
+				}
+				idx = (rightP >= 0) ? (rightP + 1) : (leftP + 1);
 			}
 			if (fitScale > 0.0f)
 				m_uniformScale = fitScale * 0.95f;
 		}
-#ifdef _DEBUG
-		TRACE(_T("连续滚动模式: 最大页面宽度=%.2f, 基准缩放=%.4f, customZoom=%.2f, 统一缩放比例=%.4f\n"),
-			maxPageWidth, baseScale, m_customZoom, m_uniformScale);
-#endif
 	}
-#ifdef _DEBUG
-	else
-	{
-		TRACE(_T("连续滚动模式(保持缩放): 最大页面宽度=%.2f, customZoom=%.2f, 统一缩放比例=%.4f\n"),
-			maxPageWidth, m_customZoom, m_uniformScale);
-	}
-#endif
 
-	// ★★★ 第二步：使用统一的缩放比例计算所有页面的高度
-	// 优先从缓存读取，无需再次调用 fz_load_page
-	// ★★★ 修复：第一页从 PAGE_SPACING 开始，确保顶部有灰色间隔
+	// 第二步：按排版行计算每页与每行的纵坐标及高度，不同高度对页在行内垂直居中
 	int currentY = PAGE_SPACING;
-	for (int i = 0; i < m_totalPages; i++)
+	int maxRowWidthPx = 0;
+	int idx = 0;
+	while (idx < m_totalPages)
 	{
-		m_pageYPositions[i] = currentY;
+		int leftP = idx;
+		int rightP = -1;
+		GetLayoutRowPages(idx, leftP, rightP);
 
-		float pageHeight = 0.0f;
-		float pageWidth  = 0.0f;
-		bool gotBounds   = false;
+		float wL = 0.0f, hL = 0.0f;
+		getEffectivePagePtSize(leftP, wL, hL);
+		const int wLeftPx = ClampRenderDimension(wL * m_uniformScale);
+		const int hLeftPx = max(0, static_cast<int>(hL * m_uniformScale));
 
-		// 尝试从缓存获取
-		if (pDoc)
-			gotBounds = pDoc->GetPageBounds(i, pageWidth, pageHeight);
-
-		if (gotBounds)
+		if (rightP >= 0)
 		{
-			// ★★★ 缓存命中：直接计算，零 MuPDF 调用
-			int scaledHeight = (int)(pageHeight * m_uniformScale);
-			m_pageHeights[i] = scaledHeight;
-			currentY += scaledHeight + PAGE_SPACING;
+			float wR = 0.0f, hR = 0.0f;
+			getEffectivePagePtSize(rightP, wR, hR);
+			const int wRightPx = ClampRenderDimension(wR * m_uniformScale);
+			const int hRightPx = max(0, static_cast<int>(hR * m_uniformScale));
+			const int rowHeight = max(hLeftPx, hRightPx);
+			const int rowWidthPx = wLeftPx + SPREAD_GAP + wRightPx;
+
+			m_pageRowTops[leftP] = currentY;
+			m_pageRowTops[rightP] = currentY;
+			m_pageRowHeights[leftP] = rowHeight;
+			m_pageRowHeights[rightP] = rowHeight;
+			m_pageHeights[leftP] = hLeftPx;
+			m_pageHeights[rightP] = hRightPx;
+			m_pageYPositions[leftP] = currentY + (rowHeight - hLeftPx) / 2;
+			m_pageYPositions[rightP] = currentY + (rowHeight - hRightPx) / 2;
+
+			maxRowWidthPx = max(maxRowWidthPx, rowWidthPx);
+			currentY += rowHeight + PAGE_SPACING;
+			idx = rightP + 1;
 		}
 		else
 		{
-			// 回退：缓存未命中时走原有 fz_load_page 路径
-			fz_page* page = nullptr;
-			fz_var(page);
-			fz_try(m_ctx)
-			{
-				page = fz_load_page(m_ctx, m_doc, i);
-				if (page)
-				{
-					fz_rect bounds = fz_bound_page(m_ctx, page);
-					float w = bounds.x1 - bounds.x0;
-					float h = bounds.y1 - bounds.y0;
+			m_pageRowTops[leftP] = currentY;
+			m_pageRowHeights[leftP] = hLeftPx;
+			m_pageHeights[leftP] = hLeftPx;
+			m_pageYPositions[leftP] = currentY;
 
-					int rotation = GetPageRotation(i);
-					if (rotation == 90 || rotation == 270)
-					{
-						float temp = w;
-						w = h;
-						h = temp;
-					}
-
-					int scaledHeight = (int)(h * m_uniformScale);
-					m_pageHeights[i] = scaledHeight;
-					currentY += scaledHeight + PAGE_SPACING;
-				}
-			}
-			fz_always(m_ctx)
-			{
-				if (page)
-				{
-					fz_drop_page(m_ctx, page);
-					page = nullptr;
-				}
-			}
-			fz_catch(m_ctx)
-			{
-				m_pageHeights[i] = 0;
-			}
+			const int soloRowWidthPx = isTwoPageSpread ?
+				(wLeftPx + SPREAD_GAP + wLeftPx) : wLeftPx;
+			maxRowWidthPx = max(maxRowWidthPx, soloRowWidthPx);
+			currentY += hLeftPx + PAGE_SPACING;
+			idx = leftP + 1;
 		}
 	}
 
-	// ★★★ 修复：保留最后一页的底部间距，确保底部有灰色间隔
 	m_totalScrollHeight = currentY;
-
-	// ★★★ 设置横向滚动宽度（使用最大页面宽度 × 统一缩放比例）
-	m_totalScrollWidth = (int)(maxPageWidth * m_uniformScale);
+	m_totalScrollWidth = maxRowWidthPx;
 
 #ifdef _DEBUG
-	TRACE(_T("连续滚动: 总高度=%d, 总宽度=%d\n"), m_totalScrollHeight, m_totalScrollWidth);
+	TRACE(_T("页面排版完成(layout=%d): 总高度=%d, 总宽度=%d\n"),
+		static_cast<int>(m_layoutMode), m_totalScrollHeight, m_totalScrollWidth);
 #endif
 }
 
@@ -6547,7 +7654,9 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 		return;
 
 	// 确保vector大小与总页数匹配，避免切换文档时的时序问题导致越界
-	if ((int)m_pageYPositions.size() < m_totalPages || (int)m_pageHeights.size() < m_totalPages)
+	if ((int)m_pageYPositions.size() < m_totalPages ||
+		(int)m_pageHeights.size() < m_totalPages ||
+		(int)m_pageRowTops.size() < m_totalPages)
 	{
 #ifdef _DEBUG
 		TRACE(_T("RenderVisiblePages: vector大小不匹配，跳过渲染。m_totalPages=%d, m_pageYPositions.size()=%d, m_pageHeights.size()=%d\n"),
@@ -6595,17 +7704,26 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 	// 填充背景色
 	memDC.FillSolidRect(0, 0, viewWidth, viewHeight, ViewBgColor());
 
-	auto firstVisibleIt = std::lower_bound(m_pageYPositions.begin(), m_pageYPositions.end(), visibleTop);
-	int firstVisibleIndex = (int)(firstVisibleIt - m_pageYPositions.begin());
+	auto firstVisibleIt = std::lower_bound(m_pageRowTops.begin(),
+		m_pageRowTops.begin() + m_totalPages, visibleTop);
+	int firstVisibleIndex = (int)(firstVisibleIt - m_pageRowTops.begin());
+	if (firstVisibleIndex >= m_totalPages)
+		firstVisibleIndex = m_totalPages - 1;
 	if (firstVisibleIndex > 0)
+		--firstVisibleIndex;
+	while (firstVisibleIndex > 0 &&
+		m_pageRowTops[firstVisibleIndex - 1] == m_pageRowTops[firstVisibleIndex])
 	{
 		--firstVisibleIndex;
 	}
 
-	auto lastVisibleIt = std::lower_bound(m_pageYPositions.begin(), m_pageYPositions.end(),
-		visibleBottom + PAGE_SPACING);
-	int lastVisibleIndex = (int)(lastVisibleIt - m_pageYPositions.begin());
+	auto lastVisibleIt = std::upper_bound(m_pageRowTops.begin(),
+		m_pageRowTops.begin() + m_totalPages, visibleBottom + PAGE_SPACING);
+	int lastVisibleIndex = (int)(lastVisibleIt - m_pageRowTops.begin());
 	if (lastVisibleIndex < m_totalPages - 1)
+		++lastVisibleIndex;
+	while (lastVisibleIndex + 1 < m_totalPages &&
+		m_pageRowTops[lastVisibleIndex + 1] == m_pageRowTops[lastVisibleIndex])
 	{
 		++lastVisibleIndex;
 	}
@@ -6642,9 +7760,14 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 		pageDC.CreateCompatibleDC(&memDC);
 		HBITMAP oldPageBmp = (HBITMAP)pageDC.SelectObject(hBitmap);
 
-		int destY = pageY - visibleTop + m_panOffset.y;
-		int destX = (width < viewWidth ? (viewWidth - width) / 2 :
-			-min(m_scrollPositionH, width - viewWidth)) + m_panOffset.x;
+		int destX = 0;
+		int destY = 0;
+		if (!GetPageViewPlacement(i, viewWidth, destX, destY))
+		{
+			destY = pageY - visibleTop + m_panOffset.y;
+			destX = (width < viewWidth ? (viewWidth - width) / 2 :
+				-min(m_scrollPositionH, width - viewWidth)) + m_panOffset.x;
+		}
 
 #ifdef _DEBUG
 		TRACE(_T("  Page %d: pageY=%d, size=(%d,%d), dest=(%d,%d)\n"),
@@ -6756,9 +7879,10 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 	KillTimer(TIMER_ID_PAGE_PREFETCH);
 	SetTimer(TIMER_ID_PAGE_PREFETCH, 180, nullptr);
 
-	// 更新当前页（根据滚动位置）
+	// 更新当前页（双页并排同行内若用户主动跳到右侧页则保留其页码，跨行滚动时自动更新）
 	int newCurrentPage = GetPageAtPosition(m_scrollPosition + viewHeight / 2);
-	if (newCurrentPage != m_currentPage && newCurrentPage >= 0 && newCurrentPage < m_totalPages)
+	if (newCurrentPage != m_currentPage && newCurrentPage >= 0 && newCurrentPage < m_totalPages &&
+		!IsSameLayoutRow(m_currentPage, newCurrentPage))
 	{
 		m_currentPage = newCurrentPage;
 		UpdatePageControls();
@@ -6965,35 +8089,59 @@ void CXiaoGongPDFDlg::UpdateScrollBar()
 		max(0, m_totalScrollHeight - viewRect.Height())));
 	int horizontalContentWidth = m_totalScrollWidth;
 	if (m_doc &&
-		m_pageYPositions.size() == static_cast<size_t>(m_totalPages) &&
-		m_pageHeights.size() == static_cast<size_t>(m_totalPages))
+		m_pageRowTops.size() == static_cast<size_t>(m_totalPages) &&
+		m_pageRowHeights.size() == static_cast<size_t>(m_totalPages))
 	{
 		CPDFDocument* pDoc = GetActiveDocument();
 		if (pDoc)
 		{
 			const int visibleTop = m_scrollPosition;
 			const int visibleBottom = visibleTop + viewRect.Height();
-			auto first = std::lower_bound(m_pageYPositions.begin(),
-				m_pageYPositions.end(), visibleTop);
-			int firstIndex = static_cast<int>(first - m_pageYPositions.begin());
+			auto first = std::lower_bound(m_pageRowTops.begin(),
+				m_pageRowTops.end(), visibleTop);
+			int firstIndex = static_cast<int>(first - m_pageRowTops.begin());
+			if (firstIndex >= m_totalPages)
+				firstIndex = m_totalPages - 1;
 			if (firstIndex > 0)
 				--firstIndex;
+			while (firstIndex > 0 && m_pageRowTops[firstIndex - 1] == m_pageRowTops[firstIndex])
+				--firstIndex;
+
 			int visibleWidth = 0;
 			bool boundsMissing = false;
-			for (int i = firstIndex; i < m_totalPages &&
-				m_pageYPositions[i] <= visibleBottom; ++i)
+			int idx = max(0, firstIndex);
+			while (idx < m_totalPages && m_pageRowTops[idx] <= visibleBottom)
 			{
-				if (m_pageYPositions[i] + m_pageHeights[i] < visibleTop)
-					continue;
-				float pageWidth = 0.0f;
-				float pageHeight = 0.0f;
-				if (!pDoc->GetPageBounds(i, pageWidth, pageHeight))
+				int leftP = idx;
+				int rightP = -1;
+				GetLayoutRowPages(idx, leftP, rightP);
+				if (m_pageRowTops[leftP] + m_pageRowHeights[leftP] >= visibleTop)
 				{
-					boundsMissing = true;
-					break;
+					float wL = 0.0f, hL = 0.0f;
+					if (!pDoc->GetPageBounds(leftP, wL, hL))
+					{
+						boundsMissing = true;
+						break;
+					}
+					const int leftWidthPx = ClampRenderDimension(wL * m_uniformScale);
+					int rowW = leftWidthPx;
+					if (rightP >= 0)
+					{
+						float wR = 0.0f, hR = 0.0f;
+						if (!pDoc->GetPageBounds(rightP, wR, hR))
+						{
+							boundsMissing = true;
+							break;
+						}
+						rowW += SPREAD_GAP + ClampRenderDimension(wR * m_uniformScale);
+					}
+					else if (m_layoutMode == LAYOUT_TWO_PAGE_SPREAD)
+					{
+						rowW += SPREAD_GAP + leftWidthPx;
+					}
+					visibleWidth = max(visibleWidth, rowW);
 				}
-				visibleWidth = max(visibleWidth,
-					ClampRenderDimension(pageWidth * m_uniformScale));
+				idx = (rightP >= 0) ? (rightP + 1) : (leftP + 1);
 			}
 			if (!boundsMissing)
 				horizontalContentWidth = visibleWidth;
@@ -7039,23 +8187,246 @@ void CXiaoGongPDFDlg::UpdateScrollBar()
 		m_pdfScrollCorner.ShowWindow(showHorizontalBar ? SW_SHOW : SW_HIDE);
 }
 
-// 获取指定位置的页面索引（二分查找，页缝归属上一页，末页下方归属末页）
+// 获取指定纵向文档位置的排版行主页面索引（二分查找单调 m_pageRowTops）
 int CXiaoGongPDFDlg::GetPageAtPosition(int yPos)
 {
-	// 添加边界检查，防止vector越界
 	if (m_totalPages <= 0 ||
-		(int)m_pageYPositions.size() < m_totalPages ||
+		(int)m_pageRowTops.size() < m_totalPages ||
 		(int)m_pageHeights.size() < m_totalPages)
+	{
 		return 0;
+	}
 
-	auto it = std::upper_bound(m_pageYPositions.begin(),
-		m_pageYPositions.begin() + m_totalPages, yPos);
-	int idx = static_cast<int>(it - m_pageYPositions.begin()) - 1;
+	auto it = std::upper_bound(m_pageRowTops.begin(),
+		m_pageRowTops.begin() + m_totalPages, yPos);
+	int idx = static_cast<int>(it - m_pageRowTops.begin()) - 1;
 	if (idx < 0)
 		idx = 0;
 	if (idx >= m_totalPages)
 		idx = m_totalPages - 1;
-	return idx;
+
+	int leftPage = idx;
+	int rightPage = -1;
+	GetLayoutRowPages(idx, leftPage, rightPage);
+	return leftPage;
+}
+
+void CXiaoGongPDFDlg::GetLayoutRowPages(int pageNumber, int& outLeftPage, int& outRightPage) const
+{
+	outLeftPage = max(0, min(pageNumber, max(0, m_totalPages - 1)));
+	outRightPage = -1;
+	if (m_totalPages <= 0 || m_layoutMode == LAYOUT_SINGLE_CONTINUOUS)
+		return;
+
+	if (m_layoutMode == LAYOUT_TWO_PAGE_SPREAD)
+	{
+		outLeftPage = (outLeftPage / 2) * 2;
+		outRightPage = (outLeftPage + 1 < m_totalPages) ? (outLeftPage + 1) : -1;
+	}
+}
+
+bool CXiaoGongPDFDlg::IsSameLayoutRow(int pageA, int pageB) const
+{
+	if (pageA < 0 || pageB < 0 || pageA >= m_totalPages || pageB >= m_totalPages)
+		return false;
+	if (pageA == pageB)
+		return true;
+	int leftP = -1;
+	int rightP = -1;
+	GetLayoutRowPages(pageA, leftP, rightP);
+	return (pageB == leftP || pageB == rightP);
+}
+
+int CXiaoGongPDFDlg::GetPrevSpreadPage(int pageNumber) const
+{
+	if (m_totalPages <= 0)
+		return 0;
+	if (m_layoutMode == LAYOUT_SINGLE_CONTINUOUS || m_totalPages <= 1)
+		return max(0, pageNumber - 1);
+
+	int leftP = 0;
+	int rightP = -1;
+	GetLayoutRowPages(pageNumber, leftP, rightP);
+	if (leftP <= 0)
+		return 0;
+
+	int prevLeft = 0;
+	int prevRight = -1;
+	GetLayoutRowPages(leftP - 1, prevLeft, prevRight);
+	return prevLeft;
+}
+
+int CXiaoGongPDFDlg::GetNextSpreadPage(int pageNumber) const
+{
+	if (m_totalPages <= 0)
+		return 0;
+	if (m_layoutMode == LAYOUT_SINGLE_CONTINUOUS || m_totalPages <= 1)
+		return min(m_totalPages - 1, pageNumber + 1);
+
+	int leftP = 0;
+	int rightP = -1;
+	GetLayoutRowPages(pageNumber, leftP, rightP);
+	const int nextCandidate = (rightP >= 0) ? (rightP + 1) : (leftP + 1);
+	return (nextCandidate < m_totalPages) ? nextCandidate : pageNumber;
+}
+
+bool CXiaoGongPDFDlg::GetPageViewPlacement(int pageNumber, int viewWidth,
+	int& outOffsetX, int& outOffsetY, int* pOutWidth, int* pOutHeight)
+{
+	if (!m_doc || pageNumber < 0 || pageNumber >= m_totalPages ||
+		pageNumber >= static_cast<int>(m_pageYPositions.size()) || m_uniformScale <= 0.0f)
+	{
+		return false;
+	}
+
+	CPDFDocument* pDoc = GetActiveDocument();
+	auto getPixelSize = [&](int pIdx, int& outW, int& outH) -> bool
+	{
+		float wPt = 0.0f;
+		float hPt = 0.0f;
+		if (!pDoc || !pDoc->GetPageBounds(pIdx, wPt, hPt))
+		{
+			fz_rect base = {};
+			if (!TryGetPageBaseBounds(pIdx, base))
+				return false;
+			wPt = base.x1 - base.x0;
+			hPt = base.y1 - base.y0;
+			const int rot = GetPageRotation(pIdx);
+			if (rot == 90 || rot == 270)
+				std::swap(wPt, hPt);
+		}
+		outW = ClampRenderDimension(wPt * m_uniformScale);
+		outH = ClampRenderDimension(hPt * m_uniformScale);
+		return true;
+	};
+
+	int pageW = 0;
+	int pageH = 0;
+	if (!getPixelSize(pageNumber, pageW, pageH))
+		return false;
+
+	int leftP = pageNumber;
+	int rightP = -1;
+	GetLayoutRowPages(pageNumber, leftP, rightP);
+
+	int rowWidth = pageW;
+	int offsetInRow = 0;
+	if (rightP >= 0)
+	{
+		int wLeft = pageW;
+		int hLeft = pageH;
+		int wRight = pageW;
+		int hRight = pageH;
+		if (pageNumber == leftP)
+		{
+			if (!getPixelSize(rightP, wRight, hRight))
+				wRight = pageW;
+		}
+		else
+		{
+			if (!getPixelSize(leftP, wLeft, hLeft))
+				wLeft = pageW;
+		}
+		rowWidth = wLeft + SPREAD_GAP + wRight;
+		offsetInRow = (pageNumber == rightP) ? (wLeft + SPREAD_GAP) : 0;
+	}
+	else if (m_layoutMode == LAYOUT_TWO_PAGE_SPREAD)
+	{
+		// 双页并排下若末尾只剩单张页面，为其保留右侧空白槽位宽度，使该页始终排在左侧栏而非居中
+		rowWidth = pageW + SPREAD_GAP + pageW;
+		offsetInRow = 0;
+	}
+
+	const int rowStartX = (rowWidth < viewWidth ? (viewWidth - rowWidth) / 2 :
+		-min(m_scrollPositionH, rowWidth - viewWidth)) + m_panOffset.x;
+	outOffsetX = rowStartX + offsetInRow;
+	outOffsetY = m_pageYPositions[pageNumber] - m_scrollPosition + m_panOffset.y;
+	if (pOutWidth)
+		*pOutWidth = pageW;
+	if (pOutHeight)
+		*pOutHeight = pageH;
+	return true;
+}
+
+int CXiaoGongPDFDlg::GetPageAtViewPoint(CPoint viewPt, bool allowNearestFallback)
+{
+	if (!m_doc || m_totalPages <= 0 || !m_pdfView.GetSafeHwnd() ||
+		static_cast<int>(m_pageRowTops.size()) < m_totalPages)
+	{
+		return -1;
+	}
+
+	CRect viewRect;
+	m_pdfView.GetClientRect(&viewRect);
+	const int viewWidth = viewRect.Width();
+
+	const int docY = viewPt.y + m_scrollPosition - m_panOffset.y;
+	const int basePage = GetPageAtPosition(docY);
+	int leftP = basePage;
+	int rightP = -1;
+	GetLayoutRowPages(basePage, leftP, rightP);
+
+	int lx = 0, ly = 0, lw = 0, lh = 0;
+	const bool okLeft = GetPageViewPlacement(leftP, viewWidth, lx, ly, &lw, &lh);
+	if (okLeft && CRect(lx, ly, lx + lw, ly + lh).PtInRect(viewPt))
+		return leftP;
+
+	int rx = 0, ry = 0, rw = 0, rh = 0;
+	const bool okRight = (rightP >= 0) && GetPageViewPlacement(rightP, viewWidth, rx, ry, &rw, &rh);
+	if (okRight && CRect(rx, ry, rx + rw, ry + rh).PtInRect(viewPt))
+		return rightP;
+
+	if (!allowNearestFallback)
+		return -1;
+
+	if (okLeft && okRight)
+	{
+		const int midX = (lx + lw + rx) / 2;
+		return (viewPt.x >= midX) ? rightP : leftP;
+	}
+	return leftP;
+}
+
+void CXiaoGongPDFDlg::ApplyPageLayoutMode(PageLayoutMode mode)
+{
+	if (m_layoutMode == mode)
+		return;
+
+	ClearSelection();
+	ClearActiveCaptureRect();
+
+	const int anchorPage = max(0, min(m_currentPage, max(0, m_totalPages - 1)));
+	m_layoutMode = mode;
+	UpdatePageLayoutButton();
+
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (pDoc)
+		pDoc->SetLayoutMode(mode);
+
+	if (m_doc && m_totalPages > 0)
+	{
+		if (m_zoomMode == ZOOM_CUSTOM)
+			m_customZoom = 1.0f;
+		CalculatePagePositions(true);
+
+		CRect viewRect;
+		m_pdfView.GetClientRect(&viewRect);
+		const int maxScroll = max(0, m_totalScrollHeight - viewRect.Height());
+		if (anchorPage < static_cast<int>(m_pageRowTops.size()))
+			m_scrollPosition = max(0, min(m_pageRowTops[anchorPage], maxScroll));
+		m_scrollPositionH = 0;
+		m_currentPage = anchorPage;
+
+		UpdateScrollBar();
+		RenderVisiblePages();
+		UpdatePageControls();
+		if (pDoc)
+		{
+			SaveDialogStateToDocument(pDoc);
+			SaveReadingPosition(pDoc);
+		}
+		UpdateStatusBar();
+	}
 }
 
 // ============================================================================
@@ -7755,27 +9126,9 @@ bool CXiaoGongPDFDlg::HitTestLink(CPoint viewPt, PdfLinkHit& outHit)
 	if (!m_ctx || !m_doc || !m_pdfView.GetSafeHwnd() || m_totalPages <= 0)
 		return false;
 
-	const int sourcePage = GetPageAtPosition(viewPt.y + m_scrollPosition - m_panOffset.y);
+	const int sourcePage = GetPageAtViewPoint(viewPt, false);
 	if (sourcePage < 0 || sourcePage >= m_totalPages)
 		return false;
-
-	fz_rect bounds;
-	float scale = 0.0f;
-	int offsetX = 0;
-	int offsetY = 0;
-	if (!GetSelectionPageTransform(sourcePage, bounds, scale, offsetX, offsetY))
-		return false;
-
-	const int rotation = GetPageRotation(sourcePage);
-	const float width = (rotation == 90 || rotation == 270) ?
-		bounds.y1 - bounds.y0 : bounds.x1 - bounds.x0;
-	const float height = (rotation == 90 || rotation == 270) ?
-		bounds.x1 - bounds.x0 : bounds.y1 - bounds.y0;
-	if (viewPt.x < offsetX || viewPt.y < offsetY ||
-		viewPt.x >= offsetX + width * scale || viewPt.y >= offsetY + height * scale)
-	{
-		return false;
-	}
 
 	float pdfX = 0.0f;
 	float pdfY = 0.0f;
@@ -7797,32 +9150,65 @@ bool CXiaoGongPDFDlg::HitTestLink(CPoint viewPt, PdfLinkHit& outHit)
 
 void CXiaoGongPDFDlg::UpdateHoverLinkFeedback(CPoint viewPt)
 {
+	CString preview;
 	PdfLinkHit hit;
-	if (!HitTestLink(viewPt, hit))
+	if (HitTestLink(viewPt, hit))
+	{
+		if (hit.kind == PdfLinkKind::Internal && hit.targetPage >= 0)
+		{
+			preview.Format(_T("链接：跳转到第 %d 页"), hit.targetPage + 1);
+		}
+		else if (hit.kind == PdfLinkKind::External && !hit.externalUri.IsEmpty())
+		{
+			CString displayUri = hit.externalUri;
+			if (displayUri.GetLength() > 140)
+				displayUri = displayUri.Left(137) + _T("...");
+			CString lowerPrefix = hit.externalUri.Left(7);
+			lowerPrefix.MakeLower();
+			if (lowerPrefix == _T("mailto:"))
+				preview.Format(_T("邮件链接：%s"), displayUri.GetString());
+			else
+				preview.Format(_T("外部链接：%s"), displayUri.GetString());
+		}
+	}
+	else
+	{
+		int annotPage = -1;
+		PageAnnotHitInfo annotHit;
+		if (HitTestAnnotationAtViewPoint(viewPt, annotPage, annotHit))
+		{
+			if (!annotHit.contents.IsEmpty())
+			{
+				CString snippet = annotHit.contents;
+				snippet.Replace(_T("\r\n"), _T(" "));
+				snippet.Replace(_T("\n"), _T(" "));
+				if (snippet.GetLength() > 100)
+					snippet = snippet.Left(97) + _T("...");
+				if (annotHit.type == PDF_ANNOT_FREE_TEXT)
+				{
+					preview.Format(_T("%s：%s（左键点击可直接编辑/移动/调色/调字号与字距）"),
+						annotHit.typeLabel.GetString(), snippet.GetString());
+				}
+				else
+				{
+					preview.Format(_T("%s：%s（右键可编辑或删除）"),
+						annotHit.typeLabel.GetString(), snippet.GetString());
+				}
+			}
+			else
+			{
+				preview.Format(_T("%s（右键可删除）"), annotHit.typeLabel.GetString());
+			}
+		}
+	}
+
+	if (preview.IsEmpty())
 	{
 		ClearHoverLinkFeedback();
 		return;
 	}
 
-	CString preview;
-	if (hit.kind == PdfLinkKind::Internal && hit.targetPage >= 0)
-	{
-		preview.Format(_T("链接：跳转到第 %d 页"), hit.targetPage + 1);
-	}
-	else if (hit.kind == PdfLinkKind::External && !hit.externalUri.IsEmpty())
-	{
-		CString displayUri = hit.externalUri;
-		if (displayUri.GetLength() > 140)
-			displayUri = displayUri.Left(137) + _T("...");
-		CString lowerPrefix = hit.externalUri.Left(7);
-		lowerPrefix.MakeLower();
-		if (lowerPrefix == _T("mailto:"))
-			preview.Format(_T("邮件链接：%s"), displayUri.GetString());
-		else
-			preview.Format(_T("外部链接：%s"), displayUri.GetString());
-	}
-
-	if (!preview.IsEmpty() && (!m_hasHoverLinkStatus || m_lastHoverLinkPreview != preview))
+	if (!m_hasHoverLinkStatus || m_lastHoverLinkPreview != preview)
 	{
 		m_hasHoverLinkStatus = true;
 		m_lastHoverLinkPreview = preview;
@@ -7843,11 +9229,32 @@ void CXiaoGongPDFDlg::ClearHoverLinkFeedback()
 void CXiaoGongPDFDlg::OnPdfViewMouseLeave()
 {
 	ClearHoverLinkFeedback();
+	bool needRedraw = false;
 	if (m_hoverCaptureAction != CAPTURE_ACT_NONE)
 	{
 		m_hoverCaptureAction = CAPTURE_ACT_NONE;
-		InvalidateSelection();
+		needRedraw = true;
 	}
+	if (m_hoverSelectionAction != SEL_BAR_NONE)
+	{
+		m_hoverSelectionAction = SEL_BAR_NONE;
+		needRedraw = true;
+	}
+	if (m_inlineAnnot.hoverToolbarBtn != INLINE_ANNOT_BTN_NONE ||
+		m_inlineAnnot.hoverColorSwatch != -1 ||
+		m_inlineAnnot.hoverMoveHandle ||
+		m_inlineAnnot.hoverResizeHandle ||
+		m_inlineAnnot.hoverBorderMove)
+	{
+		m_inlineAnnot.hoverToolbarBtn = INLINE_ANNOT_BTN_NONE;
+		m_inlineAnnot.hoverColorSwatch = -1;
+		m_inlineAnnot.hoverMoveHandle = false;
+		m_inlineAnnot.hoverResizeHandle = false;
+		m_inlineAnnot.hoverBorderMove = false;
+		needRedraw = true;
+	}
+	if (needRedraw)
+		InvalidateSelection();
 }
 
 void CXiaoGongPDFDlg::OpenExternalLinkWithConfirm(const CString& externalUri)
@@ -7934,6 +9341,7 @@ void CXiaoGongPDFDlg::StartAreaCaptureMode()
 	if (!m_doc || m_totalPages <= 0)
 		return;
 
+	FinishInlineTextAnnot(false);
 	ClearSelection();
 	ClearHoverLinkFeedback();
 	m_isAreaCaptureMode = true;
@@ -8732,6 +10140,10 @@ void CXiaoGongPDFDlg::ClearSelection()
 	m_selPageNumber = -1;
 	m_selStartView = CPoint(0, 0);
 	m_selEndView = CPoint(0, 0);
+	m_hoverSelectionAction = SEL_BAR_NONE;
+	m_pressedSelectionAction = SEL_BAR_NONE;
+	for (auto& rc : m_selectionActionRects)
+		rc.SetRectEmpty();
 }
 
 // 重绘视图以更新选择高亮
@@ -8741,29 +10153,21 @@ void CXiaoGongPDFDlg::InvalidateSelection()
 		m_pdfView.Invalidate(FALSE);
 }
 
-// 计算页面在视图中的实际缩放与偏移
+// 计算页面在视图中的实际缩放与偏移（与 RenderVisiblePages 单页/双页/封面布局完全同源）
 bool CXiaoGongPDFDlg::GetSelectionPageTransform(int pageNumber, fz_rect& bounds,
 	float& scale, int& offsetX, int& offsetY)
 {
 	if (!TryGetPageBaseBounds(pageNumber, bounds))
 		return false;
-	if (pageNumber >= (int)m_pageYPositions.size())
+	if (pageNumber < 0 || pageNumber >= (int)m_pageYPositions.size())
 		return false;
 
-	const float pageWidth = bounds.x1 - bounds.x0;
-	const float pageHeight = bounds.y1 - bounds.y0;
-	const int rotation = GetPageRotation(pageNumber);
-	const float effectiveWidth = (rotation == 90 || rotation == 270) ? pageHeight : pageWidth;
 	CRect viewRect;
 	m_pdfView.GetClientRect(&viewRect);
-	const int viewWidth = viewRect.Width();
-
 	scale = m_uniformScale;
-	const int width = ClampRenderDimension(effectiveWidth * scale);
-	offsetX = (width < viewWidth ? (viewWidth - width) / 2 :
-		-min(m_scrollPositionH, width - viewWidth)) + m_panOffset.x;
-	offsetY = m_pageYPositions[pageNumber] - m_scrollPosition + m_panOffset.y;
-	return scale > 0;
+	if (!GetPageViewPlacement(pageNumber, viewRect.Width(), offsetX, offsetY))
+		return false;
+	return scale > 0.0f;
 }
 
 void CXiaoGongPDFDlg::UpdateSelectedText()
@@ -9258,6 +10662,7 @@ void CXiaoGongPDFDlg::ReloadDocument(CPDFDocument* pDoc)
 
 	if (isActive)
 	{
+		FinishInlineTextAnnot(true);
 		SaveDialogStateToDocument(pDoc);
 		ClearSelection();
 		CancelAreaCaptureMode(false);
@@ -9267,6 +10672,8 @@ void CXiaoGongPDFDlg::ReloadDocument(CPDFDocument* pDoc)
 		CleanupBitmap();
 		m_pageYPositions.clear();
 		m_pageHeights.clear();
+		m_pageRowTops.clear();
+		m_pageRowHeights.clear();
 		m_doc = nullptr;
 	}
 
@@ -9277,6 +10684,7 @@ void CXiaoGongPDFDlg::ReloadDocument(CPDFDocument* pDoc)
 	float savedUniformScale = pDoc->GetUniformScale();
 	int savedScroll = pDoc->GetScrollPosition();
 	CPoint savedPan = pDoc->GetPanOffset();
+	PageLayoutMode savedLayoutMode = pDoc->GetLayoutMode();
 	std::map<int, int> savedRotations = pDoc->GetPageRotations();
 
 	CString filePath = pDoc->GetFilePath();
@@ -9297,7 +10705,7 @@ void CXiaoGongPDFDlg::ReloadDocument(CPDFDocument* pDoc)
 #ifdef _DEBUG
 		TRACE(_T("ReloadDocument: 重新打开文档失败\n"));
 #endif
-		CloseDocument(docIndex);
+		CloseDocument(docIndex, false);
 		MessageBox(_T("重新加载PDF文件失败，文件可能已被占用、加密更改或损坏。"),
 			_T("重新加载失败"), MB_OK | MB_ICONERROR);
 		return;
@@ -9314,6 +10722,7 @@ void CXiaoGongPDFDlg::ReloadDocument(CPDFDocument* pDoc)
 	pDoc->RestoreReadingZoom(savedZoomMode, savedCustomZoom, savedUniformScale);
 	pDoc->SetScrollPosition(savedScroll);
 	pDoc->SetPanOffset(savedPan);
+	pDoc->SetLayoutMode(savedLayoutMode);
 	pDoc->SetSearchMatches(std::vector<SearchMatch>());
 	pDoc->SetCurrentMatchIndex(-1);
 
@@ -9326,6 +10735,7 @@ void CXiaoGongPDFDlg::ReloadDocument(CPDFDocument* pDoc)
 	if (isActive)
 	{
 		LoadDialogStateFromDocument(pDoc);
+		UpdateDocumentDirtyTitle();
 		ClearSearchResults();
 		if (m_uniformScale > 0.0f)
 			CalculatePagePositions(m_zoomMode == ZOOM_FIT_WIDTH || m_zoomMode == ZOOM_FIT_PAGE);
@@ -9342,4 +10752,1818 @@ void CXiaoGongPDFDlg::ReloadDocument(CPDFDocument* pDoc)
 		UpdateZoomStatus();
 		UpdateStatusBar();
 	}
+}
+
+// ============================================================================
+// 文档属性面板、单双页排版切换、轻量级 PDF 批注与原文件保存
+// ============================================================================
+
+void CXiaoGongPDFDlg::OnMenuDocProperties()
+{
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (!m_doc || !pDoc || m_totalPages <= 0)
+	{
+		MessageBox(_T("请先打开 PDF 文档"), _T("提示"), MB_OK | MB_ICONINFORMATION);
+		return;
+	}
+
+	SaveDialogStateToDocument(pDoc);
+	ScopedFileWatchSuspend suspendWatch(this);
+	CPDFPropertiesDialog dlg(pDoc, max(0, min(m_currentPage, m_totalPages - 1)), &m_renderLock, this);
+	dlg.DoModal();
+}
+
+void CXiaoGongPDFDlg::OnMenuPageLayout(UINT nID)
+{
+	if (nID < ID_MENU_LAYOUT_SINGLE || nID > ID_MENU_LAYOUT_TWO_PAGE)
+		return;
+	ApplyPageLayoutMode(static_cast<PageLayoutMode>(nID - ID_MENU_LAYOUT_SINGLE));
+}
+
+void CXiaoGongPDFDlg::OnBtnPageLayout()
+{
+	if (!m_doc || m_totalPages <= 0)
+		return;
+
+	const PageLayoutMode nextMode = (m_layoutMode == LAYOUT_TWO_PAGE_SPREAD) ?
+		LAYOUT_SINGLE_CONTINUOUS : LAYOUT_TWO_PAGE_SPREAD;
+	ApplyPageLayoutMode(nextMode);
+}
+
+void CXiaoGongPDFDlg::OnBtnAnnotate()
+{
+	CMenu menu;
+	if (!menu.CreatePopupMenu())
+		return;
+
+	const UINT docFlag = (m_doc && m_totalPages > 0) ? 0 : MF_GRAYED;
+	const UINT selFlag = (m_doc && m_hasSelection && !m_selectionQuads.empty()) ? 0 : MF_GRAYED;
+	menu.AppendMenu(MF_STRING | selFlag, ID_MENU_ANNOT_HIGHLIGHT, _T("高亮选中文本\tCtrl+H"));
+	menu.AppendMenu(MF_STRING | selFlag, ID_MENU_ANNOT_UNDERLINE, _T("下划线选中文本\tCtrl+U"));
+	menu.AppendMenu(MF_STRING | selFlag, ID_MENU_ANNOT_STRIKEOUT, _T("删除线选中文本"));
+	menu.AppendMenu(MF_SEPARATOR);
+	menu.AppendMenu(MF_STRING | docFlag, ID_MENU_ANNOT_TEXT_NOTE, _T("添加文字批注\tCtrl+T"));
+	menu.AppendMenu(MF_SEPARATOR);
+	menu.AppendMenu(MF_STRING | docFlag, ID_MENU_SAVE_PDF, _T("保存批注与旋转回原 PDF\tCtrl+S"));
+	menu.AppendMenu(MF_STRING | docFlag, ID_MENU_SAVE_PDF_AS, _T("另存为新 PDF..."));
+
+	CRect btnRect;
+	m_btnAnnotate.GetWindowRect(&btnRect);
+	const UINT cmd = static_cast<UINT>(menu.TrackPopupMenu(
+		TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
+		btnRect.left, btnRect.bottom, this));
+	if (cmd != 0)
+		PostMessage(WM_COMMAND, MAKEWPARAM(cmd, 0));
+}
+
+void CXiaoGongPDFDlg::ApplySelectionMarkupAnnotation(
+	enum pdf_annot_type annotType, COLORREF color, LPCTSTR actionName)
+{
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (!m_doc || !pDoc || m_totalPages <= 0)
+	{
+		SetStatusBarMessage(_T("请先打开 PDF 文档"));
+		return;
+	}
+	if (!m_hasSelection || m_selectionQuads.empty() ||
+		m_selPageNumber < 0 || m_selPageNumber >= m_totalPages)
+	{
+		CString msg;
+		msg.Format(_T("请先在页面上用鼠标拖动选中文本，再执行“%s”"), actionName);
+		SetStatusBarMessage(msg);
+		return;
+	}
+
+	const int pageNumber = m_selPageNumber;
+	const std::vector<fz_quad> quads = m_selectionQuads;
+	bool ok = false;
+	{
+		CSingleLock lock(&m_renderLock, TRUE);
+		ok = AddQuadMarkupAnnotation(pDoc, pageNumber, annotType, quads, color);
+	}
+	if (!ok)
+	{
+		MessageBox(_T("无法在当前文档中写入批注，请确认该文件为可编辑的 PDF 格式。"),
+			_T("批注失败"), MB_OK | MB_ICONWARNING);
+		return;
+	}
+
+	ClearSelection();
+	UpdateDocumentDirtyTitle();
+	RenderVisiblePages();
+
+	CString tip;
+	tip.Format(_T("已添加%s批注（按 Ctrl+S 保存写回原 PDF，右键点击批注可删除）"), actionName);
+	SetStatusBarMessage(tip);
+}
+
+void CXiaoGongPDFDlg::OnMenuAnnotHighlight()
+{
+	ApplySelectionMarkupAnnotation(PDF_ANNOT_HIGHLIGHT, RGB(255, 226, 64), _T("高亮"));
+}
+
+void CXiaoGongPDFDlg::OnMenuAnnotUnderline()
+{
+	ApplySelectionMarkupAnnotation(PDF_ANNOT_UNDERLINE, RGB(26, 115, 232), _T("下划线"));
+}
+
+void CXiaoGongPDFDlg::OnMenuAnnotStrikeout()
+{
+	ApplySelectionMarkupAnnotation(PDF_ANNOT_STRIKE_OUT, RGB(220, 45, 45), _T("删除线"));
+}
+
+void CXiaoGongPDFDlg::PromptAddTextNoteAt(int pageNumber, float fitzX, float fitzY,
+	const CString& defaultText, bool fromToolbarMenu)
+{
+	StartInlineTextAnnotAt(pageNumber, fitzX, fitzY, defaultText, fromToolbarMenu);
+}
+
+void CXiaoGongPDFDlg::OnMenuAnnotTextNote()
+{
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (!m_doc || !pDoc || m_totalPages <= 0)
+	{
+		MessageBox(_T("请先打开 PDF 文档"), _T("提示"), MB_OK | MB_ICONINFORMATION);
+		return;
+	}
+
+	// 若当前选中了文本，默认锚定在选区首行左上方；否则默认放置在当前页可视区域居中偏上位置
+	if (m_hasSelection && !m_selectionQuads.empty() &&
+		m_selPageNumber >= 0 && m_selPageNumber < m_totalPages)
+	{
+		const fz_quad& q = m_selectionQuads.front();
+		const int selPage = m_selPageNumber;
+		ClearSelection();
+		PromptAddTextNoteAt(selPage, q.ul.x, max(4.0f, q.ul.y - 22.0f), CString(), false);
+		return;
+	}
+
+	int targetPage = max(0, min(m_currentPage, m_totalPages - 1));
+	CRect viewRect;
+	m_pdfView.GetClientRect(&viewRect);
+	CPoint defaultViewPt(max(80, viewRect.Width() * 2 / 5), max(80, viewRect.Height() / 3));
+	const int pageAtPt = GetPageAtViewPoint(defaultViewPt, true);
+	if (pageAtPt >= 0 && pageAtPt < m_totalPages)
+		targetPage = pageAtPt;
+
+	float fitzX = 72.0f;
+	float fitzY = 72.0f;
+	if (!ScreenPointToPdfCoords(defaultViewPt, targetPage, fitzX, fitzY))
+	{
+		fz_rect bounds = {};
+		if (TryGetPageBaseBounds(targetPage, bounds))
+		{
+			fitzX = bounds.x0 + (bounds.x1 - bounds.x0) * 0.25f;
+			fitzY = bounds.y0 + (bounds.y1 - bounds.y0) * 0.22f;
+		}
+	}
+	PromptAddTextNoteAt(targetPage, fitzX, fitzY, CString(), true);
+}
+
+void CXiaoGongPDFDlg::OnEnChangeInlineAnnotEdit()
+{
+	if (!m_inlineAnnot.active)
+		return;
+	m_inlineAnnot.justCreatedFromMenu = false;
+	m_inlineAnnot.caretVisible = true;
+	InvalidateSelection();
+}
+
+void CXiaoGongPDFDlg::StartInlineTextAnnotAt(int pageNumber, float fitzX, float fitzY,
+	const CString& initialText, bool fromToolbarMenu)
+{
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (!m_doc || !pDoc || pageNumber < 0 || pageNumber >= m_totalPages)
+		return;
+
+	if (m_inlineAnnot.active)
+		FinishInlineTextAnnot(false);
+
+	CancelAreaCaptureMode(false);
+	ClearSelection();
+
+	fz_rect bounds = {};
+	if (!TryGetPageBaseBounds(pageNumber, bounds))
+		return;
+
+	const int rot = GetPageRotation(pageNumber);
+	const float origW = bounds.x1 - bounds.x0;
+	const float origH = bounds.y1 - bounds.y0;
+	const float effW = max(60.0f, (rot == 90 || rot == 270) ? origH : origW);
+	const float effH = max(60.0f, (rot == 90 || rot == 270) ? origW : origH);
+
+	const QuadPointF rotPt = TransformPdfPointToBitmap(fitzX, fitzY, bounds, rot, 1.0f);
+
+	m_inlineAnnot = InlineTextAnnotState{};
+	m_inlineAnnot.active = true;
+	m_inlineAnnot.pageNumber = pageNumber;
+	m_inlineAnnot.existingAnnotIndex = -1;
+	m_inlineAnnot.color = m_defaultAnnotTextColor;
+	m_inlineAnnot.fontSizePt = m_defaultAnnotFontSizePt;
+	m_inlineAnnot.charSpacingPt = m_defaultAnnotCharSpacingPt;
+	m_inlineAnnot.widthPt = min(effW - 8.0f, max(125.0f, m_inlineAnnot.fontSizePt * 9.5f));
+	m_inlineAnnot.userResizedWidth = false;
+	m_inlineAnnot.localXPt = max(4.0f, min(rotPt.x, max(4.0f, effW - m_inlineAnnot.widthPt - 4.0f)));
+	m_inlineAnnot.localYPt = max(4.0f, min(rotPt.y, max(4.0f, effH - m_inlineAnnot.fontSizePt * 2.0f - 4.0f)));
+	m_inlineAnnot.justCreatedFromMenu = fromToolbarMenu;
+	m_inlineAnnot.caretVisible = true;
+
+	if (m_inlineAnnotEdit.GetSafeHwnd())
+	{
+		m_inlineAnnotEdit.SetWindowText(initialText);
+		m_inlineAnnotEdit.ShowWindow(SW_SHOWNOACTIVATE);
+		m_inlineAnnotEdit.SetFocus();
+		const int len = initialText.GetLength();
+		m_inlineAnnotEdit.SetSel(len, len);
+	}
+
+	SetTimer(TIMER_ID_ANNOT_CARET, 530, nullptr);
+	SetStatusBarMessage(_T("文字批注编辑中：直接输入文字，拖左侧蓝条移动，拖右侧圆点调宽，点 ✕ 或按 Esc 完成"));
+	InvalidateSelection();
+}
+
+void CXiaoGongPDFDlg::StartInlineTextAnnotFromExisting(int pageNumber, const PageAnnotHitInfo& hitInfo)
+{
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (!m_doc || !pDoc || pageNumber < 0 || pageNumber >= m_totalPages ||
+		hitInfo.annotIndex < 0 || hitInfo.type != PDF_ANNOT_FREE_TEXT)
+	{
+		return;
+	}
+
+	if (m_inlineAnnot.active)
+		FinishInlineTextAnnot(false);
+
+	CancelAreaCaptureMode(false);
+	ClearSelection();
+
+	fz_rect bounds = {};
+	if (!TryGetPageBaseBounds(pageNumber, bounds))
+		return;
+
+	const int rot = GetPageRotation(pageNumber);
+	const fz_quad annotQuad = fz_quad_from_rect(hitInfo.fitzBounds);
+	const QuadPointF pts[4] = {
+		TransformPdfPointToBitmap(annotQuad.ul.x, annotQuad.ul.y, bounds, rot, 1.0f),
+		TransformPdfPointToBitmap(annotQuad.ur.x, annotQuad.ur.y, bounds, rot, 1.0f),
+		TransformPdfPointToBitmap(annotQuad.ll.x, annotQuad.ll.y, bounds, rot, 1.0f),
+		TransformPdfPointToBitmap(annotQuad.lr.x, annotQuad.lr.y, bounds, rot, 1.0f)
+	};
+	float minX = pts[0].x, maxX = pts[0].x;
+	float minY = pts[0].y, maxY = pts[0].y;
+	for (int i = 1; i < 4; ++i)
+	{
+		minX = min(minX, pts[i].x);
+		maxX = max(maxX, pts[i].x);
+		minY = min(minY, pts[i].y);
+		maxY = max(maxY, pts[i].y);
+	}
+
+	{
+		CSingleLock lock(&m_renderLock, TRUE);
+		SetPageAnnotationEditingHidden(pDoc, pageNumber, hitInfo.annotIndex, true);
+	}
+	RenderVisiblePages();
+
+	m_inlineAnnot = InlineTextAnnotState{};
+	m_inlineAnnot.active = true;
+	m_inlineAnnot.pageNumber = pageNumber;
+	m_inlineAnnot.existingAnnotIndex = hitInfo.annotIndex;
+	m_inlineAnnot.color = hitInfo.textColor;
+	m_inlineAnnot.fontSizePt = hitInfo.fontSizePt;
+	m_inlineAnnot.charSpacingPt = hitInfo.charSpacingPt;
+	m_inlineAnnot.localXPt = max(1.0f, minX);
+	m_inlineAnnot.localYPt = max(1.0f, minY);
+	m_inlineAnnot.widthPt = max(56.0f, maxX - minX);
+	m_inlineAnnot.userResizedWidth = true;
+	m_inlineAnnot.caretVisible = true;
+
+	m_defaultAnnotTextColor = m_inlineAnnot.color;
+	m_defaultAnnotFontSizePt = m_inlineAnnot.fontSizePt;
+	m_defaultAnnotCharSpacingPt = m_inlineAnnot.charSpacingPt;
+
+	if (m_inlineAnnotEdit.GetSafeHwnd())
+	{
+		m_inlineAnnotEdit.SetWindowText(hitInfo.contents);
+		m_inlineAnnotEdit.ShowWindow(SW_SHOWNOACTIVATE);
+		m_inlineAnnotEdit.SetFocus();
+		const int len = hitInfo.contents.GetLength();
+		m_inlineAnnotEdit.SetSel(len, len);
+	}
+
+	SetTimer(TIMER_ID_ANNOT_CARET, 530, nullptr);
+	SetStatusBarMessage(_T("编辑文字批注：可移动位置、修改文字/颜色/字号/文字间距、删除或点 ✕ 完成退出"));
+	InvalidateSelection();
+}
+
+void CXiaoGongPDFDlg::FinishInlineTextAnnot(bool discard)
+{
+	if (!m_inlineAnnot.active)
+		return;
+
+	const InlineTextAnnotState st = m_inlineAnnot;
+	m_inlineAnnot = InlineTextAnnotState{};
+	KillTimer(TIMER_ID_ANNOT_CARET);
+
+	CString finalText;
+	if (m_inlineAnnotEdit.GetSafeHwnd())
+	{
+		m_inlineAnnotEdit.GetWindowText(finalText);
+		m_inlineAnnotEdit.SetWindowText(_T(""));
+		m_inlineAnnotEdit.ShowWindow(SW_HIDE);
+	}
+	if (GetSafeHwnd() && !IsEditControlFocused())
+		SetFocus();
+
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (!pDoc || !pDoc->IsOpen() || st.pageNumber < 0 || st.pageNumber >= pDoc->GetTotalPages())
+	{
+		InvalidateSelection();
+		return;
+	}
+
+	CString trimmed = finalText;
+	trimmed.Trim();
+
+	if (discard)
+	{
+		if (st.existingAnnotIndex >= 0)
+		{
+			CSingleLock lock(&m_renderLock, TRUE);
+			SetPageAnnotationEditingHidden(pDoc, st.pageNumber, st.existingAnnotIndex, false);
+		}
+		if (m_doc && m_pdfView.GetSafeHwnd())
+			RenderVisiblePages();
+		return;
+	}
+
+	if (trimmed.IsEmpty())
+	{
+		if (st.existingAnnotIndex >= 0)
+		{
+			CSingleLock lock(&m_renderLock, TRUE);
+			DeletePageAnnotationAt(pDoc, st.pageNumber, st.existingAnnotIndex);
+			lock.Unlock();
+			UpdateDocumentDirtyTitle();
+			RenderVisiblePages();
+			SetStatusBarMessage(_T("文字为空，已移除该文字批注（按 Ctrl+S 保存写回原 PDF）"));
+		}
+		else
+		{
+			UpdateStatusBar();
+			InvalidateSelection();
+		}
+		return;
+	}
+
+	fz_rect bounds = {};
+	if (!pDoc->GetPageBaseBounds(st.pageNumber, bounds) && !TryGetPageBaseBounds(st.pageNumber, bounds))
+	{
+		if (st.existingAnnotIndex >= 0)
+		{
+			CSingleLock lock(&m_renderLock, TRUE);
+			SetPageAnnotationEditingHidden(pDoc, st.pageNumber, st.existingAnnotIndex, false);
+		}
+		RenderVisiblePages();
+		return;
+	}
+
+	const int rot = GetPageRotation(st.pageNumber);
+	const float origW = bounds.x1 - bounds.x0;
+	const float origH = bounds.y1 - bounds.y0;
+	const float effW = max(20.0f, (rot == 90 || rot == 270) ? origH : origW);
+	const float effH = max(20.0f, (rot == 90 || rot == 270) ? origW : origH);
+
+	std::vector<FreeTextVisualLine> wrappedLines;
+	LayoutFreeTextVisualLines(nullptr, nullptr, 1.0f, finalText, st.fontSizePt, st.charSpacingPt,
+		max(24.0f, st.widthPt - 8.0f), wrappedLines);
+	const float boxW = max(32.0f, min(st.widthPt + 4.0f, effW - st.localXPt));
+	const float boxH = max(st.fontSizePt * 1.45f + 6.0f,
+		min(effH - st.localYPt,
+			static_cast<float>(wrappedLines.size()) * st.fontSizePt * 1.32f + 8.0f));
+
+	auto rotPtToFitz = [&](float rx, float ry, float& outFx, float& outFy)
+	{
+		switch ((rot % 360 + 360) % 360)
+		{
+		case 90:
+			outFx = bounds.x0 + ry;
+			outFy = bounds.y0 + origH - rx;
+			break;
+		case 180:
+			outFx = bounds.x0 + origW - rx;
+			outFy = bounds.y0 + origH - ry;
+			break;
+		case 270:
+			outFx = bounds.x0 + origW - ry;
+			outFy = bounds.y0 + rx;
+			break;
+		default:
+			outFx = bounds.x0 + rx;
+			outFy = bounds.y0 + ry;
+			break;
+		}
+	};
+
+	float fx[4] = {}, fy[4] = {};
+	rotPtToFitz(st.localXPt, st.localYPt, fx[0], fy[0]);
+	rotPtToFitz(st.localXPt + boxW, st.localYPt, fx[1], fy[1]);
+	rotPtToFitz(st.localXPt, st.localYPt + boxH, fx[2], fy[2]);
+	rotPtToFitz(st.localXPt + boxW, st.localYPt + boxH, fx[3], fy[3]);
+
+	float minFx = fx[0], maxFx = fx[0], minFy = fy[0], maxFy = fy[0];
+	for (int i = 1; i < 4; ++i)
+	{
+		minFx = min(minFx, fx[i]);
+		maxFx = max(maxFx, fx[i]);
+		minFy = min(minFy, fy[i]);
+		maxFy = max(maxFy, fy[i]);
+	}
+	const fz_rect fitzRect = fz_make_rect(
+		max(bounds.x0, minFx), max(bounds.y0, minFy),
+		min(bounds.x1, maxFx), min(bounds.y1, maxFy));
+
+	bool ok = false;
+	{
+		CSingleLock lock(&m_renderLock, TRUE);
+		ok = UpsertFreeTextAnnotation(pDoc, st.pageNumber, st.existingAnnotIndex, fitzRect,
+			finalText, st.color, st.fontSizePt, st.charSpacingPt);
+		if (!ok && st.existingAnnotIndex >= 0)
+			SetPageAnnotationEditingHidden(pDoc, st.pageNumber, st.existingAnnotIndex, false);
+	}
+
+	if (ok)
+	{
+		UpdateDocumentDirtyTitle();
+		RenderVisiblePages();
+		SetStatusBarMessage(_T("已保存文字批注到页面（点击文字可再次移动或修改，按 Ctrl+S 写回原 PDF）"));
+	}
+	else
+	{
+		RenderVisiblePages();
+		MessageBox(_T("无法在当前文档中写入文字批注，请确认该文件为可编辑的 PDF 格式。"),
+			_T("批注失败"), MB_OK | MB_ICONWARNING);
+	}
+}
+
+void CXiaoGongPDFDlg::DeleteActiveInlineTextAnnot()
+{
+	if (!m_inlineAnnot.active)
+		return;
+
+	const int pageNum = m_inlineAnnot.pageNumber;
+	const int existingIdx = m_inlineAnnot.existingAnnotIndex;
+	m_inlineAnnot = InlineTextAnnotState{};
+	KillTimer(TIMER_ID_ANNOT_CARET);
+
+	if (m_inlineAnnotEdit.GetSafeHwnd())
+	{
+		m_inlineAnnotEdit.SetWindowText(_T(""));
+		m_inlineAnnotEdit.ShowWindow(SW_HIDE);
+	}
+	if (GetSafeHwnd())
+		SetFocus();
+
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (pDoc && pDoc->IsOpen() && existingIdx >= 0 && pageNum >= 0 && pageNum < pDoc->GetTotalPages())
+	{
+		bool deleted = false;
+		{
+			CSingleLock lock(&m_renderLock, TRUE);
+			deleted = DeletePageAnnotationAt(pDoc, pageNum, existingIdx);
+		}
+		if (deleted)
+		{
+			UpdateDocumentDirtyTitle();
+			RenderVisiblePages();
+			SetStatusBarMessage(_T("已删除文字批注（按 Ctrl+S 保存写回原 PDF）"));
+			return;
+		}
+	}
+
+	UpdateStatusBar();
+	InvalidateSelection();
+}
+
+bool CXiaoGongPDFDlg::HitTestInlineAnnotMoveBorder(CPoint viewPt) const
+{
+	if (!IsInlineTextAnnotVisible() || m_inlineAnnot.boxViewRect.IsRectEmpty())
+		return false;
+
+	CRect outer = m_inlineAnnot.boxViewRect;
+	outer.InflateRect(3, 3);
+	if (!outer.PtInRect(viewPt))
+		return false;
+
+	CRect resizeHit = m_inlineAnnot.resizeHandleViewRect;
+	if (!resizeHit.IsRectEmpty())
+	{
+		resizeHit.InflateRect(5, 5);
+		if (resizeHit.PtInRect(viewPt))
+			return false;
+	}
+
+	CRect inner = m_inlineAnnot.boxViewRect;
+	inner.DeflateRect(4, 4);
+	return !inner.PtInRect(viewPt);
+}
+
+int CXiaoGongPDFDlg::HitTestInlineAnnotToolbar(CPoint viewPt) const
+{
+	if (!IsInlineTextAnnotVisible())
+		return INLINE_ANNOT_BTN_NONE;
+	for (int i = 0; i < INLINE_ANNOT_BTN_COUNT; ++i)
+	{
+		if (!m_inlineAnnot.toolbarBtnRects[i].IsRectEmpty() &&
+			m_inlineAnnot.toolbarBtnRects[i].PtInRect(viewPt))
+		{
+			return i;
+		}
+	}
+	return INLINE_ANNOT_BTN_NONE;
+}
+
+int CXiaoGongPDFDlg::HitTestInlineAnnotColorSwatch(CPoint viewPt) const
+{
+	if (!IsInlineTextAnnotVisible() || !m_inlineAnnot.colorPopupOpen)
+		return -1;
+	for (int i = 0; i < INLINE_ANNOT_SWATCH_COUNT; ++i)
+	{
+		if (!m_inlineAnnot.colorSwatchRects[i].IsRectEmpty() &&
+			m_inlineAnnot.colorSwatchRects[i].PtInRect(viewPt))
+		{
+			return i;
+		}
+	}
+	return -1;
+}
+
+int CXiaoGongPDFDlg::HitTestInlineAnnotCharIndex(CPoint viewPt)
+{
+	if (!IsInlineTextAnnotVisible() || !m_inlineAnnotEdit.GetSafeHwnd())
+		return 0;
+
+	CString fullText;
+	m_inlineAnnotEdit.GetWindowText(fullText);
+	if (fullText.IsEmpty())
+		return 0;
+
+	fz_rect bounds = {};
+	float scale = 0.0f;
+	int offsetX = 0, offsetY = 0;
+	if (!GetSelectionPageTransform(m_inlineAnnot.pageNumber, bounds, scale, offsetX, offsetY) ||
+		scale <= 0.01f)
+	{
+		return fullText.GetLength();
+	}
+
+	CClientDC dc(&m_pdfView);
+	const int fontPx = max(8, static_cast<int>(std::round(m_inlineAnnot.fontSizePt * scale)));
+	CFont font;
+	font.CreateFont(-fontPx, 0, 0, 0, FW_NORMAL, FALSE, FALSE, 0,
+		DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+		CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, _T("微软雅黑"));
+
+	std::vector<FreeTextVisualLine> lines;
+	LayoutFreeTextVisualLines(dc.GetSafeHdc(), static_cast<HFONT>(font.GetSafeHandle()), scale,
+		fullText, m_inlineAnnot.fontSizePt, m_inlineAnnot.charSpacingPt,
+		max(20.0f, m_inlineAnnot.widthPt - 8.0f), lines);
+	if (lines.empty())
+		return 0;
+
+	const float padXPt = 4.0f;
+	const float padYPt = 3.0f;
+	const float charSpacingPx = m_inlineAnnot.charSpacingPt * scale;
+	const float lineStepPx = max(10.0f, m_inlineAnnot.fontSizePt * 1.32f * scale);
+	const int textTopPx = offsetY + static_cast<int>(std::round((m_inlineAnnot.localYPt + padYPt) * scale));
+	const int textLeftPx = offsetX + static_cast<int>(std::round((m_inlineAnnot.localXPt + padXPt) * scale));
+
+	int lineIdx = static_cast<int>(std::floor((viewPt.y - textTopPx) / lineStepPx));
+	lineIdx = max(0, min(static_cast<int>(lines.size()) - 1, lineIdx));
+
+	const FreeTextVisualLine& ln = lines[lineIdx];
+	const int relX = viewPt.x - textLeftPx;
+	if (relX <= 0 || ln.text.IsEmpty())
+		return ln.startChar;
+
+	HFONT hFont = static_cast<HFONT>(font.GetSafeHandle());
+	int bestOffset = ln.text.GetLength();
+	int prevW = 0;
+	for (int i = 1; i <= ln.text.GetLength(); ++i)
+	{
+		if (i < ln.text.GetLength() && ln.text[i - 1] >= 0xD800 && ln.text[i - 1] <= 0xDBFF)
+			continue;
+		const int w = MeasureTextWithCharSpacingPx(dc.GetSafeHdc(), hFont, ln.text, i, charSpacingPx);
+		if (relX <= (prevW + w) / 2)
+		{
+			bestOffset = i - ((i >= 2 && ln.text[i - 2] >= 0xD800 && ln.text[i - 2] <= 0xDBFF) ? 2 : 1);
+			break;
+		}
+		prevW = w;
+	}
+	return ln.startChar + bestOffset;
+}
+
+bool CXiaoGongPDFDlg::HandleInlineAnnotKeyNav(UINT vk, bool shift)
+{
+	if (!IsInlineTextAnnotVisible() || !m_inlineAnnotEdit.GetSafeHwnd())
+		return false;
+
+	CString fullText;
+	m_inlineAnnotEdit.GetWindowText(fullText);
+	int selStart = 0, selEnd = 0;
+	m_inlineAnnotEdit.GetSel(selStart, selEnd);
+
+	fz_rect bounds = {};
+	float scale = 0.0f;
+	int offsetX = 0, offsetY = 0;
+	if (!GetSelectionPageTransform(m_inlineAnnot.pageNumber, bounds, scale, offsetX, offsetY) ||
+		scale <= 0.01f)
+	{
+		return false;
+	}
+
+	CClientDC dc(&m_pdfView);
+	const int fontPx = max(8, static_cast<int>(std::round(m_inlineAnnot.fontSizePt * scale)));
+	CFont font;
+	font.CreateFont(-fontPx, 0, 0, 0, FW_NORMAL, FALSE, FALSE, 0,
+		DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+		CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, _T("微软雅黑"));
+
+	HFONT hFont = static_cast<HFONT>(font.GetSafeHandle());
+	const float charSpacingPx = m_inlineAnnot.charSpacingPt * scale;
+
+	std::vector<FreeTextVisualLine> lines;
+	LayoutFreeTextVisualLines(dc.GetSafeHdc(), hFont, scale,
+		fullText, m_inlineAnnot.fontSizePt, m_inlineAnnot.charSpacingPt,
+		max(20.0f, m_inlineAnnot.widthPt - 8.0f), lines);
+	if (lines.empty())
+		return false;
+
+	int curLine = 0;
+	for (int i = 0; i < static_cast<int>(lines.size()); ++i)
+	{
+		if (selEnd >= lines[i].startChar && selEnd <= lines[i].endChar)
+		{
+			curLine = i;
+			const bool softWrappedNext = (i + 1 < static_cast<int>(lines.size())) &&
+				(lines[i + 1].startChar == lines[i].endChar) &&
+				(selEnd == lines[i].endChar);
+			if (!softWrappedNext)
+				break;
+		}
+	}
+
+	int newCaret = selEnd;
+	if (vk == VK_HOME)
+	{
+		newCaret = lines[curLine].startChar;
+	}
+	else if (vk == VK_END)
+	{
+		newCaret = lines[curLine].endChar;
+	}
+	else if (vk == VK_UP || vk == VK_DOWN)
+	{
+		const int targetLine = (vk == VK_UP) ? max(0, curLine - 1) :
+			min(static_cast<int>(lines.size()) - 1, curLine + 1);
+		if (targetLine == curLine)
+			return true;
+
+		const int colChars = max(0, min(lines[curLine].text.GetLength(), selEnd - lines[curLine].startChar));
+		const int curX = (colChars > 0) ?
+			MeasureTextWithCharSpacingPx(dc.GetSafeHdc(), hFont, lines[curLine].text, colChars, charSpacingPx) : 0;
+
+		const FreeTextVisualLine& dst = lines[targetLine];
+		int bestOff = dst.text.GetLength();
+		int prevW = 0;
+		for (int i = 1; i <= dst.text.GetLength(); ++i)
+		{
+			if (i < dst.text.GetLength() && dst.text[i - 1] >= 0xD800 && dst.text[i - 1] <= 0xDBFF)
+				continue;
+			const int w = MeasureTextWithCharSpacingPx(dc.GetSafeHdc(), hFont, dst.text, i, charSpacingPx);
+			if (curX <= (prevW + w) / 2)
+			{
+				bestOff = i - ((i >= 2 && dst.text[i - 2] >= 0xD800 && dst.text[i - 2] <= 0xDBFF) ? 2 : 1);
+				break;
+			}
+			prevW = w;
+		}
+		newCaret = dst.startChar + bestOff;
+	}
+	else
+	{
+		return false;
+	}
+
+	if (shift)
+		m_inlineAnnotEdit.SetSel(selStart, newCaret);
+	else
+		m_inlineAnnotEdit.SetSel(newCaret, newCaret);
+	return true;
+}
+
+void CXiaoGongPDFDlg::DrawInlineTextAnnotOverlay(CDC* pDC, const CRect& clientRect)
+{
+	m_inlineAnnot.boxViewRect.SetRectEmpty();
+	m_inlineAnnot.moveHandleViewRect.SetRectEmpty();
+	m_inlineAnnot.resizeHandleViewRect.SetRectEmpty();
+	m_inlineAnnot.toolbarViewRect.SetRectEmpty();
+	m_inlineAnnot.colorPopupViewRect.SetRectEmpty();
+	for (auto& rc : m_inlineAnnot.toolbarBtnRects)
+		rc.SetRectEmpty();
+	for (auto& rc : m_inlineAnnot.colorSwatchRects)
+		rc.SetRectEmpty();
+
+	if (!pDC || !IsInlineTextAnnotVisible() || clientRect.IsRectEmpty())
+		return;
+
+	fz_rect bounds = {};
+	float scale = 0.0f;
+	int offsetX = 0, offsetY = 0;
+	if (!GetSelectionPageTransform(m_inlineAnnot.pageNumber, bounds, scale, offsetX, offsetY) ||
+		scale <= 0.01f)
+	{
+		return;
+	}
+
+	const int rot = GetPageRotation(m_inlineAnnot.pageNumber);
+	const float origW = bounds.x1 - bounds.x0;
+	const float origH = bounds.y1 - bounds.y0;
+	const float effW = max(40.0f, (rot == 90 || rot == 270) ? origH : origW);
+
+	CString fullText;
+	int selStart = 0, selEnd = 0;
+	if (m_inlineAnnotEdit.GetSafeHwnd())
+	{
+		m_inlineAnnotEdit.GetWindowText(fullText);
+		m_inlineAnnotEdit.GetSel(selStart, selEnd);
+	}
+
+	const int fontPx = max(8, static_cast<int>(std::round(m_inlineAnnot.fontSizePt * scale)));
+	CFont textFont;
+	textFont.CreateFont(-fontPx, 0, 0, 0, FW_NORMAL, FALSE, FALSE, 0,
+		DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+		CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, _T("微软雅黑"));
+
+	const float padXPt = 4.0f;
+	const float padYPt = 3.0f;
+	const float charSpacingPx = m_inlineAnnot.charSpacingPt * scale;
+	HFONT hTextFont = static_cast<HFONT>(textFont.GetSafeHandle());
+
+	// 未手动拖拽宽度手柄时，单行输入（及增大文字间距时）自动适度向右延展至上限后再自动折行
+	if (!m_inlineAnnot.userResizedWidth && !fullText.IsEmpty())
+	{
+		int firstBreak = fullText.FindOneOf(_T("\r\n"));
+		CString firstPara = (firstBreak >= 0) ? fullText.Left(firstBreak) : fullText;
+		const int paraPx = MeasureTextWithCharSpacingPx(
+			pDC->GetSafeHdc(), hTextFont, firstPara, firstPara.GetLength(), charSpacingPx);
+		const float textW = static_cast<float>(paraPx) / scale + padXPt * 2.0f + 10.0f;
+		const float autoMaxW = min(300.0f, max(80.0f, effW - m_inlineAnnot.localXPt - 4.0f));
+		if (textW > m_inlineAnnot.widthPt)
+			m_inlineAnnot.widthPt = min(autoMaxW, textW);
+	}
+
+	std::vector<FreeTextVisualLine> lines;
+	LayoutFreeTextVisualLines(pDC->GetSafeHdc(), hTextFont, scale,
+		fullText, m_inlineAnnot.fontSizePt, m_inlineAnnot.charSpacingPt,
+		max(20.0f, m_inlineAnnot.widthPt - padXPt * 2.0f), lines);
+
+	const float lineStepPt = m_inlineAnnot.fontSizePt * 1.32f;
+	const float boxHeightPt = max(m_inlineAnnot.fontSizePt * 1.45f + padYPt * 2.0f,
+		static_cast<float>(lines.size()) * lineStepPt + padYPt * 2.0f);
+
+	const int boxLeft = offsetX + static_cast<int>(std::round(m_inlineAnnot.localXPt * scale));
+	const int boxTop = offsetY + static_cast<int>(std::round(m_inlineAnnot.localYPt * scale));
+	const int boxRight = boxLeft + max(44, static_cast<int>(std::round(m_inlineAnnot.widthPt * scale)));
+	const int boxBottom = boxTop + max(22, static_cast<int>(std::round(boxHeightPt * scale)));
+
+	CRect boxRect(boxLeft, boxTop, boxRight, boxBottom);
+	const int handleBarW = 12;
+	CRect handleRect(boxRect.left - handleBarW, boxRect.top, boxRect.left, boxRect.bottom);
+	const int resizeCenterY = (boxRect.top + boxRect.bottom) / 2;
+	CRect resizeRect(boxRect.right - 6, resizeCenterY - 6, boxRect.right + 6, resizeCenterY + 6);
+
+	CRect visTest;
+	CRect combinedBox = boxRect;
+	combinedBox.UnionRect(&combinedBox, &handleRect);
+	if (!visTest.IntersectRect(&combinedBox, &clientRect))
+		return;
+
+	m_inlineAnnot.boxViewRect = boxRect;
+	m_inlineAnnot.moveHandleViewRect = handleRect;
+	m_inlineAnnot.resizeHandleViewRect = resizeRect;
+
+	Gdiplus::Graphics graphics(pDC->GetSafeHdc());
+	graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+	auto fillRoundPath = [&](const Gdiplus::RectF& rf, float radius,
+		Gdiplus::Color fill, Gdiplus::Color border, float borderW)
+	{
+		if (rf.Width <= 1.0f || rf.Height <= 1.0f)
+			return;
+		const float r = max(0.5f, min(radius, min(rf.Width, rf.Height) * 0.5f));
+		const float d = r * 2.0f;
+		Gdiplus::GraphicsPath path;
+		path.AddArc(rf.X, rf.Y, d, d, 180.0f, 90.0f);
+		path.AddArc(rf.GetRight() - d, rf.Y, d, d, 270.0f, 90.0f);
+		path.AddArc(rf.GetRight() - d, rf.GetBottom() - d, d, d, 0.0f, 90.0f);
+		path.AddArc(rf.X, rf.GetBottom() - d, d, d, 90.0f, 90.0f);
+		path.CloseFigure();
+		if (fill.GetAlpha() > 0)
+		{
+			Gdiplus::SolidBrush b(fill);
+			graphics.FillPath(&b, &path);
+		}
+		if (borderW > 0.0f && border.GetAlpha() > 0)
+		{
+			Gdiplus::Pen p(border, borderW);
+			graphics.DrawPath(&p, &path);
+		}
+	};
+
+	// 1. 绘制蓝色虚线外框（对应 3.png 文本框样式，透明无填充）
+	const Gdiplus::Color edgeBlue(255, 0, 120, 212);
+	{
+		Gdiplus::Pen dashPen(edgeBlue, 1.5f);
+		const Gdiplus::REAL dashPattern[2] = { 4.0f, 3.0f };
+		dashPen.SetDashPattern(dashPattern, 2);
+		Gdiplus::RectF boxRf(
+			static_cast<Gdiplus::REAL>(boxRect.left) + 0.5f,
+			static_cast<Gdiplus::REAL>(boxRect.top) + 0.5f,
+			static_cast<Gdiplus::REAL>(max(1, boxRect.Width() - 1)),
+			static_cast<Gdiplus::REAL>(max(1, boxRect.Height() - 1)));
+		graphics.DrawRectangle(&dashPen, boxRf);
+	}
+
+	// 2. 绘制左侧蓝色拖拽手柄条及 2×3 白色抓握圆点（对应 3.png 左侧移动手柄）
+	{
+		const Gdiplus::Color gripColor = (m_inlineAnnot.draggingMove || m_inlineAnnot.hoverMoveHandle) ?
+			Gdiplus::Color(255, 0, 96, 176) : edgeBlue;
+		Gdiplus::GraphicsPath gripPath;
+		const float gx = static_cast<Gdiplus::REAL>(handleRect.left);
+		const float gy = static_cast<Gdiplus::REAL>(handleRect.top);
+		const float gw = static_cast<Gdiplus::REAL>(handleRect.Width());
+		const float gh = static_cast<Gdiplus::REAL>(max(8, handleRect.Height()));
+		const float gr = min(3.5f, gh * 0.25f);
+		gripPath.AddArc(gx, gy, gr * 2.0f, gr * 2.0f, 180.0f, 90.0f);
+		gripPath.AddLine(gx + gr, gy, gx + gw + 0.5f, gy);
+		gripPath.AddLine(gx + gw + 0.5f, gy, gx + gw + 0.5f, gy + gh);
+		gripPath.AddLine(gx + gw + 0.5f, gy + gh, gx + gr, gy + gh);
+		gripPath.AddArc(gx, gy + gh - gr * 2.0f, gr * 2.0f, gr * 2.0f, 90.0f, 90.0f);
+		gripPath.CloseFigure();
+		Gdiplus::SolidBrush gripBrush(gripColor);
+		graphics.FillPath(&gripBrush, &gripPath);
+
+		// 绘制 6 个白色抓握小圆点 (2 列 × 3 行)
+		Gdiplus::SolidBrush dotBrush(Gdiplus::Color(245, 255, 255, 255));
+		const float cxLeft = gx + gw * 0.5f - 2.0f;
+		const float cxRight = gx + gw * 0.5f + 2.0f;
+		const float cyMid = gy + gh * 0.5f;
+		for (int row = -1; row <= 1; ++row)
+		{
+			const float dy = cyMid + row * 4.2f;
+			graphics.FillEllipse(&dotBrush, cxLeft - 1.0f, dy - 1.0f, 2.0f, 2.0f);
+			graphics.FillEllipse(&dotBrush, cxRight - 1.0f, dy - 1.0f, 2.0f, 2.0f);
+		}
+	}
+
+	// 3. 绘制右侧居中白底蓝圈缩放手柄（对应 3.png 右侧圆形调节锚点）
+	{
+		Gdiplus::SolidBrush circleFill(
+			(m_inlineAnnot.draggingResizeW || m_inlineAnnot.hoverResizeHandle) ?
+			Gdiplus::Color(255, 224, 240, 255) : Gdiplus::Color(255, 255, 255, 255));
+		Gdiplus::Pen circlePen(edgeBlue, 2.0f);
+		const Gdiplus::RectF circleRf(
+			static_cast<Gdiplus::REAL>(boxRect.right) - 5.2f,
+			static_cast<Gdiplus::REAL>(resizeCenterY) - 5.2f,
+			10.4f, 10.4f);
+		graphics.FillEllipse(&circleFill, circleRf);
+		graphics.DrawEllipse(&circlePen, circleRf);
+	}
+
+	// 4. 绘制框内选区高亮、多行透明文字与闪烁输入光标
+	pDC->SetBkMode(TRANSPARENT);
+	CFont* pOldFont = pDC->SelectObject(&textFont);
+
+	const int textLeftPx = boxLeft + static_cast<int>(std::round(padXPt * scale));
+	const int textTopBasePx = boxTop + static_cast<int>(std::round(padYPt * scale));
+	const float lineStepPx = lineStepPt * scale;
+	const int glyphHeightPx = max(12, static_cast<int>(std::round(m_inlineAnnot.fontSizePt * 1.32f * scale)));
+
+	COLORREF drawTextColor = m_inlineAnnot.color;
+	if (m_readingMode == READING_NIGHT)
+	{
+		const int lum = (GetRValue(drawTextColor) * 299 +
+			GetGValue(drawTextColor) * 587 + GetBValue(drawTextColor) * 114) / 1000;
+		if (lum < 55)
+			drawTextColor = RGB(232, 236, 242);
+	}
+
+	const int minSel = min(selStart, selEnd);
+	const int maxSel = max(selStart, selEnd);
+	if (minSel < maxSel && !fullText.IsEmpty())
+	{
+		Gdiplus::SolidBrush selBrush(Gdiplus::Color(115, 51, 153, 255));
+		for (size_t i = 0; i < lines.size(); ++i)
+		{
+			const FreeTextVisualLine& ln = lines[i];
+			const int ovStart = max(minSel, ln.startChar);
+			const int ovEnd = min(maxSel, ln.endChar);
+			if (ovStart < ovEnd)
+			{
+				const int preLen = ovStart - ln.startChar;
+				const int selLen = ovEnd - ovStart;
+				const int x1 = textLeftPx + (preLen > 0 ?
+					MeasureTextWithCharSpacingPx(pDC->GetSafeHdc(), hTextFont, ln.text, preLen, charSpacingPx) : 0);
+				const int x2 = textLeftPx +
+					MeasureTextWithCharSpacingPx(pDC->GetSafeHdc(), hTextFont, ln.text, preLen + selLen, charSpacingPx);
+				const int y1 = textTopBasePx + static_cast<int>(std::round(i * lineStepPx));
+				graphics.FillRectangle(&selBrush, x1, y1, max(2, x2 - x1), glyphHeightPx);
+			}
+		}
+	}
+
+	const int savedDc = pDC->SaveDC();
+	pDC->IntersectClipRect(boxRect.left + 1, boxRect.top + 1, boxRect.right - 1, boxRect.bottom - 1);
+	pDC->SelectObject(&textFont);
+	pDC->SetBkMode(TRANSPARENT);
+	if (fullText.IsEmpty())
+	{
+		pDC->SetTextColor(m_readingMode == READING_NIGHT ? RGB(130, 140, 152) : RGB(158, 168, 180));
+		CRect phRect(textLeftPx, textTopBasePx, boxRect.right - 4, boxRect.bottom - 2);
+		pDC->DrawText(_T("输入文字..."), &phRect, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+	}
+	else
+	{
+		pDC->SetTextColor(drawTextColor);
+		for (size_t i = 0; i < lines.size(); ++i)
+		{
+			if (lines[i].text.IsEmpty())
+				continue;
+			const int yPx = textTopBasePx + static_cast<int>(std::round(i * lineStepPx));
+			DrawTextWithCharSpacingPx(pDC->GetSafeHdc(), textLeftPx, yPx, lines[i].text, charSpacingPx);
+		}
+	}
+	pDC->RestoreDC(savedDc);
+
+	// 计算当前光标所在视觉行与像素坐标，并同步中文输入法候选窗锚点
+	int caretLineIdx = 0;
+	for (int i = 0; i < static_cast<int>(lines.size()); ++i)
+	{
+		if (selEnd >= lines[i].startChar && selEnd <= lines[i].endChar)
+		{
+			caretLineIdx = i;
+			const bool softWrappedNext = (i + 1 < static_cast<int>(lines.size())) &&
+				(lines[i + 1].startChar == lines[i].endChar) &&
+				(selEnd == lines[i].endChar);
+			if (!softWrappedNext)
+				break;
+		}
+	}
+	const FreeTextVisualLine& caretLine = lines[caretLineIdx];
+	const int caretCharsInLine = max(0, min(caretLine.text.GetLength(), selEnd - caretLine.startChar));
+	const int caretViewX = textLeftPx + (caretCharsInLine > 0 ?
+		MeasureTextWithCharSpacingPx(pDC->GetSafeHdc(), hTextFont, caretLine.text, caretCharsInLine, charSpacingPx) : 0);
+	const int caretViewY = textTopBasePx + static_cast<int>(std::round(caretLineIdx * lineStepPx));
+
+	if (m_inlineAnnotEdit.GetSafeHwnd())
+	{
+		CRect pdfViewInDlg;
+		m_pdfView.GetWindowRect(&pdfViewInDlg);
+		ScreenToClient(&pdfViewInDlg);
+		m_inlineAnnotEdit.SetWindowPos(nullptr,
+			pdfViewInDlg.left + boxRect.left,
+			pdfViewInDlg.top + boxRect.top,
+			max(20, boxRect.Width()),
+			max(20, boxRect.Height()),
+			SWP_NOZORDER | SWP_NOACTIVATE);
+		m_inlineAnnotEdit.SetCaretAnchorInEdit(
+			CPoint(max(0, caretViewX - boxRect.left), max(0, caretViewY - boxRect.top)),
+			glyphHeightPx);
+	}
+
+	if (m_inlineAnnot.caretVisible && m_inlineAnnotEdit.GetSafeHwnd() &&
+		::GetFocus() == m_inlineAnnotEdit.GetSafeHwnd())
+	{
+		Gdiplus::SolidBrush caretBrush(Gdiplus::Color(245,
+			GetRValue(drawTextColor), GetGValue(drawTextColor), GetBValue(drawTextColor)));
+		graphics.FillRectangle(&caretBrush, caretViewX, caretViewY + 1, 2, max(10, glyphHeightPx - 2));
+	}
+
+	// 5. 绘制顶部白色圆角悬浮工具栏（字体颜色 | 字号增大/减小 | 文字间距增大/减小 | 删除 | 退出）
+	const bool darkUi = (m_readingMode == READING_NIGHT);
+	const int barH = 38;
+	const int barPadX = 6;
+	const int btnH = 28;
+	const int btnWidths[INLINE_ANNOT_BTN_COUNT] = { 42, 32, 32, 32, 32, 32, 32 };
+	const int divSpace = 9; // 两侧间距 + 1px 分隔竖线
+	int barW = barPadX * 2;
+	for (int w : btnWidths)
+		barW += w;
+	barW += divSpace * 2 + 2 * 4; // 与 3.png 一致：颜色组 | 字号与字距四按钮组 | 删除与退出组
+
+	int barX = handleRect.left;
+	barX = max(clientRect.left + 8, min(barX, clientRect.right - barW - 8));
+	int barY = boxRect.top - barH - 10;
+	bool toolbarPlacedBelow = false;
+	if (barY < clientRect.top + 8)
+	{
+		barY = boxRect.bottom + 10;
+		toolbarPlacedBelow = true;
+	}
+	barY = max(clientRect.top + 6, min(barY, clientRect.bottom - barH - 6));
+
+	CRect barRect(barX, barY, barX + barW, barY + barH);
+	m_inlineAnnot.toolbarViewRect = barRect;
+
+	// 多层柔和投影与白色卡片底板（还原 3.png 悬浮工具条质感）
+	for (int s = 3; s >= 1; --s)
+	{
+		Gdiplus::RectF shRf(
+			static_cast<Gdiplus::REAL>(barRect.left - s),
+			static_cast<Gdiplus::REAL>(barRect.top - s + 2),
+			static_cast<Gdiplus::REAL>(barRect.Width() + s * 2),
+			static_cast<Gdiplus::REAL>(barRect.Height() + s * 2));
+		fillRoundPath(shRf, 6.0f + s, Gdiplus::Color(darkUi ? 28 : 14, 15, 23, 42),
+			Gdiplus::Color(0, 0, 0, 0), 0.0f);
+	}
+	fillRoundPath(
+		Gdiplus::RectF(static_cast<Gdiplus::REAL>(barRect.left) + 0.5f,
+			static_cast<Gdiplus::REAL>(barRect.top) + 0.5f,
+			static_cast<Gdiplus::REAL>(barRect.Width() - 1),
+			static_cast<Gdiplus::REAL>(barRect.Height() - 1)),
+		6.0f,
+		darkUi ? Gdiplus::Color(250, 42, 46, 52) : Gdiplus::Color(252, 255, 255, 255),
+		darkUi ? Gdiplus::Color(255, 72, 79, 88) : Gdiplus::Color(255, 222, 227, 235),
+		1.0f);
+
+	const Gdiplus::Color divColor = darkUi ?
+		Gdiplus::Color(255, 68, 74, 82) : Gdiplus::Color(255, 224, 228, 234);
+	Gdiplus::Pen divPen(divColor, 1.0f);
+	auto drawBarDivider = [&](int xPos)
+	{
+		graphics.DrawLine(&divPen, xPos, barY + 9, xPos, barY + barH - 9);
+	};
+
+	const int btnTop = barY + (barH - btnH) / 2;
+	int curX = barX + barPadX;
+	m_inlineAnnot.toolbarBtnRects[INLINE_ANNOT_BTN_COLOR].SetRect(
+		curX, btnTop, curX + btnWidths[0], btnTop + btnH);
+	curX += btnWidths[0];
+	drawBarDivider(curX + divSpace / 2);
+	curX += divSpace;
+
+	m_inlineAnnot.toolbarBtnRects[INLINE_ANNOT_BTN_FONT_INC].SetRect(
+		curX, btnTop, curX + btnWidths[1], btnTop + btnH);
+	curX += btnWidths[1] + 2;
+	m_inlineAnnot.toolbarBtnRects[INLINE_ANNOT_BTN_FONT_DEC].SetRect(
+		curX, btnTop, curX + btnWidths[2], btnTop + btnH);
+	curX += btnWidths[2] + 2;
+	m_inlineAnnot.toolbarBtnRects[INLINE_ANNOT_BTN_CHAR_SPACE_INC].SetRect(
+		curX, btnTop, curX + btnWidths[3], btnTop + btnH);
+	curX += btnWidths[3] + 2;
+	m_inlineAnnot.toolbarBtnRects[INLINE_ANNOT_BTN_CHAR_SPACE_DEC].SetRect(
+		curX, btnTop, curX + btnWidths[4], btnTop + btnH);
+	curX += btnWidths[4];
+	drawBarDivider(curX + divSpace / 2);
+	curX += divSpace;
+
+	m_inlineAnnot.toolbarBtnRects[INLINE_ANNOT_BTN_DELETE].SetRect(
+		curX, btnTop, curX + btnWidths[5], btnTop + btnH);
+	curX += btnWidths[5] + 2;
+	m_inlineAnnot.toolbarBtnRects[INLINE_ANNOT_BTN_EXIT].SetRect(
+		curX, btnTop, curX + btnWidths[6], btnTop + btnH);
+
+	if (!m_captureBarFont.GetSafeHandle())
+	{
+		m_captureBarFont.CreateFont(-13, 0, 0, 0, FW_MEDIUM, FALSE, FALSE, 0,
+			DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+			CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, _T("微软雅黑"));
+	}
+
+	CFont iconLetterFont;
+	iconLetterFont.CreateFont(-15, 0, 0, 0, FW_MEDIUM, FALSE, FALSE, 0,
+		DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+		CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, _T("Segoe UI"));
+
+	CFont avSmallFont;
+	avSmallFont.CreateFont(-11, 0, 0, 0, FW_MEDIUM, FALSE, FALSE, 0,
+		DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+		CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, _T("Segoe UI"));
+
+	for (int i = 0; i < INLINE_ANNOT_BTN_COUNT; ++i)
+	{
+		const CRect& rc = m_inlineAnnot.toolbarBtnRects[i];
+		const bool disabled =
+			(i == INLINE_ANNOT_BTN_FONT_INC && m_inlineAnnot.fontSizePt >= 47.9f) ||
+			(i == INLINE_ANNOT_BTN_FONT_DEC && m_inlineAnnot.fontSizePt <= 8.1f) ||
+			(i == INLINE_ANNOT_BTN_CHAR_SPACE_INC && m_inlineAnnot.charSpacingPt >= 23.9f) ||
+			(i == INLINE_ANNOT_BTN_CHAR_SPACE_DEC && m_inlineAnnot.charSpacingPt <= 0.01f);
+		const bool hovered = !disabled && (m_inlineAnnot.hoverToolbarBtn == i);
+		const bool pressed = !disabled && (m_inlineAnnot.pressedToolbarBtn == i);
+		const bool toggled = (i == INLINE_ANNOT_BTN_COLOR && m_inlineAnnot.colorPopupOpen);
+
+		if (hovered || pressed || toggled)
+		{
+			Gdiplus::Color btnBg;
+			if (i == INLINE_ANNOT_BTN_DELETE && (hovered || pressed))
+			{
+				btnBg = pressed ? Gdiplus::Color(255, 254, 215, 215) :
+					Gdiplus::Color(255, 254, 232, 232);
+			}
+			else if (darkUi)
+			{
+				btnBg = pressed ? Gdiplus::Color(255, 70, 77, 88) : Gdiplus::Color(255, 58, 64, 73);
+			}
+			else
+			{
+				btnBg = pressed ? Gdiplus::Color(255, 218, 230, 247) : Gdiplus::Color(255, 236, 242, 251);
+			}
+			fillRoundPath(Gdiplus::RectF(
+				static_cast<Gdiplus::REAL>(rc.left),
+				static_cast<Gdiplus::REAL>(rc.top),
+				static_cast<Gdiplus::REAL>(rc.Width()),
+				static_cast<Gdiplus::REAL>(rc.Height())),
+				4.5f, btnBg, Gdiplus::Color(0, 0, 0, 0), 0.0f);
+		}
+
+		const COLORREF fgCol = disabled ?
+			(darkUi ? RGB(105, 112, 122) : RGB(188, 195, 205)) :
+			((i == INLINE_ANNOT_BTN_DELETE && hovered) ? RGB(210, 38, 48) :
+				(darkUi ? RGB(228, 233, 240) : RGB(52, 58, 68)));
+		const Gdiplus::Color gdipFg(255, GetRValue(fgCol), GetGValue(fgCol), GetBValue(fgCol));
+		Gdiplus::Pen iconPen(gdipFg, 1.35f);
+		iconPen.SetStartCap(Gdiplus::LineCapRound);
+		iconPen.SetEndCap(Gdiplus::LineCapRound);
+		iconPen.SetLineJoin(Gdiplus::LineJoinRound);
+
+		const float cx = (rc.left + rc.right) * 0.5f;
+		const float cy = (rc.top + rc.bottom) * 0.5f;
+
+		if (i == INLINE_ANNOT_BTN_COLOR)
+		{
+			// A + 底部当前颜色条 + 右侧下拉小箭头（与 3.png 一致）
+			pDC->SelectObject(&iconLetterFont);
+			pDC->SetTextColor(fgCol);
+			CRect aRect(rc.left + 3, rc.top + 1, rc.left + 23, rc.bottom - 6);
+			pDC->DrawText(_T("A"), &aRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+			fillRoundPath(Gdiplus::RectF(
+				static_cast<Gdiplus::REAL>(rc.left + 6),
+				static_cast<Gdiplus::REAL>(rc.bottom - 7),
+				14.0f, 3.6f),
+				1.5f,
+				Gdiplus::Color(255, GetRValue(m_inlineAnnot.color),
+					GetGValue(m_inlineAnnot.color), GetBValue(m_inlineAnnot.color)),
+				Gdiplus::Color(0, 0, 0, 0), 0.0f);
+
+			const float vx = static_cast<Gdiplus::REAL>(rc.right - 11);
+			const float vy = cy + 0.5f;
+			graphics.DrawLine(&iconPen, vx - 3.0f, vy - 1.5f, vx, vy + 1.8f);
+			graphics.DrawLine(&iconPen, vx, vy + 1.8f, vx + 3.0f, vy - 1.5f);
+		}
+		else if (i == INLINE_ANNOT_BTN_FONT_INC || i == INLINE_ANNOT_BTN_FONT_DEC)
+		{
+			// A^ 增大字号 / Aˇ 减小字号（与 3.png 一致）
+			pDC->SelectObject(&iconLetterFont);
+			pDC->SetTextColor(fgCol);
+			CRect aRect(rc.left + 2, rc.top + 2, rc.right - 7, rc.bottom - 1);
+			pDC->DrawText(_T("A"), &aRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+			const float ax = static_cast<Gdiplus::REAL>(rc.right - 8);
+			const float ay = static_cast<Gdiplus::REAL>(rc.top + 9);
+			if (i == INLINE_ANNOT_BTN_FONT_INC)
+			{
+				graphics.DrawLine(&iconPen, ax - 2.6f, ay + 1.4f, ax, ay - 1.5f);
+				graphics.DrawLine(&iconPen, ax, ay - 1.5f, ax + 2.6f, ay + 1.4f);
+			}
+			else
+			{
+				graphics.DrawLine(&iconPen, ax - 2.6f, ay - 1.4f, ax, ay + 1.5f);
+				graphics.DrawLine(&iconPen, ax, ay + 1.5f, ax + 2.6f, ay - 1.4f);
+			}
+		}
+		else if (i == INLINE_ANNOT_BTN_CHAR_SPACE_INC || i == INLINE_ANNOT_BTN_CHAR_SPACE_DEC)
+		{
+			// 还原 3.png 中的 AV + 底部 <-> / >-< 文字间距图标
+			pDC->SelectObject(&avSmallFont);
+			pDC->SetTextColor(fgCol);
+			CRect avRect(rc.left, rc.top + 2, rc.right, rc.bottom - 8);
+			pDC->DrawText(_T("AV"), &avRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+			Gdiplus::Pen arrowPen(gdipFg, 1.15f);
+			arrowPen.SetStartCap(Gdiplus::LineCapRound);
+			arrowPen.SetEndCap(Gdiplus::LineCapRound);
+			const float ay = static_cast<Gdiplus::REAL>(rc.bottom - 6);
+			if (i == INLINE_ANNOT_BTN_CHAR_SPACE_INC)
+			{
+				graphics.DrawLine(&arrowPen, cx - 6.8f, ay, cx + 6.8f, ay);
+				graphics.DrawLine(&arrowPen, cx - 4.4f, ay - 2.0f, cx - 6.8f, ay);
+				graphics.DrawLine(&arrowPen, cx - 4.4f, ay + 2.0f, cx - 6.8f, ay);
+				graphics.DrawLine(&arrowPen, cx + 4.4f, ay - 2.0f, cx + 6.8f, ay);
+				graphics.DrawLine(&arrowPen, cx + 4.4f, ay + 2.0f, cx + 6.8f, ay);
+			}
+			else
+			{
+				graphics.DrawLine(&arrowPen, cx - 7.5f, ay, cx - 1.5f, ay);
+				graphics.DrawLine(&arrowPen, cx - 3.6f, ay - 1.9f, cx - 1.5f, ay);
+				graphics.DrawLine(&arrowPen, cx - 3.6f, ay + 1.9f, cx - 1.5f, ay);
+
+				graphics.DrawLine(&arrowPen, cx + 7.5f, ay, cx + 1.5f, ay);
+				graphics.DrawLine(&arrowPen, cx + 3.6f, ay - 1.9f, cx + 1.5f, ay);
+				graphics.DrawLine(&arrowPen, cx + 3.6f, ay + 1.9f, cx + 1.5f, ay);
+			}
+		}
+		else if (i == INLINE_ANNOT_BTN_DELETE)
+		{
+			// 垃圾桶删除图标（与 3.png 一致）
+			graphics.DrawLine(&iconPen, cx - 6.5f, cy - 4.5f, cx + 6.5f, cy - 4.5f);
+			graphics.DrawLine(&iconPen, cx - 2.5f, cy - 6.5f, cx + 2.5f, cy - 6.5f);
+			graphics.DrawLine(&iconPen, cx - 2.5f, cy - 6.5f, cx - 2.5f, cy - 4.5f);
+			graphics.DrawLine(&iconPen, cx + 2.5f, cy - 6.5f, cx + 2.5f, cy - 4.5f);
+
+			graphics.DrawLine(&iconPen, cx - 4.8f, cy - 4.5f, cx - 4.0f, cy + 6.5f);
+			graphics.DrawLine(&iconPen, cx + 4.8f, cy - 4.5f, cx + 4.0f, cy + 6.5f);
+			graphics.DrawLine(&iconPen, cx - 4.0f, cy + 6.5f, cx + 4.0f, cy + 6.5f);
+
+			graphics.DrawLine(&iconPen, cx - 1.6f, cy - 1.8f, cx - 1.4f, cy + 3.8f);
+			graphics.DrawLine(&iconPen, cx + 1.6f, cy - 1.8f, cx + 1.4f, cy + 3.8f);
+		}
+		else if (i == INLINE_ANNOT_BTN_EXIT)
+		{
+			// 退出编辑按钮 (✕)
+			graphics.DrawLine(&iconPen, cx - 4.5f, cy - 4.5f, cx + 4.5f, cy + 4.5f);
+			graphics.DrawLine(&iconPen, cx + 4.5f, cy - 4.5f, cx - 4.5f, cy + 4.5f);
+		}
+	}
+
+	// 6. 点击颜色按钮展开 8 色调色板浮层
+	if (m_inlineAnnot.colorPopupOpen)
+	{
+		static const COLORREF kAnnotPalette[INLINE_ANNOT_SWATCH_COUNT] = {
+			RGB(0, 114, 206),
+			RGB(216, 43, 43),
+			RGB(32, 33, 36),
+			RGB(22, 148, 72),
+			RGB(230, 106, 18),
+			RGB(124, 58, 202),
+			RGB(198, 32, 104),
+			RGB(95, 107, 122)
+		};
+
+		const int swSize = 20;
+		const int swGap = 6;
+		const int palPad = 8;
+		const int palW = palPad * 2 + INLINE_ANNOT_SWATCH_COUNT * swSize +
+			(INLINE_ANNOT_SWATCH_COUNT - 1) * swGap;
+		const int palH = 36;
+		int palX = max(clientRect.left + 8, min(barRect.left, clientRect.right - palW - 8));
+		int palY = toolbarPlacedBelow ? (barRect.bottom + 6) : (barRect.top - palH - 6);
+		if (palY < clientRect.top + 6)
+			palY = barRect.bottom + 6;
+		if (palY + palH > clientRect.bottom - 6)
+			palY = max(clientRect.top + 6, barRect.top - palH - 6);
+
+		CRect palRect(palX, palY, palX + palW, palY + palH);
+		m_inlineAnnot.colorPopupViewRect = palRect;
+
+		fillRoundPath(
+			Gdiplus::RectF(static_cast<Gdiplus::REAL>(palRect.left - 1),
+				static_cast<Gdiplus::REAL>(palRect.top + 1),
+				static_cast<Gdiplus::REAL>(palRect.Width() + 2),
+				static_cast<Gdiplus::REAL>(palRect.Height() + 2)),
+			7.0f, Gdiplus::Color(24, 15, 23, 42), Gdiplus::Color(0, 0, 0, 0), 0.0f);
+		fillRoundPath(
+			Gdiplus::RectF(static_cast<Gdiplus::REAL>(palRect.left) + 0.5f,
+				static_cast<Gdiplus::REAL>(palRect.top) + 0.5f,
+				static_cast<Gdiplus::REAL>(palRect.Width() - 1),
+				static_cast<Gdiplus::REAL>(palRect.Height() - 1)),
+			6.0f,
+			darkUi ? Gdiplus::Color(252, 42, 46, 52) : Gdiplus::Color(254, 255, 255, 255),
+			darkUi ? Gdiplus::Color(255, 72, 79, 88) : Gdiplus::Color(255, 220, 226, 235),
+			1.0f);
+
+		const int swTop = palY + (palH - swSize) / 2;
+		for (int i = 0; i < INLINE_ANNOT_SWATCH_COUNT; ++i)
+		{
+			const int swLeft = palX + palPad + i * (swSize + swGap);
+			CRect swRect(swLeft, swTop, swLeft + swSize, swTop + swSize);
+			m_inlineAnnot.colorSwatchRects[i] = swRect;
+
+			const COLORREF c = kAnnotPalette[i];
+			Gdiplus::SolidBrush swBrush(Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)));
+			Gdiplus::RectF swRf(
+				static_cast<Gdiplus::REAL>(swRect.left) + 1.0f,
+				static_cast<Gdiplus::REAL>(swRect.top) + 1.0f,
+				static_cast<Gdiplus::REAL>(swSize - 2),
+				static_cast<Gdiplus::REAL>(swSize - 2));
+			graphics.FillEllipse(&swBrush, swRf);
+
+			if (m_inlineAnnot.color == c)
+			{
+				Gdiplus::Pen selRingPen(edgeBlue, 1.8f);
+				Gdiplus::RectF ringRf(swRf.X - 2.2f, swRf.Y - 2.2f,
+					swRf.Width + 4.4f, swRf.Height + 4.4f);
+				graphics.DrawEllipse(&selRingPen, ringRf);
+
+				Gdiplus::Pen checkPen(Gdiplus::Color(255, 255, 255, 255), 1.6f);
+				checkPen.SetStartCap(Gdiplus::LineCapRound);
+				checkPen.SetEndCap(Gdiplus::LineCapRound);
+				const float scx = (swRect.left + swRect.right) * 0.5f;
+				const float scy = (swRect.top + swRect.bottom) * 0.5f;
+				graphics.DrawLine(&checkPen, scx - 3.5f, scy, scx - 1.0f, scy + 2.5f);
+				graphics.DrawLine(&checkPen, scx - 1.0f, scy + 2.5f, scx + 4.0f, scy - 2.8f);
+			}
+			else if (m_inlineAnnot.hoverColorSwatch == i)
+			{
+				Gdiplus::Pen hovPen(Gdiplus::Color(180, 0, 120, 212), 1.4f);
+				Gdiplus::RectF ringRf(swRf.X - 1.6f, swRf.Y - 1.6f,
+					swRf.Width + 3.2f, swRf.Height + 3.2f);
+				graphics.DrawEllipse(&hovPen, ringRf);
+			}
+		}
+	}
+	else if (m_inlineAnnot.hoverToolbarBtn >= 0 && m_inlineAnnot.hoverToolbarBtn < INLINE_ANNOT_BTN_COUNT)
+	{
+		// 悬停工具栏按钮时显示简洁提示胶囊（含实时字号/行距数值）
+		CString tipText;
+		switch (m_inlineAnnot.hoverToolbarBtn)
+		{
+		case INLINE_ANNOT_BTN_COLOR:
+			tipText = _T("字体颜色");
+			break;
+		case INLINE_ANNOT_BTN_FONT_INC:
+			tipText.Format(_T("增大字号 (%.0f pt)"), m_inlineAnnot.fontSizePt);
+			break;
+		case INLINE_ANNOT_BTN_FONT_DEC:
+			tipText.Format(_T("减小字号 (%.0f pt)"), m_inlineAnnot.fontSizePt);
+			break;
+		case INLINE_ANNOT_BTN_CHAR_SPACE_INC:
+			tipText.Format(_T("增大文字间距 (+%.1f pt)"), m_inlineAnnot.charSpacingPt);
+			break;
+		case INLINE_ANNOT_BTN_CHAR_SPACE_DEC:
+			tipText.Format(_T("减小文字间距 (+%.1f pt)"), m_inlineAnnot.charSpacingPt);
+			break;
+		case INLINE_ANNOT_BTN_DELETE:
+			tipText = _T("删除批注");
+			break;
+		case INLINE_ANNOT_BTN_EXIT:
+			tipText = _T("退出编辑 (Esc)");
+			break;
+		default:
+			break;
+		}
+		if (!tipText.IsEmpty())
+		{
+			pDC->SelectObject(&m_captureBarFont);
+			const CSize tipExt = pDC->GetTextExtent(tipText);
+			const int tipW = tipExt.cx + 16;
+			const int tipH = 22;
+			const CRect& btnRc = m_inlineAnnot.toolbarBtnRects[m_inlineAnnot.hoverToolbarBtn];
+			int tipX = max(clientRect.left + 6,
+				min((btnRc.left + btnRc.right - tipW) / 2, clientRect.right - tipW - 6));
+			int tipY = (barRect.top >= tipH + 8) ? (barRect.top - tipH - 5) : (barRect.bottom + 5);
+			CRect tipRect(tipX, tipY, tipX + tipW, tipY + tipH);
+			fillRoundPath(Gdiplus::RectF(
+				static_cast<Gdiplus::REAL>(tipRect.left),
+				static_cast<Gdiplus::REAL>(tipRect.top),
+				static_cast<Gdiplus::REAL>(tipRect.Width()),
+				static_cast<Gdiplus::REAL>(tipRect.Height())),
+				4.5f, Gdiplus::Color(225, 30, 35, 42), Gdiplus::Color(0, 0, 0, 0), 0.0f);
+			pDC->SetTextColor(RGB(246, 248, 252));
+			pDC->DrawText(tipText, &tipRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+		}
+	}
+
+	pDC->SelectObject(pOldFont);
+}
+
+bool CXiaoGongPDFDlg::HitTestAnnotationAtViewPoint(
+	CPoint viewPt, int& outPageNumber, PageAnnotHitInfo& outHit)
+{
+	outPageNumber = -1;
+	outHit = PageAnnotHitInfo{};
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (!m_doc || !pDoc || m_totalPages <= 0)
+		return false;
+
+	const int pageNumber = GetPageAtViewPoint(viewPt, false);
+	if (pageNumber < 0 || pageNumber >= m_totalPages)
+		return false;
+
+	float fitzX = 0.0f;
+	float fitzY = 0.0f;
+	if (!ScreenPointToPdfCoords(viewPt, pageNumber, fitzX, fitzY))
+		return false;
+
+	CSingleLock lock(&m_renderLock, TRUE);
+	if (HitTestPageAnnotation(pDoc, pageNumber, fitzX, fitzY, outHit))
+	{
+		outPageNumber = pageNumber;
+		return true;
+	}
+	return false;
+}
+
+int CXiaoGongPDFDlg::HitTestSelectionActionBar(CPoint viewPt) const
+{
+	if (!IsSelectionActionBarVisible())
+		return SEL_BAR_NONE;
+	for (int i = 0; i < SEL_BAR_COUNT; ++i)
+	{
+		if (!m_selectionActionRects[i].IsRectEmpty() && m_selectionActionRects[i].PtInRect(viewPt))
+			return i;
+	}
+	return SEL_BAR_NONE;
+}
+
+void CXiaoGongPDFDlg::DrawSelectionActionBar(CDC* pDC, const CRect& clientRect)
+{
+	for (auto& rc : m_selectionActionRects)
+		rc.SetRectEmpty();
+
+	if (!pDC || !IsSelectionActionBarVisible() || clientRect.IsRectEmpty())
+		return;
+
+	fz_rect bounds = {};
+	float scale = 0.0f;
+	int offsetX = 0;
+	int offsetY = 0;
+	if (!GetSelectionPageTransform(m_selPageNumber, bounds, scale, offsetX, offsetY))
+		return;
+
+	const int rotation = GetPageRotation(m_selPageNumber);
+	CRect unionRect(0, 0, 0, 0);
+	bool hasAny = false;
+	for (const fz_quad& quad : m_selectionQuads)
+	{
+		CRect qr = TransformQuadToBitmapRect(quad, bounds, rotation, scale);
+		qr.OffsetRect(offsetX, offsetY);
+		if (!qr.IsRectEmpty())
+		{
+			if (!hasAny)
+			{
+				unionRect = qr;
+				hasAny = true;
+			}
+			else
+			{
+				unionRect.UnionRect(&unionRect, &qr);
+			}
+		}
+	}
+	CRect visibleCheck;
+	if (!hasAny || !visibleCheck.IntersectRect(&unionRect, &clientRect))
+		return;
+
+	if (!m_captureBarFont.GetSafeHandle())
+	{
+		m_captureBarFont.CreateFont(-13, 0, 0, 0, FW_MEDIUM, FALSE, FALSE, 0,
+			DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+			CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, _T("微软雅黑"));
+	}
+
+	Gdiplus::Graphics graphics(pDC->GetSafeHdc());
+	graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+	auto drawPill = [&](const CRect& rc, float radius, Gdiplus::Color fill,
+		Gdiplus::Color border, bool withBorder)
+	{
+		if (rc.Width() <= 2 || rc.Height() <= 2)
+			return;
+		const float r = max(1.0f, min(radius, min(rc.Width(), rc.Height()) * 0.5f));
+		const float d = r * 2.0f;
+		Gdiplus::RectF rf(static_cast<Gdiplus::REAL>(rc.left) + 0.5f,
+			static_cast<Gdiplus::REAL>(rc.top) + 0.5f,
+			static_cast<Gdiplus::REAL>(rc.Width() - 1),
+			static_cast<Gdiplus::REAL>(rc.Height() - 1));
+		Gdiplus::GraphicsPath path;
+		path.AddArc(rf.X, rf.Y, d, d, 180.0f, 90.0f);
+		path.AddArc(rf.GetRight() - d, rf.Y, d, d, 270.0f, 90.0f);
+		path.AddArc(rf.GetRight() - d, rf.GetBottom() - d, d, d, 0.0f, 90.0f);
+		path.AddArc(rf.X, rf.GetBottom() - d, d, d, 90.0f, 90.0f);
+		path.CloseFigure();
+		Gdiplus::SolidBrush b(fill);
+		graphics.FillPath(&b, &path);
+		if (withBorder)
+		{
+			Gdiplus::Pen p(border, 1.0f);
+			graphics.DrawPath(&p, &path);
+		}
+	};
+
+	const int barH = 34;
+	const int pad = 4;
+	const int btnGap = 4;
+	const int btnWidths[SEL_BAR_COUNT] = { 54, 58, 66, 54 };
+	int barW = pad * 2 + btnGap * (SEL_BAR_COUNT - 1);
+	for (int w : btnWidths)
+		barW += w;
+
+	int barX = (unionRect.left + unionRect.right - barW) / 2;
+	barX = max(clientRect.left + 8, min(barX, clientRect.right - barW - 8));
+	int barY = unionRect.bottom + 8;
+	if (barY + barH + 6 > clientRect.bottom)
+		barY = (unionRect.top >= barH + 12) ? (unionRect.top - barH - 8) : (clientRect.bottom - barH - 8);
+	barY = max(clientRect.top + 6, min(barY, clientRect.bottom - barH - 6));
+
+	CRect barRect(barX, barY, barX + barW, barY + barH);
+	const bool dark = (m_readingMode == READING_NIGHT);
+	drawPill(barRect, 8.0f,
+		dark ? Gdiplus::Color(246, 40, 44, 50) : Gdiplus::Color(250, 255, 255, 255),
+		dark ? Gdiplus::Color(255, 72, 79, 88) : Gdiplus::Color(255, 206, 218, 235),
+		true);
+
+	pDC->SetBkMode(TRANSPARENT);
+	CFont* pOldFont = pDC->SelectObject(&m_captureBarFont);
+
+	const LPCTSTR labels[SEL_BAR_COUNT] = { _T("复制"), _T("高亮"), _T("下划线"), _T("批注") };
+	int curX = barX + pad;
+	for (int i = 0; i < SEL_BAR_COUNT; ++i)
+	{
+		m_selectionActionRects[i].SetRect(curX, barY + pad, curX + btnWidths[i], barY + barH - pad);
+		curX += btnWidths[i] + btnGap;
+
+		const bool hovered = (m_hoverSelectionAction == i);
+		const bool pressed = (m_pressedSelectionAction == i);
+		if (hovered || pressed)
+		{
+			Gdiplus::Color fill = dark ?
+				(pressed ? Gdiplus::Color(255, 68, 75, 85) : Gdiplus::Color(255, 56, 62, 70)) :
+				(pressed ? Gdiplus::Color(255, 216, 230, 248) : Gdiplus::Color(255, 234, 242, 253));
+			drawPill(m_selectionActionRects[i], 5.0f, fill, fill, false);
+		}
+		if (i == SEL_BAR_HIGHLIGHT)
+		{
+			// 底部黄色色带提示“荧光高亮”
+			CRect accent = m_selectionActionRects[i];
+			Gdiplus::SolidBrush hlBrush(Gdiplus::Color(210, 250, 204, 21));
+			graphics.FillRectangle(&hlBrush, accent.left + 12, accent.bottom - 4,
+				max(8, accent.Width() - 24), 3);
+		}
+		else if (i == SEL_BAR_UNDERLINE)
+		{
+			CRect accent = m_selectionActionRects[i];
+			Gdiplus::SolidBrush ulBrush(Gdiplus::Color(220, 29, 124, 243));
+			graphics.FillRectangle(&ulBrush, accent.left + 10, accent.bottom - 4,
+				max(8, accent.Width() - 20), 2);
+		}
+		pDC->SetTextColor(dark ? RGB(228, 233, 238) : RGB(36, 44, 54));
+		pDC->DrawText(labels[i], &m_selectionActionRects[i], DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+	}
+
+	pDC->SelectObject(pOldFont);
+}
+
+void CXiaoGongPDFDlg::OnMenuSavePdf()
+{
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (!m_doc || !pDoc || m_totalPages <= 0)
+	{
+		SetStatusBarMessage(_T("请先打开 PDF 文档"));
+		return;
+	}
+	SaveDocumentEdits(pDoc, false);
+}
+
+void CXiaoGongPDFDlg::OnMenuSavePdfAs()
+{
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (!m_doc || !pDoc || m_totalPages <= 0)
+	{
+		MessageBox(_T("请先打开 PDF 文档"), _T("提示"), MB_OK | MB_ICONINFORMATION);
+		return;
+	}
+	SaveDocumentEdits(pDoc, true);
+}
+
+bool CXiaoGongPDFDlg::SaveDocumentEdits(CPDFDocument* pTargetDoc, bool saveAs)
+{
+	if (!pTargetDoc || !pTargetDoc->IsOpen())
+		return false;
+
+	if (pTargetDoc == GetActiveDocument())
+	{
+		FinishInlineTextAnnot(false);
+		SaveDialogStateToDocument(pTargetDoc);
+	}
+
+	CancelAreaCaptureMode(false);
+
+	CString targetPath = pTargetDoc->GetFilePath();
+	ScopedFileWatchSuspend suspendWatch(this);
+
+	if (saveAs || targetPath.IsEmpty())
+	{
+		CString defaultName = targetPath;
+		if (!defaultName.IsEmpty())
+		{
+			const int dot = defaultName.ReverseFind(_T('.'));
+			if (dot > 0)
+				defaultName = defaultName.Left(dot) + _T("_已批注.pdf");
+		}
+		CFileDialog saveDlg(FALSE, _T("pdf"), defaultName.IsEmpty() ? _T("已批注文档.pdf") : defaultName.GetString(),
+			OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST,
+			_T("PDF 文档 (*.pdf)|*.pdf||"), this);
+		if (saveDlg.DoModal() != IDOK)
+			return false;
+		targetPath = saveDlg.GetPathName();
+	}
+	else if (!pTargetDoc->HasUnsavedAnnotations() && !pTargetDoc->HasNonZeroPageRotations())
+	{
+		SetStatusBarMessage(_T("当前文档没有待写回的批注或单页旋转修改"));
+		return true;
+	}
+
+	CleanupSearches();
+
+	auto normalizeFilePath = [](const CString& path) -> CString
+	{
+		if (path.IsEmpty())
+			return CString();
+		TCHAR fullPath[MAX_PATH * 4] = { 0 };
+		const DWORD len = ::GetFullPathName(path, static_cast<DWORD>(_countof(fullPath)), fullPath, nullptr);
+		CString normalized = (len > 0 && len < _countof(fullPath)) ? CString(fullPath) : path;
+		normalized.Replace(_T('/'), _T('\\'));
+		return normalized;
+	};
+
+	struct LockedSaveDocState
+	{
+		CPDFDocument* doc = nullptr;
+		bool wasActive = false;
+		int savedPage = 0;
+		ZoomMode savedZoomMode = ZOOM_CUSTOM;
+		float savedCustomZoom = 1.0f;
+		float savedUniformScale = 0.0f;
+		int savedScroll = 0;
+		PageLayoutMode savedLayoutMode = LAYOUT_SINGLE_CONTINUOUS;
+		std::map<int, int> savedRotations;
+		bool savedUnsavedAnnots = false;
+		CString filePath;
+		std::vector<char> password;
+	};
+	std::vector<LockedSaveDocState> lockedDocs;
+
+	const std::map<int, int> rotationsToWrite = pTargetDoc->GetPageRotations();
+	CString errorMsg;
+
+	const bool savedOk = SaveDocumentWithAnnotationsAndRotations(
+		pTargetDoc,
+		targetPath,
+		rotationsToWrite,
+		[&](const CString& replacePath)
+		{
+			lockedDocs.clear();
+			const CString normReplace = normalizeFilePath(replacePath);
+			if (normReplace.IsEmpty())
+				return;
+
+			for (int i = 0; i < static_cast<int>(m_documents.size()); ++i)
+			{
+				CPDFDocument* openDoc = m_documents[i];
+				if (!openDoc || !openDoc->IsOpen())
+					continue;
+				if (normalizeFilePath(openDoc->GetFilePath()).CompareNoCase(normReplace) != 0)
+					continue;
+
+				const bool isActive = (i == m_activeDocIndex);
+				if (isActive)
+				{
+					SaveDialogStateToDocument(openDoc);
+					ClearSelection();
+					CleanupBitmap();
+				}
+
+				LockedSaveDocState st;
+				st.doc = openDoc;
+				st.wasActive = isActive;
+				st.savedPage = openDoc->GetCurrentPage();
+				st.savedZoomMode = openDoc->GetZoomMode();
+				st.savedCustomZoom = openDoc->GetCustomZoom();
+				st.savedUniformScale = openDoc->GetUniformScale();
+				st.savedScroll = openDoc->GetScrollPosition();
+				st.savedLayoutMode = openDoc->GetLayoutMode();
+				st.savedRotations = openDoc->GetPageRotations();
+				st.savedUnsavedAnnots = openDoc->HasUnsavedAnnotations();
+				st.filePath = openDoc->GetFilePath();
+				st.password = openDoc->GetPassword();
+				lockedDocs.push_back(std::move(st));
+
+				openDoc->CloseDocument();
+				if (isActive)
+				{
+					m_doc = nullptr;
+					m_ctx = nullptr;
+				}
+			}
+		},
+		[&](const CString& /*replacePath*/, bool moved)
+		{
+			for (auto& st : lockedDocs)
+			{
+				if (!st.doc || st.filePath.IsEmpty())
+					continue;
+
+				const int utf8Len = WideCharToMultiByte(CP_UTF8, 0, st.filePath, -1, NULL, 0, NULL, NULL);
+				std::vector<char> utf8Path(max(1, utf8Len), 0);
+				WideCharToMultiByte(CP_UTF8, 0, st.filePath, -1, utf8Path.data(), utf8Len, NULL, NULL);
+				const char* pwd = st.password.empty() ? nullptr : st.password.data();
+
+				const bool reopened = (st.doc->OpenDocument(utf8Path.data(), pwd) == PDFOpenResult::Success);
+				if (!st.password.empty())
+					SecureZeroMemory(st.password.data(), st.password.size());
+
+				if (reopened)
+				{
+					const int totalPages = st.doc->GetTotalPages();
+					const int clampedPage = max(0, min(st.savedPage, totalPages - 1));
+					st.doc->SetCurrentPage(clampedPage);
+					st.doc->RestoreReadingZoom(st.savedZoomMode, st.savedCustomZoom, st.savedUniformScale);
+					st.doc->SetScrollPosition(st.savedScroll);
+					st.doc->SetLayoutMode(st.savedLayoutMode);
+
+					if (moved)
+					{
+						// 旋转角度已永久写回 PDF 的 /Rotate，清空阅读器附加旋转记录防止二次叠加
+						st.doc->SetUnsavedAnnotations(false);
+						AfxGetApp()->WriteProfileString(_T("ReadingPosition"),
+							ReadingStateKey(st.filePath) + _T("_Rotations"), _T(""));
+						SaveReadingPosition(st.doc);
+					}
+					else
+					{
+						st.doc->SetUnsavedAnnotations(st.savedUnsavedAnnots);
+						for (const auto& rotPair : st.savedRotations)
+						{
+							if (rotPair.first >= 0 && rotPair.first < totalPages)
+								st.doc->SetPageRotation(rotPair.first, rotPair.second);
+						}
+					}
+				}
+
+				if (st.wasActive && st.doc->IsOpen())
+				{
+					LoadDialogStateFromDocument(st.doc);
+					ClearSearchResults();
+					if (m_uniformScale <= 0.0f)
+						CalculatePagePositions(true);
+					else
+						CalculatePagePositions(m_zoomMode == ZOOM_FIT_WIDTH || m_zoomMode == ZOOM_FIT_PAGE);
+					UpdateScrollBar();
+					RenderVisiblePages();
+					UpdatePageControls();
+					UpdateStatusBar();
+				}
+			}
+			lockedDocs.clear();
+		},
+		errorMsg);
+
+	if (!savedOk)
+	{
+		MessageBox(errorMsg.IsEmpty() ? _T("保存 PDF 文件失败。") : errorMsg.GetString(),
+			_T("保存失败"), MB_OK | MB_ICONERROR);
+		UpdateDocumentDirtyTitle();
+		return false;
+	}
+
+	const bool savedInPlace = (normalizeFilePath(targetPath).CompareNoCase(
+		normalizeFilePath(pTargetDoc->GetFilePath())) == 0);
+	if (savedInPlace)
+	{
+		pTargetDoc->SetUnsavedAnnotations(false);
+		UpdateDocumentDirtyTitle();
+		SetStatusBarMessage(_T("已将批注与页面旋转成功写回原 PDF 文件"));
+	}
+	else
+	{
+		UpdateDocumentDirtyTitle();
+		CString msg;
+		msg.Format(_T("已另存批注与旋转至：%s"), targetPath.GetString());
+		SetStatusBarMessage(msg);
+		OpenPDFInNewTab(targetPath);
+	}
+	return true;
+}
+
+bool CXiaoGongPDFDlg::PromptSaveUnsavedAnnotations(CPDFDocument* pDoc)
+{
+	if (!pDoc || !pDoc->HasUnsavedAnnotations())
+		return true;
+
+	CString prompt;
+	prompt.Format(_T("文档 \"%s\" 含有未写回文件的 PDF 批注修改。\n\n是否在关闭前将批注（及当前页面旋转）保存回原 PDF 文件？"),
+		pDoc->GetFileName().GetString());
+	const int choice = MessageBox(prompt, _T("保存批注确认"),
+		MB_YESNOCANCEL | MB_ICONQUESTION);
+	if (choice == IDCANCEL)
+		return false;
+	if (choice == IDNO)
+	{
+		pDoc->SetUnsavedAnnotations(false);
+		return true;
+	}
+	return SaveDocumentEdits(pDoc, false);
 }

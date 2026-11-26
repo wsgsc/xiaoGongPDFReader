@@ -66,6 +66,8 @@ CPDFDocument::CPDFDocument()
 	, m_zoomMode(ZOOM_CUSTOM)
 	, m_customZoom(1.0f)
 	, m_uniformScale(0.0f)
+	, m_layoutMode(LAYOUT_SINGLE_CONTINUOUS)
+	, m_hasUnsavedAnnotations(false)
 	, m_pageBoundsCached(false)
 	, m_maxPageWidth(0.0f)
 	, m_panOffset(0, 0)
@@ -152,6 +154,8 @@ PDFOpenResult CPDFDocument::OpenDocument(const char* filename, const char* passw
 	m_customZoom = 1.0f;
 	m_zoom = 1.0f;
 	m_uniformScale = 0.0f;
+	m_layoutMode = LAYOUT_SINGLE_CONTINUOUS;
+	m_hasUnsavedAnnotations = false;
 	m_panOffset = CPoint(0, 0);
 	m_canDrag = false;
 	m_scrollPosition = 0;
@@ -194,6 +198,8 @@ void CPDFDocument::CloseDocument()
 	m_panOffset = CPoint(0, 0);
 	m_canDrag = false;
 	m_pageRotations.clear();
+	m_layoutMode = LAYOUT_SINGLE_CONTINUOUS;
+	m_hasUnsavedAnnotations = false;
 	m_pageZoomStates.clear();
 	m_scrollPosition = 0;
 	m_searchMatches.clear();
@@ -272,6 +278,18 @@ void CPDFDocument::SetPageRotation(int pageNumber, int rotation)
 
 	m_pageRotations[pageNumber] = rotation;
 	InvalidatePagesBoundsCache();
+}
+
+bool CPDFDocument::HasNonZeroPageRotations() const
+{
+	for (const auto& pair : m_pageRotations)
+	{
+		if (((pair.second % 360) + 360) % 360 != 0)
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 void CPDFDocument::InvalidatePagesBoundsCache()
@@ -393,6 +411,37 @@ void CPDFDocument::ClearPageCache()
 	}
 	m_pageCache.clear();
 	m_cacheOrder.clear();
+}
+
+void CPDFDocument::InvalidatePageRenderCache(int pageNumber)
+{
+	auto dlIt = m_displayLists.find(pageNumber);
+	if (dlIt != m_displayLists.end())
+	{
+		if (m_ctx && dlIt->second)
+		{
+			fz_drop_display_list(m_ctx, dlIt->second);
+		}
+		m_displayLists.erase(dlIt);
+		m_displayListOrder.remove(pageNumber);
+	}
+
+	for (auto it = m_pageCache.begin(); it != m_pageCache.end(); )
+	{
+		if (it->first.pageNumber == pageNumber)
+		{
+			if (it->second.hBitmap)
+			{
+				DeleteObject(it->second.hBitmap);
+			}
+			m_cacheOrder.remove(it->first);
+			it = m_pageCache.erase(it);
+		}
+		else
+		{
+			++it;
+		}
+	}
 }
 
 fz_display_list* CPDFDocument::GetDisplayList(int pageNumber)

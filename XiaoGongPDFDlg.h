@@ -14,8 +14,10 @@
 #include "CustomButton.h"
 #include "FileWatcher.h"
 #include "ModernTabCtrl.h"
+#include "PDFAnnotationHelper.h"
 #include "PDFDocument.h"
 #include "PDFImageExport.h"
+#include "PDFPropertiesDialog.h"
 #include "PDFScrollBar.h"
 #include "PDFSearch.h"
 #include "PDFViewCtrl.h"
@@ -48,6 +50,16 @@ public:
 	afx_msg void onMenuShortcuts();
 	afx_msg void OnMenuRegionCapture();
 	afx_msg void OnMenuExportImages();
+	afx_msg void OnMenuDocProperties();
+	afx_msg void OnMenuSavePdf();
+	afx_msg void OnMenuSavePdfAs();
+	afx_msg void OnMenuPageLayout(UINT nID);
+	afx_msg void OnBtnPageLayout();
+	afx_msg void OnBtnAnnotate();
+	afx_msg void OnMenuAnnotHighlight();
+	afx_msg void OnMenuAnnotUnderline();
+	afx_msg void OnMenuAnnotStrikeout();
+	afx_msg void OnMenuAnnotTextNote();
 
 	// 初始文件路径（从命令行参数传入）
 	CString m_initialFilePath;
@@ -87,7 +99,9 @@ private:
 	CCustomButton m_btnLast;
 	CCustomButton m_btnPrint;
 	CCustomButton m_btnSnapshot;
-	CStatic m_toolbarDividers[12];
+	CCustomButton m_btnPageLayout;
+	CCustomButton m_btnAnnotate;
+	CStatic m_toolbarDividers[16];
 	CCustomButton m_btnFullscreen;
 	CCustomButton m_btnRotateLeft;
 	CCustomButton m_btnRotateRight;
@@ -185,6 +199,7 @@ private:
 	// OnSize 防抖与页面预取定时器
 	static const UINT_PTR TIMER_ID_RESIZE_DEBOUNCE = 1002;
 	static const UINT_PTR TIMER_ID_PAGE_PREFETCH = 1003;
+	static const UINT_PTR TIMER_ID_ANNOT_CARET = 1004;
 	static const UINT RESIZE_DEBOUNCE_MS = 60;
 	static const UINT RESIZE_THROTTLE_MS = 33;
 	int m_pendingResizeCx;
@@ -261,6 +276,15 @@ private:
 	CFont m_captureBarFont;
 
 	// 文本选择相关
+	enum SelectionBarAction
+	{
+		SEL_BAR_NONE = -1,
+		SEL_BAR_COPY = 0,
+		SEL_BAR_HIGHLIGHT = 1,
+		SEL_BAR_UNDERLINE = 2,
+		SEL_BAR_NOTE = 3,
+		SEL_BAR_COUNT = 4
+	};
 	bool m_isSelecting;
 	bool m_hasSelection;
 	CPoint m_selStartView;
@@ -269,8 +293,13 @@ private:
 	fz_stext_page* m_selectionTextPage;
 	std::vector<fz_quad> m_selectionQuads;
 	CString m_selectedText;
+	CRect m_selectionActionRects[SEL_BAR_COUNT];
+	int m_hoverSelectionAction = SEL_BAR_NONE;
+	int m_pressedSelectionAction = SEL_BAR_NONE;
 
-	// 连续滚动模式相关
+	// 连续滚动与单双页并排布局相关
+	PageLayoutMode m_layoutMode = LAYOUT_SINGLE_CONTINUOUS;
+	static const int SPREAD_GAP = 14;
 	int m_scrollPosition;
 	int m_scrollPositionH;
 	int m_totalScrollHeight;
@@ -279,6 +308,8 @@ private:
 	static const int PAGE_SPACING = 10;
 	std::vector<int> m_pageYPositions;
 	std::vector<int> m_pageHeights;
+	std::vector<int> m_pageRowTops;
+	std::vector<int> m_pageRowHeights;
 	HBITMAP m_hContinuousViewBitmap;
 
 	// 搜索相关成员变量
@@ -356,6 +387,9 @@ protected:
 	void ApplyReadingMode(ReadingMode mode);
 	void UpdateOutlineButtonColors();
 	void UpdateSnapshotButtonColors();
+	void UpdatePageLayoutButton();
+	void UpdateAnnotateButtonColors();
+	void UpdateDocumentDirtyTitle();
 	COLORREF ViewBgColor() const { return m_readingMode == READING_NIGHT ? DARK_VIEW_BACKGROUND : PDF_VIEW_BACKGROUND; }
 	afx_msg void OnReadingMode(UINT nID);
 	void UpdatePageControls();
@@ -452,7 +486,7 @@ protected:
 	void UpdateTabWidth();
 	bool OpenPDFInNewTab(const CString& filePath, bool restoringSession = false);
 	void SwitchToDocument(int index);
-	void CloseDocument(int index);
+	bool CloseDocument(int index, bool promptUnsaved = true);
 	void CloseCurrentDocument();
 	void UpdateTabControl();
 	void RefreshDocumentLayout();
@@ -487,6 +521,14 @@ protected:
 	void ScrollToVerticalPosition(int position);
 	void ScrollToHorizontalPosition(int position);
 	int GetPageAtPosition(int yPos);
+	void GetLayoutRowPages(int pageNumber, int& outLeftPage, int& outRightPage) const;
+	bool IsSameLayoutRow(int pageA, int pageB) const;
+	int GetPrevSpreadPage(int pageNumber) const;
+	int GetNextSpreadPage(int pageNumber) const;
+	bool GetPageViewPlacement(int pageNumber, int viewWidth, int& outOffsetX, int& outOffsetY,
+		int* pOutWidth = nullptr, int* pOutHeight = nullptr);
+	int GetPageAtViewPoint(CPoint viewPt, bool allowNearestFallback = true);
+	void ApplyPageLayoutMode(PageLayoutMode mode);
 
 	// 搜索相关函数
 	void SearchPDF(const CString& keyword, bool caseSensitive);
@@ -534,6 +576,94 @@ protected:
 	void UpdateSelectedText();
 	void ClearSelection();
 	void InvalidateSelection();
+	bool IsSelectionActionBarVisible() const
+	{
+		return m_hasSelection && !m_isSelecting && !m_isAreaCaptureMode &&
+			!m_selectionQuads.empty();
+	}
+	void DrawSelectionActionBar(CDC* pDC, const CRect& clientRect);
+	int HitTestSelectionActionBar(CPoint viewPt) const;
+
+	// 批注与原文件保存辅助函数
+	enum InlineAnnotBarAction
+	{
+		INLINE_ANNOT_BTN_NONE = -1,
+		INLINE_ANNOT_BTN_COLOR = 0,
+		INLINE_ANNOT_BTN_FONT_INC = 1,
+		INLINE_ANNOT_BTN_FONT_DEC = 2,
+		INLINE_ANNOT_BTN_CHAR_SPACE_INC = 3,
+		INLINE_ANNOT_BTN_CHAR_SPACE_DEC = 4,
+		INLINE_ANNOT_BTN_DELETE = 5,
+		INLINE_ANNOT_BTN_EXIT = 6,
+		INLINE_ANNOT_BTN_COUNT = 7
+	};
+	static const int INLINE_ANNOT_SWATCH_COUNT = 8;
+
+	struct InlineTextAnnotState
+	{
+		bool active = false;
+		int pageNumber = -1;
+		int existingAnnotIndex = -1;
+		float localXPt = 72.0f;
+		float localYPt = 72.0f;
+		float widthPt = 135.0f;
+		bool userResizedWidth = false;
+		COLORREF color = RGB(0, 114, 206);
+		float fontSizePt = 12.0f;
+		float charSpacingPt = 0.0f;
+		bool colorPopupOpen = false;
+		bool draggingMove = false;
+		bool draggingResizeW = false;
+		bool selectingText = false;
+		int selectAnchorChar = 0;
+		CPoint dragStartView{ 0, 0 };
+		float dragStartLocalXPt = 0.0f;
+		float dragStartLocalYPt = 0.0f;
+		float dragStartWidthPt = 0.0f;
+		bool justCreatedFromMenu = false;
+		bool caretVisible = true;
+		CRect boxViewRect{ 0, 0, 0, 0 };
+		CRect moveHandleViewRect{ 0, 0, 0, 0 };
+		CRect resizeHandleViewRect{ 0, 0, 0, 0 };
+		CRect toolbarViewRect{ 0, 0, 0, 0 };
+		CRect toolbarBtnRects[INLINE_ANNOT_BTN_COUNT];
+		CRect colorPopupViewRect{ 0, 0, 0, 0 };
+		CRect colorSwatchRects[INLINE_ANNOT_SWATCH_COUNT];
+		int hoverToolbarBtn = INLINE_ANNOT_BTN_NONE;
+		int pressedToolbarBtn = INLINE_ANNOT_BTN_NONE;
+		int hoverColorSwatch = -1;
+		int pressedColorSwatch = -1;
+		bool hoverMoveHandle = false;
+		bool hoverResizeHandle = false;
+		bool hoverBorderMove = false;
+	};
+
+	COLORREF m_defaultAnnotTextColor = RGB(0, 114, 206);
+	float m_defaultAnnotFontSizePt = 12.0f;
+	float m_defaultAnnotCharSpacingPt = 0.0f;
+	CInlineAnnotEdit m_inlineAnnotEdit;
+	InlineTextAnnotState m_inlineAnnot;
+
+	bool IsInlineTextAnnotVisible() const { return m_inlineAnnot.active && m_doc != nullptr; }
+	void DrawInlineTextAnnotOverlay(CDC* pDC, const CRect& clientRect);
+	void StartInlineTextAnnotAt(int pageNumber, float fitzX, float fitzY,
+		const CString& initialText = CString(), bool fromToolbarMenu = false);
+	void StartInlineTextAnnotFromExisting(int pageNumber, const PageAnnotHitInfo& hitInfo);
+	void FinishInlineTextAnnot(bool discard = false);
+	void DeleteActiveInlineTextAnnot();
+	bool HitTestInlineAnnotMoveBorder(CPoint viewPt) const;
+	int HitTestInlineAnnotToolbar(CPoint viewPt) const;
+	int HitTestInlineAnnotColorSwatch(CPoint viewPt) const;
+	int HitTestInlineAnnotCharIndex(CPoint viewPt);
+	bool HandleInlineAnnotKeyNav(UINT vk, bool shift);
+	afx_msg void OnEnChangeInlineAnnotEdit();
+
+	void ApplySelectionMarkupAnnotation(enum pdf_annot_type annotType, COLORREF color, LPCTSTR actionName);
+	void PromptAddTextNoteAt(int pageNumber, float fitzX, float fitzY,
+		const CString& defaultText = CString(), bool fromToolbarMenu = false);
+	bool HitTestAnnotationAtViewPoint(CPoint viewPt, int& outPageNumber, PageAnnotHitInfo& outHit);
+	bool SaveDocumentEdits(CPDFDocument* pTargetDoc, bool saveAs);
+	bool PromptSaveUnsavedAnnotations(CPDFDocument* pDoc);
 
 public:
 	void CleanupBitmap();

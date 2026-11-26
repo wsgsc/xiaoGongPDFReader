@@ -75,6 +75,8 @@ void CShortcutsDialog::InitializeShortcutsList()
 	AddShortcut(_T("Ctrl + 0"), _T("恢复适合宽度缩放"));
 	AddShortcut(_T("空格 + 左键拖拽 / 中键拖拽"), _T("临时抓手拖动页面"));
 	AddShortcut(_T("Ctrl + C"), _T("复制选中的页面文本"));
+	AddShortcut(_T("Ctrl + H / Ctrl + U"), _T("对选中文本一键添加高亮 / 下划线批注"));
+	AddShortcut(_T("Ctrl + T"), _T("在页面添加可移动文字批注（支持颜色/字号/文字间距）"));
 	AddShortcut(_T("Ctrl + Shift + S"), _T("框选区域高清截图（复制或保存 PNG）"));
 	AddShortcut(_T("Ctrl + Shift + E"), _T("导出当前页/指定页为 PNG / JPG / 长图"));
 	AddShortcut(_T(""), _T(""));
@@ -85,7 +87,9 @@ void CShortcutsDialog::InitializeShortcutsList()
 	AddShortcut(_T("Esc"), _T("关闭搜索框 / 取消搜索 / 退出全屏"));
 	AddShortcut(_T(""), _T(""));
 
-	AddShortcut(_T("Ctrl + L / Ctrl + R"), _T("向左 / 向右旋转当前页 90 度"));
+	AddShortcut(_T("Ctrl + L / Ctrl + R"), _T("向左 / 向右旋转当前页 90 度（自动记忆）"));
+	AddShortcut(_T("Ctrl + S"), _T("将批注与页面旋转保存写回原 PDF"));
+	AddShortcut(_T("Ctrl + D"), _T("查看文档属性与当前页物理尺寸（幅面）"));
 	AddShortcut(_T("F9"), _T("显示 / 隐藏目录侧栏"));
 	AddShortcut(_T("F11"), _T("进入 / 退出全屏模式"));
 	AddShortcut(_T(""), _T(""));

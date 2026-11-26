@@ -54,7 +54,13 @@
     <ClInclude Include="PDFEditDialog.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="PDFAnnotationHelper.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="PDFImageExport.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="PDFPropertiesDialog.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="PDFScrollBar.h">
@@ -104,7 +110,13 @@
     <ClCompile Include="PDFEditDialog.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="PDFAnnotationHelper.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="PDFImageExport.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="PDFPropertiesDialog.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="PDFScrollBar.cpp">

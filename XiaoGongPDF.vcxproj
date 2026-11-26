@@ -211,9 +211,11 @@
     <ClInclude Include="ModernTabCtrl.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="FileWatcher.h" />
+    <ClInclude Include="PDFAnnotationHelper.h" />
     <ClInclude Include="PDFDocument.h" />
     <ClInclude Include="PDFEditDialog.h" />
     <ClInclude Include="PDFImageExport.h" />
+    <ClInclude Include="PDFPropertiesDialog.h" />
     <ClInclude Include="PDFScrollBar.h" />
     <ClInclude Include="PDFSearch.h" />
     <ClInclude Include="PDFViewCtrl.h" />
@@ -236,9 +238,11 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="FileWatcher.cpp" />
+    <ClCompile Include="PDFAnnotationHelper.cpp" />
     <ClCompile Include="PDFDocument.cpp" />
     <ClCompile Include="PDFEditDialog.cpp" />
     <ClCompile Include="PDFImageExport.cpp" />
+    <ClCompile Include="PDFPropertiesDialog.cpp" />
     <ClCompile Include="PDFScrollBar.cpp" />
     <ClCompile Include="PDFSearch.cpp" />
     <ClCompile Include="PDFViewCtrl.cpp" />

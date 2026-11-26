@@ -12,6 +12,12 @@
 
 enum ZoomMode { ZOOM_CUSTOM, ZOOM_FIT_WIDTH, ZOOM_FIT_PAGE };
 
+enum PageLayoutMode
+{
+	LAYOUT_SINGLE_CONTINUOUS = 0,
+	LAYOUT_TWO_PAGE_SPREAD = 1
+};
+
 enum class PDFOpenResult { Success, PasswordRequired, InvalidPassword, Failed };
 
 struct PageZoomState {
@@ -109,6 +115,13 @@ public:
 	int GetPageRotation(int pageNumber);
 	void SetPageRotation(int pageNumber, int rotation);
 	std::map<int, int>& GetPageRotations() { return m_pageRotations; }
+	bool HasNonZeroPageRotations() const;
+
+	PageLayoutMode GetLayoutMode() const { return m_layoutMode; }
+	void SetLayoutMode(PageLayoutMode mode) { m_layoutMode = mode; }
+
+	bool HasUnsavedAnnotations() const { return m_hasUnsavedAnnotations; }
+	void SetUnsavedAnnotations(bool unsaved) { m_hasUnsavedAnnotations = unsaved; }
 
 	bool CachePageseBounds(const std::atomic<bool>* cancelled = nullptr);
 	void InvalidatePagesBoundsCache();
@@ -134,6 +147,7 @@ public:
 	std::map<PageCacheKey, PageCacheItem>& GetPageCache() { return m_pageCache; }
 	std::list<PageCacheKey>& GetCacheOrder() { return m_cacheOrder; }
 	void ClearPageCache();
+	void InvalidatePageRenderCache(int pageNumber);
 	fz_display_list* GetDisplayList(int pageNumber);
 	void ClearDisplayLists();
 
@@ -164,6 +178,8 @@ private:
 	float m_uniformScale;
 
 	std::map<int, int> m_pageRotations;
+	PageLayoutMode m_layoutMode;
+	bool m_hasUnsavedAnnotations;
 
 	std::vector<PageBounds> m_pageBoundsCache;
 	bool m_pageBoundsCached;

@@ -79,10 +79,22 @@
 #define IDC_EXPORT_MODE_SEPARATE         1092
 #define IDC_EXPORT_MODE_LONG             1093
 #define IDC_BTN_EDIT_EXPORT_IMG          1094
+#define IDC_BTN_PAGE_LAYOUT              1095
+#define IDC_BTN_ANNOTATE                 1096
+#define IDC_DOC_PROPS_LIST               1097
+#define IDC_BTN_COPY_PROPS               1098
+#define IDC_ANNOT_NOTE_TEXT              1099
+#define IDC_ANNOT_STYLE_FREETEXT         1100
+#define IDC_ANNOT_STYLE_ICON             1101
+#define IDC_ANNOT_COLOR_COMBO            1102
+#define IDC_ANNOT_FONTSIZE_COMBO         1103
+#define IDC_INLINE_ANNOT_EDIT            1104
 #define IDD_PDF_EDIT_DIALOG             105
 #define IDD_PROGRESS_DIALOG             106
 #define IDD_PASSWORD_DIALOG             107
 #define IDD_EXPORT_IMAGE_DIALOG         108
+#define IDD_DOC_PROPERTIES_DIALOG       109
+#define IDD_ANNOT_NOTE_DIALOG           110
 #define IDC_PASSWORD_FILE               1073
 #define IDC_PASSWORD_PROMPT             1074
 #define IDC_EDIT_PASSWORD               1075
@@ -121,6 +133,15 @@
 #define ID_MENU_READING_EYE             32794
 #define ID_MENU_REGION_CAPTURE          32797
 #define ID_MENU_EXPORT_IMAGES           32798
+#define ID_MENU_DOC_PROPERTIES          32799
+#define ID_MENU_SAVE_PDF                32800
+#define ID_MENU_SAVE_PDF_AS             32801
+#define ID_MENU_LAYOUT_SINGLE           32802
+#define ID_MENU_LAYOUT_TWO_PAGE         32803
+#define ID_MENU_ANNOT_HIGHLIGHT         32805
+#define ID_MENU_ANNOT_UNDERLINE         32806
+#define ID_MENU_ANNOT_STRIKEOUT         32807
+#define ID_MENU_ANNOT_TEXT_NOTE         32808
 
 #define WM_PDF_LOAD_COMPLETE   (WM_USER + 104)
 #define WM_PDF_LOAD_CANCELLED  (WM_USER + 105)
@@ -132,8 +153,8 @@
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        137
-#define _APS_NEXT_COMMAND_VALUE         32799
-#define _APS_NEXT_CONTROL_VALUE         1095
+#define _APS_NEXT_COMMAND_VALUE         32809
+#define _APS_NEXT_CONTROL_VALUE         1105
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif
