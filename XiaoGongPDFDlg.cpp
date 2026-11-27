@@ -3948,34 +3948,6 @@ void CXiaoGongPDFDlg::OnBtnMore()
 		}
 	}
 
-	// PDF 批注与保存子菜单
-	CMenu annotMenu;
-	if (annotMenu.CreatePopupMenu())
-	{
-		const UINT selFlag = (m_doc && m_hasSelection && !m_selectionQuads.empty()) ? 0 : MF_GRAYED;
-		annotMenu.AppendMenu(MF_STRING | selFlag, ID_MENU_ANNOT_HIGHLIGHT, _T("高亮选中文本\tCtrl+H"));
-		annotMenu.AppendMenu(MF_STRING | selFlag, ID_MENU_ANNOT_UNDERLINE, _T("下划线选中文本\tCtrl+U"));
-		annotMenu.AppendMenu(MF_STRING | selFlag, ID_MENU_ANNOT_STRIKEOUT, _T("删除线选中文本"));
-		annotMenu.AppendMenu(MF_SEPARATOR);
-		annotMenu.AppendMenu(MF_STRING | docFlag, ID_MENU_ANNOT_TEXT_NOTE, _T("添加文字批注\tCtrl+T"));
-		annotMenu.AppendMenu(MF_SEPARATOR);
-		annotMenu.AppendMenu(MF_STRING | docFlag, ID_MENU_SAVE_PDF, _T("保存批注与旋转回原 PDF\tCtrl+S"));
-		annotMenu.AppendMenu(MF_STRING | docFlag, ID_MENU_SAVE_PDF_AS, _T("另存为新 PDF..."));
-		if (menu.AppendMenu(MF_POPUP, reinterpret_cast<UINT_PTR>(annotMenu.GetSafeHmenu()),
-			_T("PDF 批注")))
-		{
-			annotMenu.Detach();
-		}
-	}
-	menu.AppendMenu(MF_STRING | docFlag, ID_MENU_SAVE_PDF, _T("保存修改\tCtrl+S"));
-	menu.AppendMenu(MF_STRING | docFlag, ID_MENU_DOC_PROPERTIES, _T("文档属性与幅面...\tCtrl+D"));
-	menu.AppendMenu(MF_SEPARATOR);
-	menu.AppendMenu(MF_STRING | docFlag | (m_isAreaCaptureMode ? MF_CHECKED : 0),
-		ID_MENU_REGION_CAPTURE, _T("区域截图\tCtrl+Shift+S"));
-	menu.AppendMenu(MF_STRING | docFlag,
-		ID_MENU_EXPORT_IMAGES, _T("导出为图片...\tCtrl+Shift+E"));
-	menu.AppendMenu(MF_SEPARATOR);
-	menu.AppendMenu(MF_STRING, ID_MENU_SHORTCUTS, _T("快捷键"));
 	CMenu readingMenu;
 	if (readingMenu.CreatePopupMenu())
 	{
@@ -3986,9 +3958,12 @@ void CXiaoGongPDFDlg::OnBtnMore()
 			ID_MENU_READING_NORMAL + m_readingMode, MF_BYCOMMAND);
 		if (menu.AppendMenu(MF_POPUP, reinterpret_cast<UINT_PTR>(readingMenu.GetSafeHmenu()),
 			_T("阅读模式")))
+		{
 			readingMenu.Detach();
+		}
 	}
 	menu.AppendMenu(MF_SEPARATOR);
+	menu.AppendMenu(MF_STRING, ID_MENU_SHORTCUTS, _T("快捷键"));
 	menu.AppendMenu(MF_STRING, ID_MENU_SET_DEFAULT, _T("设为默认 PDF 阅读器"));
 	menu.AppendMenu(MF_SEPARATOR);
 	menu.AppendMenu(MF_STRING, ID_MENU_ABOUT, _T("关于"));

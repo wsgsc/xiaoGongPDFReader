@@ -12,7 +12,7 @@ constexpr UINT WM_TAB_CONTEXT_MENU    = WM_APP + 102; // wParam: tabIndex, lPara
 // - 圆角边框
 // - 渐变背景
 // - 悬停效果与完整路径提示
-// - 清晰的选中状态与左右拖拽排序
+// - 清晰的选中状态与拖拽移动窗口
 // - 可选的关闭按钮、中键关闭与右键菜单
 
 class CModernTabCtrl : public CTabCtrl
@@ -76,10 +76,8 @@ private:
 	BOOL m_bTracking;          // 是否正在跟踪鼠标
 	BOOL m_tabDragArmed;
 	BOOL m_tabDragging;
-	BOOL m_tabReordering;      // 是否正在左右拖拽调整标签顺序
 	int m_tabPressedIndex;
 	int m_middlePressedIndex;  // 中键按下的标签索引
-	CPoint m_tabPressClientPt; // 按下时的客户区坐标
 	CPoint m_tabDragStartScreen;
 	CRect m_tabDragStartWindow;
 	int m_scrollOffset;        // 标签溢出时的水平滚动偏移

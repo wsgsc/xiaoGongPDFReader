@@ -31,10 +31,8 @@ CModernTabCtrl::CModernTabCtrl()
 	, m_bTracking(FALSE)
 	, m_tabDragArmed(FALSE)
 	, m_tabDragging(FALSE)
-	, m_tabReordering(FALSE)
 	, m_tabPressedIndex(-1)
 	, m_middlePressedIndex(-1)
-	, m_tabPressClientPt(0, 0)
 	, m_tabDragStartScreen(0, 0)
 	, m_tabDragStartWindow(0, 0, 0, 0)
 	, m_scrollOffset(0)
@@ -498,7 +496,6 @@ void CModernTabCtrl::ResetDragState()
 {
 	m_tabDragArmed = FALSE;
 	m_tabDragging = FALSE;
-	m_tabReordering = FALSE;
 	m_tabPressedIndex = -1;
 	m_middlePressedIndex = -1;
 }
@@ -621,60 +618,6 @@ void CModernTabCtrl::OnMouseMove(UINT nFlags, CPoint point)
 			if (::GetCapture() == GetSafeHwnd())
 				::ReleaseCapture();
 		}
-		else if (m_tabPressedIndex >= 0 && GetItemCount() > 1)
-		{
-			// 多标签时，在标签上左右拖拽用于调整标签页顺序
-			const int dxClient = point.x - m_tabPressClientPt.x;
-			if (m_tabReordering || abs(dxClient) >= 8)
-			{
-				if (!m_tabReordering)
-				{
-					m_tabReordering = TRUE;
-					if (m_toolTip.GetSafeHwnd())
-					{
-						m_toolTip.Pop();
-						m_toolTip.Activate(FALSE);
-					}
-					if (GetCurSel() != m_tabPressedIndex)
-					{
-						SetCurSel(m_tabPressedIndex);
-						m_lastEnsuredSel = m_tabPressedIndex;
-						EnsureTabVisible(m_tabPressedIndex);
-						Invalidate(FALSE);
-						NMHDR notification = {};
-						notification.hwndFrom = GetSafeHwnd();
-						notification.idFrom = GetDlgCtrlID();
-						notification.code = TCN_SELCHANGE;
-						pParent->SendMessage(WM_NOTIFY, notification.idFrom,
-							reinterpret_cast<LPARAM>(&notification));
-					}
-				}
-
-				CRect clientRect;
-				GetClientRect(&clientRect);
-				const int tabCount = GetItemCount();
-				const int tabWidth = max(1, CalculateTabWidth(clientRect.Width(), tabCount));
-				const int rawTarget = max(0, min(tabCount - 1, (point.x + m_scrollOffset) / tabWidth));
-				if (rawTarget != m_tabPressedIndex)
-				{
-					const CRect targetRect = GetTabRect(rawTarget);
-					const int center = targetRect.CenterPoint().x;
-					const int threshold = tabWidth / 6;
-					const bool crossed = (rawTarget > m_tabPressedIndex) ?
-						(point.x >= center - threshold) : (point.x <= center + threshold);
-					if (crossed)
-					{
-						const int fromIndex = m_tabPressedIndex;
-						m_tabPressedIndex = rawTarget;
-						m_lastEnsuredSel = rawTarget;
-						pParent->SendMessage(WM_TAB_REORDER_REQUEST, fromIndex, rawTarget);
-						EnsureTabVisible(rawTarget);
-						Invalidate(FALSE);
-					}
-				}
-				return;
-			}
-		}
 		else
 		{
 			CPoint cursor;
@@ -683,7 +626,15 @@ void CModernTabCtrl::OnMouseMove(UINT nFlags, CPoint point)
 			const int dy = cursor.y - m_tabDragStartScreen.y;
 			if (m_tabDragging || dx * dx + dy * dy >= 25)
 			{
-				m_tabDragging = TRUE;
+				if (!m_tabDragging)
+				{
+					m_tabDragging = TRUE;
+					if (m_toolTip.GetSafeHwnd())
+					{
+						m_toolTip.Pop();
+						m_toolTip.Activate(FALSE);
+					}
+				}
 				if (pParent->IsZoomed())
 				{
 					const int startWidth = m_tabDragStartWindow.Width();
@@ -842,7 +793,6 @@ void CModernTabCtrl::OnLButtonDown(UINT nFlags, CPoint point)
 		return;
 	}
 	m_tabPressedIndex = HitTestTab(point);
-	m_tabPressClientPt = point;
 	::GetCursorPos(&m_tabDragStartScreen);
 	if (CWnd* pParent = GetParent())
 		pParent->GetWindowRect(&m_tabDragStartWindow);
@@ -854,7 +804,7 @@ void CModernTabCtrl::OnLButtonDown(UINT nFlags, CPoint point)
 
 void CModernTabCtrl::OnLButtonUp(UINT nFlags, CPoint point)
 {
-	const BOOL wasDragging = m_tabDragging || m_tabReordering;
+	const BOOL wasDragging = m_tabDragging;
 	const int pressedIndex = m_tabPressedIndex;
 	ResetDragState();
 	if (::GetCapture() == GetSafeHwnd())
