@@ -1063,6 +1063,463 @@ bool HitTestPageAnnotation(
 	return found;
 }
 
+namespace
+{
+	COLORREF DefaultAnnotSwatchColor(enum pdf_annot_type type)
+	{
+		switch (type)
+		{
+		case PDF_ANNOT_HIGHLIGHT:
+			return RGB(250, 204, 21);
+		case PDF_ANNOT_UNDERLINE:
+			return RGB(26, 115, 232);
+		case PDF_ANNOT_STRIKE_OUT:
+			return RGB(220, 45, 45);
+		case PDF_ANNOT_SQUIGGLY:
+			return RGB(234, 136, 24);
+		case PDF_ANNOT_FREE_TEXT:
+			return RGB(0, 114, 206);
+		case PDF_ANNOT_TEXT:
+			return RGB(245, 166, 35);
+		default:
+			return RGB(100, 116, 139);
+		}
+	}
+
+	COLORREF ExtractAnnotDisplayColor(fz_context* pCtx, pdf_annot* pAnnot, enum pdf_annot_type type)
+	{
+		if (type == PDF_ANNOT_FREE_TEXT)
+		{
+			COLORREF ftCol = RGB(0, 114, 206);
+			float ftSize = 12.0f;
+			float ftSpace = 0.0f;
+			ParseFreeTextStyle(pCtx, pAnnot, ftCol, ftSize, ftSpace);
+			return ftCol;
+		}
+
+		pdf_obj* pAnnotObj = pdf_annot_obj(pCtx, pAnnot);
+		pdf_obj* pColorArr = pAnnotObj ? pdf_dict_get(pCtx, pAnnotObj, PDF_NAME(C)) : nullptr;
+		if (pColorArr && pdf_is_array(pCtx, pColorArr))
+		{
+			const int n = pdf_array_len(pCtx, pColorArr);
+			if (n == 3)
+			{
+				const float r = max(0.0f, min(1.0f, pdf_to_real(pCtx, pdf_array_get(pCtx, pColorArr, 0))));
+				const float g = max(0.0f, min(1.0f, pdf_to_real(pCtx, pdf_array_get(pCtx, pColorArr, 1))));
+				const float b = max(0.0f, min(1.0f, pdf_to_real(pCtx, pdf_array_get(pCtx, pColorArr, 2))));
+				return RGB(static_cast<int>(r * 255.0f + 0.5f),
+					static_cast<int>(g * 255.0f + 0.5f),
+					static_cast<int>(b * 255.0f + 0.5f));
+			}
+			if (n == 1)
+			{
+				const float gray = max(0.0f, min(1.0f, pdf_to_real(pCtx, pdf_array_get(pCtx, pColorArr, 0))));
+				const int v = static_cast<int>(gray * 255.0f + 0.5f);
+				return RGB(v, v, v);
+			}
+			if (n == 4)
+			{
+				const float c = max(0.0f, min(1.0f, pdf_to_real(pCtx, pdf_array_get(pCtx, pColorArr, 0))));
+				const float m = max(0.0f, min(1.0f, pdf_to_real(pCtx, pdf_array_get(pCtx, pColorArr, 1))));
+				const float y = max(0.0f, min(1.0f, pdf_to_real(pCtx, pdf_array_get(pCtx, pColorArr, 2))));
+				const float k = max(0.0f, min(1.0f, pdf_to_real(pCtx, pdf_array_get(pCtx, pColorArr, 3))));
+				const float r = (1.0f - c) * (1.0f - k);
+				const float g = (1.0f - m) * (1.0f - k);
+				const float b = (1.0f - y) * (1.0f - k);
+				return RGB(static_cast<int>(r * 255.0f + 0.5f),
+					static_cast<int>(g * 255.0f + 0.5f),
+					static_cast<int>(b * 255.0f + 0.5f));
+			}
+		}
+		return DefaultAnnotSwatchColor(type);
+	}
+
+	bool IsMarkupTextAnnot(enum pdf_annot_type type)
+	{
+		return type == PDF_ANNOT_HIGHLIGHT ||
+			type == PDF_ANNOT_UNDERLINE ||
+			type == PDF_ANNOT_STRIKE_OUT ||
+			type == PDF_ANNOT_SQUIGGLY;
+	}
+
+	std::string ExtractTextUnderRects(fz_stext_page* pTextPage, const std::vector<fz_rect>& targetRects)
+	{
+		if (!pTextPage || targetRects.empty())
+			return std::string();
+
+		std::string utf8;
+		utf8.reserve(160);
+		int charCollected = 0;
+		bool needLineSpace = false;
+
+		for (fz_stext_block* pBlock = pTextPage->first_block; pBlock && charCollected < 140; pBlock = pBlock->next)
+		{
+			if (pBlock->type != FZ_STEXT_BLOCK_TEXT)
+				continue;
+
+			for (fz_stext_line* pLine = pBlock->u.t.first_line; pLine && charCollected < 140; pLine = pLine->next)
+			{
+				bool lineMayOverlap = false;
+				for (const fz_rect& tr : targetRects)
+				{
+					if (pLine->bbox.x1 >= tr.x0 && pLine->bbox.x0 <= tr.x1 &&
+						pLine->bbox.y1 >= tr.y0 && pLine->bbox.y0 <= tr.y1)
+					{
+						lineMayOverlap = true;
+						break;
+					}
+				}
+				if (!lineMayOverlap)
+					continue;
+
+				bool matchedInThisLine = false;
+				for (fz_stext_char* pCh = pLine->first_char; pCh && charCollected < 140; pCh = pCh->next)
+				{
+					const fz_rect cr = fz_rect_from_quad(pCh->quad);
+					const float cx = (cr.x0 + cr.x1) * 0.5f;
+					const float cy = (cr.y0 + cr.y1) * 0.5f;
+					bool hit = false;
+					for (const fz_rect& tr : targetRects)
+					{
+						if (cx >= tr.x0 && cx <= tr.x1 && cy >= tr.y0 && cy <= tr.y1)
+						{
+							hit = true;
+							break;
+						}
+					}
+					if (hit)
+					{
+						if (needLineSpace && !matchedInThisLine && !utf8.empty())
+						{
+							const unsigned char lastByte = static_cast<unsigned char>(utf8.back());
+							if (lastByte < 0x80 && lastByte != ' ')
+								utf8.push_back(' ');
+						}
+						char encoded[8] = {};
+						const int len = fz_runetochar(encoded, pCh->c);
+						if (len > 0)
+						{
+							utf8.append(encoded, static_cast<size_t>(len));
+							++charCollected;
+							matchedInThisLine = true;
+						}
+					}
+				}
+				if (matchedInThisLine)
+					needLineSpace = true;
+			}
+		}
+
+		if (charCollected >= 140)
+			utf8 += "...";
+		return utf8;
+	}
+}
+
+bool GetPageAnnotationInfoAt(
+	CPDFDocument* pDoc,
+	int pageNumber,
+	int annotIndex,
+	PageAnnotHitInfo& outHit)
+{
+	outHit = PageAnnotHitInfo{};
+	if (!pDoc || !pDoc->IsOpen() || annotIndex < 0 ||
+		pageNumber < 0 || pageNumber >= pDoc->GetTotalPages())
+	{
+		return false;
+	}
+
+	fz_context* pCtx = pDoc->GetContext();
+	fz_document* pFzDoc = pDoc->GetDocument();
+	if (!pCtx || !pFzDoc)
+		return false;
+
+	pdf_page* pPdfPage = nullptr;
+	bool found = false;
+	enum pdf_annot_type hitType = PDF_ANNOT_UNKNOWN;
+	fz_rect hitRect = { 0.0f, 0.0f, 0.0f, 0.0f };
+	COLORREF hitColor = RGB(0, 114, 206);
+	float hitFontSize = 12.0f;
+	float hitCharSpacing = 0.0f;
+	std::string hitContentsUtf8;
+
+	fz_var(pPdfPage);
+	fz_var(found);
+	fz_var(hitType);
+	fz_var(hitRect);
+	fz_var(hitColor);
+	fz_var(hitFontSize);
+	fz_var(hitCharSpacing);
+
+	fz_try(pCtx)
+	{
+		pdf_document* pPdfDoc = pdf_document_from_fz_document(pCtx, pFzDoc);
+		if (pPdfDoc)
+		{
+			pPdfPage = pdf_load_page(pCtx, pPdfDoc, pageNumber);
+			int idx = 0;
+			for (pdf_annot* pAnnot = pdf_first_annot(pCtx, pPdfPage);
+				pAnnot != nullptr;
+				pAnnot = pdf_next_annot(pCtx, pAnnot), ++idx)
+			{
+				if (idx != annotIndex)
+					continue;
+				hitType = pdf_annot_type(pCtx, pAnnot);
+				if (hitType == PDF_ANNOT_LINK || hitType == PDF_ANNOT_POPUP || hitType == PDF_ANNOT_WIDGET)
+					break;
+				hitRect = pdf_bound_annot(pCtx, pAnnot);
+				const char* pText = pdf_annot_contents(pCtx, pAnnot);
+				hitContentsUtf8 = pText ? pText : "";
+				if (hitType == PDF_ANNOT_FREE_TEXT)
+					ParseFreeTextStyle(pCtx, pAnnot, hitColor, hitFontSize, hitCharSpacing);
+				else
+					hitColor = ExtractAnnotDisplayColor(pCtx, pAnnot, hitType);
+				found = true;
+				break;
+			}
+		}
+	}
+	fz_always(pCtx)
+	{
+		if (pPdfPage)
+			pdf_drop_page(pCtx, pPdfPage);
+	}
+	fz_catch(pCtx)
+	{
+		found = false;
+	}
+
+	if (found)
+	{
+		outHit.annotIndex = annotIndex;
+		outHit.type = hitType;
+		outHit.fitzBounds = hitRect;
+		outHit.contents = Utf8ToWide(hitContentsUtf8.c_str());
+		outHit.typeLabel = AnnotTypeDisplayName(hitType);
+		outHit.textColor = hitColor;
+		outHit.fontSizePt = hitFontSize;
+		outHit.charSpacingPt = hitCharSpacing;
+	}
+	return found;
+}
+
+bool CollectDocumentAnnotations(
+	CPDFDocument* pDoc,
+	CCriticalSection* pRenderLock,
+	std::vector<DocumentAnnotationItem>& outItems)
+{
+	outItems.clear();
+	if (!pDoc || !pDoc->IsOpen())
+		return false;
+
+	fz_context* pCtx = pDoc->GetContext();
+	fz_document* pFzDoc = pDoc->GetDocument();
+	const int totalPages = pDoc->GetTotalPages();
+	if (!pCtx || !pFzDoc || totalPages <= 0)
+		return false;
+
+	struct RawAnnotRecord
+	{
+		int pageNumber = -1;
+		int annotIndex = -1;
+		enum pdf_annot_type type = PDF_ANNOT_UNKNOWN;
+		fz_rect fitzBounds = { 0.0f, 0.0f, 0.0f, 0.0f };
+		COLORREF color = RGB(250, 204, 21);
+		float fontSizePt = 12.0f;
+		float charSpacingPt = 0.0f;
+		std::string contentsUtf8;
+		std::string quotedUtf8;
+		std::vector<fz_rect> hitTextRects;
+	};
+	std::vector<RawAnnotRecord> rawRecords;
+
+	CSingleLock lock(pRenderLock, pRenderLock != nullptr);
+
+	pdf_document* pPdfDoc = nullptr;
+	fz_var(pPdfDoc);
+	fz_try(pCtx)
+	{
+		pPdfDoc = pdf_document_from_fz_document(pCtx, pFzDoc);
+	}
+	fz_catch(pCtx)
+	{
+		pPdfDoc = nullptr;
+	}
+	if (!pPdfDoc)
+		return true;
+
+	for (int pageIdx = 0; pageIdx < totalPages; ++pageIdx)
+	{
+		// 快速预筛选页面字典中的 /Annots，跳过无用户批注的绝大多数普通页面（千页文档毫秒级完成）
+		bool mayHaveUserAnnot = false;
+		fz_matrix pageTransform = fz_identity;
+		fz_var(mayHaveUserAnnot);
+		fz_var(pageTransform);
+
+		fz_try(pCtx)
+		{
+			pdf_obj* pPageObj = pdf_lookup_page_obj(pCtx, pPdfDoc, pageIdx);
+			pdf_obj* pAnnots = pPageObj ? pdf_dict_gets(pCtx, pPageObj, "Annots") : nullptr;
+			if (pAnnots && pdf_is_array(pCtx, pAnnots))
+			{
+				const int arrLen = pdf_array_len(pCtx, pAnnots);
+				for (int i = 0; i < arrLen; ++i)
+				{
+					pdf_obj* pItem = pdf_array_get(pCtx, pAnnots, i);
+					pdf_obj* pSub = pItem ? pdf_dict_gets(pCtx, pItem, "Subtype") : nullptr;
+					const char* pSubName = pSub ? pdf_to_name(pCtx, pSub) : nullptr;
+					if (!pSubName ||
+						std::strcmp(pSubName, "Link") == 0 ||
+						std::strcmp(pSubName, "Popup") == 0 ||
+						std::strcmp(pSubName, "Widget") == 0)
+					{
+						continue;
+					}
+					mayHaveUserAnnot = true;
+					break;
+				}
+				if (mayHaveUserAnnot)
+				{
+					fz_rect pageBox = {};
+					pdf_page_obj_transform(pCtx, pPageObj, &pageBox, &pageTransform);
+				}
+			}
+		}
+		fz_catch(pCtx)
+		{
+			mayHaveUserAnnot = false;
+		}
+
+		if (!mayHaveUserAnnot)
+			continue;
+
+		const size_t firstRecordOnPage = rawRecords.size();
+		bool needStextForMarkup = false;
+		pdf_page* pPdfPage = nullptr;
+		fz_stext_page* pStext = nullptr;
+		fz_var(pPdfPage);
+		fz_var(pStext);
+		fz_var(needStextForMarkup);
+
+		fz_try(pCtx)
+		{
+			pPdfPage = pdf_load_page(pCtx, pPdfDoc, pageIdx);
+			int annotIdx = 0;
+			for (pdf_annot* pAnnot = pdf_first_annot(pCtx, pPdfPage);
+				pAnnot != nullptr;
+				pAnnot = pdf_next_annot(pCtx, pAnnot), ++annotIdx)
+			{
+				const enum pdf_annot_type t = pdf_annot_type(pCtx, pAnnot);
+				if (t == PDF_ANNOT_LINK || t == PDF_ANNOT_POPUP || t == PDF_ANNOT_WIDGET)
+					continue;
+				if ((pdf_annot_flags(pCtx, pAnnot) & PDF_ANNOT_IS_HIDDEN) != 0)
+					continue;
+
+				RawAnnotRecord rec;
+				rec.pageNumber = pageIdx;
+				rec.annotIndex = annotIdx;
+				rec.type = t;
+				rec.fitzBounds = pdf_bound_annot(pCtx, pAnnot);
+				const char* pContents = pdf_annot_contents(pCtx, pAnnot);
+				if (pContents && *pContents)
+					rec.contentsUtf8 = pContents;
+
+				if (t == PDF_ANNOT_FREE_TEXT)
+				{
+					ParseFreeTextStyle(pCtx, pAnnot, rec.color, rec.fontSizePt, rec.charSpacingPt);
+				}
+				else
+				{
+					rec.color = ExtractAnnotDisplayColor(pCtx, pAnnot, t);
+				}
+
+				if (IsMarkupTextAnnot(t))
+				{
+					pdf_obj* pAnnotObj = pdf_annot_obj(pCtx, pAnnot);
+					pdf_obj* pQuads = pAnnotObj ? pdf_dict_gets(pCtx, pAnnotObj, "QuadPoints") : nullptr;
+					if (pQuads && pdf_is_array(pCtx, pQuads))
+					{
+						const int qLen = pdf_array_len(pCtx, pQuads);
+						for (int q = 0; q + 7 < qLen; q += 8)
+						{
+							fz_point pts[4];
+							for (int p = 0; p < 4; ++p)
+							{
+								const float px = pdf_to_real(pCtx, pdf_array_get(pCtx, pQuads, q + p * 2));
+								const float py = pdf_to_real(pCtx, pdf_array_get(pCtx, pQuads, q + p * 2 + 1));
+								pts[p] = fz_transform_point(fz_make_point(px, py), pageTransform);
+							}
+							float minX = pts[0].x, maxX = pts[0].x;
+							float minY = pts[0].y, maxY = pts[0].y;
+							for (int p = 1; p < 4; ++p)
+							{
+								minX = min(minX, pts[p].x);
+								maxX = max(maxX, pts[p].x);
+								minY = min(minY, pts[p].y);
+								maxY = max(maxY, pts[p].y);
+							}
+							const float insetY = (maxY - minY) * 0.12f;
+							rec.hitTextRects.push_back(fz_make_rect(minX, minY + insetY, maxX, maxY - insetY));
+						}
+					}
+					if (rec.hitTextRects.empty())
+						rec.hitTextRects.push_back(rec.fitzBounds);
+					needStextForMarkup = true;
+				}
+
+				rawRecords.push_back(std::move(rec));
+			}
+
+			if (needStextForMarkup && rawRecords.size() > firstRecordOnPage)
+			{
+				pStext = fz_new_stext_page_from_page(pCtx, &pPdfPage->super, nullptr);
+				if (pStext)
+				{
+					for (size_t rIdx = firstRecordOnPage; rIdx < rawRecords.size(); ++rIdx)
+					{
+						if (IsMarkupTextAnnot(rawRecords[rIdx].type))
+						{
+							rawRecords[rIdx].quotedUtf8 =
+								ExtractTextUnderRects(pStext, rawRecords[rIdx].hitTextRects);
+						}
+					}
+				}
+			}
+		}
+		fz_always(pCtx)
+		{
+			if (pStext)
+				fz_drop_stext_page(pCtx, pStext);
+			if (pPdfPage)
+				pdf_drop_page(pCtx, pPdfPage);
+		}
+		fz_catch(pCtx)
+		{
+			// 单页异常不影响后续页面批注汇总
+		}
+	}
+
+	outItems.reserve(rawRecords.size());
+	for (const RawAnnotRecord& raw : rawRecords)
+	{
+		DocumentAnnotationItem item;
+		item.pageNumber = raw.pageNumber;
+		item.annotIndex = raw.annotIndex;
+		item.type = raw.type;
+		item.fitzBounds = raw.fitzBounds;
+		item.color = raw.color;
+		item.fontSizePt = raw.fontSizePt;
+		item.charSpacingPt = raw.charSpacingPt;
+		item.typeLabel = AnnotTypeDisplayName(raw.type);
+		item.contents = Utf8ToWide(raw.contentsUtf8.c_str());
+		item.contents.Trim();
+		item.quotedText = Utf8ToWide(raw.quotedUtf8.c_str());
+		item.quotedText.Trim();
+		outItems.push_back(std::move(item));
+	}
+	return true;
+}
+
 bool UpdatePageAnnotationContents(
 	CPDFDocument* pDoc,
 	int pageNumber,

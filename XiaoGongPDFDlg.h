@@ -20,6 +20,7 @@
 #include "PDFPropertiesDialog.h"
 #include "PDFScrollBar.h"
 #include "PDFSearch.h"
+#include "PDFSidebarPanel.h"
 #include "PDFViewCtrl.h"
 #include "SearchTypes.h"
 #include "ShortcutsDialog.h"
@@ -60,6 +61,7 @@ public:
 	afx_msg void OnMenuAnnotUnderline();
 	afx_msg void OnMenuAnnotStrikeout();
 	afx_msg void OnMenuAnnotTextNote();
+	afx_msg void OnMenuSidebarTab(UINT nID);
 
 	// 初始文件路径（从命令行参数传入）
 	CString m_initialFilePath;
@@ -75,7 +77,13 @@ protected:
 
 private:
 	CModernTabCtrl m_tabCtrl;
+	CPDFSidebarHeaderWnd m_sidebarHeader;
 	CTreeCtrl m_outlineTree;
+	CPDFThumbnailListWnd m_thumbnailListWnd;
+	CPDFAnnotationListWnd m_annotListWnd;
+	SidebarTabMode m_sidebarTab = SIDEBAR_TAB_OUTLINE;
+	bool m_currentDocHasOutline = false;
+	CPDFDocument* m_sidebarSyncedDoc = nullptr;
 	CListCtrl m_searchResultsList;
 	CStatic m_searchResultsHeader;
 	CCustomButton m_btnCloseSearchResults;
@@ -664,6 +672,22 @@ protected:
 	bool HitTestAnnotationAtViewPoint(CPoint viewPt, int& outPageNumber, PageAnnotHitInfo& outHit);
 	bool SaveDocumentEdits(CPDFDocument* pTargetDoc, bool saveAs);
 	bool PromptSaveUnsavedAnnotations(CPDFDocument* pDoc);
+
+	// 侧边栏（目录 / 缩略图 / 批注列表）相关函数
+	void SwitchSidebarTab(SidebarTabMode tab, bool saveToDoc = true);
+	void OpenSidebarTab(SidebarTabMode tab);
+	void SyncSidebarForActiveDocument();
+	void RefreshAnnotationsSidebar();
+	void UpdateSidebarWindowsVisibility(bool allowVisible);
+	bool QueryOrRenderPageThumbnail(int pageIndex, int maxWidth, int maxHeight,
+		HBITMAP& outBitmap, CSize& outPagePxSize, bool renderIfMissing);
+	void RotateSpecificPage(int pageIndex, int degrees);
+	void CopySpecificPageAsImage(int pageIndex);
+	void ShowThumbnailContextMenu(int pageIndex, CPoint screenPt);
+	void NavigateToSidebarAnnotation(const DocumentAnnotationItem& item);
+	void EditSidebarAnnotation(const DocumentAnnotationItem& item);
+	void DeleteSidebarAnnotation(const DocumentAnnotationItem& item);
+	void ShowSidebarAnnotationContextMenu(const DocumentAnnotationItem& item, CPoint screenPt);
 
 public:
 	void CleanupBitmap();

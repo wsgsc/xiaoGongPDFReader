@@ -218,6 +218,7 @@
     <ClInclude Include="PDFPropertiesDialog.h" />
     <ClInclude Include="PDFScrollBar.h" />
     <ClInclude Include="PDFSearch.h" />
+    <ClInclude Include="PDFSidebarPanel.h" />
     <ClInclude Include="PDFViewCtrl.h" />
     <ClInclude Include="ProgressDlg.h" />
     <ClInclude Include="Resource.h" />
@@ -245,6 +246,7 @@
     <ClCompile Include="PDFPropertiesDialog.cpp" />
     <ClCompile Include="PDFScrollBar.cpp" />
     <ClCompile Include="PDFSearch.cpp" />
+    <ClCompile Include="PDFSidebarPanel.cpp" />
     <ClCompile Include="PDFViewCtrl.cpp" />
     <ClCompile Include="ProgressDlg.cpp" />
     <ClCompile Include="ShortcutsDialog.cpp" />

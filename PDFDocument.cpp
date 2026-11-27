@@ -67,6 +67,7 @@ CPDFDocument::CPDFDocument()
 	, m_customZoom(1.0f)
 	, m_uniformScale(0.0f)
 	, m_layoutMode(LAYOUT_SINGLE_CONTINUOUS)
+	, m_sidebarTab(SIDEBAR_TAB_AUTO)
 	, m_hasUnsavedAnnotations(false)
 	, m_pageBoundsCached(false)
 	, m_maxPageWidth(0.0f)
@@ -155,6 +156,7 @@ PDFOpenResult CPDFDocument::OpenDocument(const char* filename, const char* passw
 	m_zoom = 1.0f;
 	m_uniformScale = 0.0f;
 	m_layoutMode = LAYOUT_SINGLE_CONTINUOUS;
+	m_sidebarTab = SIDEBAR_TAB_AUTO;
 	m_hasUnsavedAnnotations = false;
 	m_panOffset = CPoint(0, 0);
 	m_canDrag = false;
@@ -174,6 +176,7 @@ PDFOpenResult CPDFDocument::OpenDocument(const char* filename, const char* passw
 void CPDFDocument::CloseDocument()
 {
 	ClearPageCache();
+	ClearThumbnailCache();
 	ClearDisplayLists();
 
 	if (m_doc && m_ctx)
@@ -199,6 +202,7 @@ void CPDFDocument::CloseDocument()
 	m_canDrag = false;
 	m_pageRotations.clear();
 	m_layoutMode = LAYOUT_SINGLE_CONTINUOUS;
+	m_sidebarTab = SIDEBAR_TAB_AUTO;
 	m_hasUnsavedAnnotations = false;
 	m_pageZoomStates.clear();
 	m_scrollPosition = 0;
@@ -413,6 +417,61 @@ void CPDFDocument::ClearPageCache()
 	m_cacheOrder.clear();
 }
 
+HBITMAP CPDFDocument::FindCachedThumbnail(const PageCacheKey& key)
+{
+	auto it = m_thumbnailCache.find(key);
+	if (it == m_thumbnailCache.end() || !it->second.hBitmap)
+		return nullptr;
+
+	m_thumbnailCacheOrder.remove(key);
+	m_thumbnailCacheOrder.push_back(key);
+	return it->second.hBitmap;
+}
+
+void CPDFDocument::PutCachedThumbnail(const PageCacheKey& key, HBITMAP hBitmap)
+{
+	if (!hBitmap)
+		return;
+
+	auto existing = m_thumbnailCache.find(key);
+	if (existing != m_thumbnailCache.end())
+	{
+		if (existing->second.hBitmap && existing->second.hBitmap != hBitmap)
+			DeleteObject(existing->second.hBitmap);
+		existing->second.hBitmap = hBitmap;
+		m_thumbnailCacheOrder.remove(key);
+	}
+	else
+	{
+		m_thumbnailCache[key] = PageCacheItem{ hBitmap };
+	}
+	m_thumbnailCacheOrder.push_back(key);
+
+	while ((int)m_thumbnailCacheOrder.size() > THUMBNAIL_CACHE_LIMIT)
+	{
+		PageCacheKey oldest = m_thumbnailCacheOrder.front();
+		m_thumbnailCacheOrder.pop_front();
+		auto oldIt = m_thumbnailCache.find(oldest);
+		if (oldIt != m_thumbnailCache.end())
+		{
+			if (oldIt->second.hBitmap)
+				DeleteObject(oldIt->second.hBitmap);
+			m_thumbnailCache.erase(oldIt);
+		}
+	}
+}
+
+void CPDFDocument::ClearThumbnailCache()
+{
+	for (auto& pair : m_thumbnailCache)
+	{
+		if (pair.second.hBitmap)
+			DeleteObject(pair.second.hBitmap);
+	}
+	m_thumbnailCache.clear();
+	m_thumbnailCacheOrder.clear();
+}
+
 void CPDFDocument::InvalidatePageRenderCache(int pageNumber)
 {
 	auto dlIt = m_displayLists.find(pageNumber);
@@ -436,6 +495,23 @@ void CPDFDocument::InvalidatePageRenderCache(int pageNumber)
 			}
 			m_cacheOrder.remove(it->first);
 			it = m_pageCache.erase(it);
+		}
+		else
+		{
+			++it;
+		}
+	}
+
+	for (auto it = m_thumbnailCache.begin(); it != m_thumbnailCache.end(); )
+	{
+		if (it->first.pageNumber == pageNumber)
+		{
+			if (it->second.hBitmap)
+			{
+				DeleteObject(it->second.hBitmap);
+			}
+			m_thumbnailCacheOrder.remove(it->first);
+			it = m_thumbnailCache.erase(it);
 		}
 		else
 		{

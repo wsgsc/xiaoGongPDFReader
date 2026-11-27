@@ -5,6 +5,7 @@
 
 #include <afxwin.h>
 #include <afxdialogex.h>
+#include <afxmt.h>
 #include <functional>
 #include <map>
 #include <vector>
@@ -23,6 +24,21 @@ struct PageAnnotHitInfo
 	CString contents;
 	CString typeLabel;
 	COLORREF textColor = RGB(0, 114, 206);
+	float fontSizePt = 12.0f;
+	float charSpacingPt = 0.0f;
+};
+
+// 全文档侧边栏批注汇总条目
+struct DocumentAnnotationItem
+{
+	int pageNumber = -1;
+	int annotIndex = -1;
+	enum pdf_annot_type type = PDF_ANNOT_UNKNOWN;
+	fz_rect fitzBounds = { 0.0f, 0.0f, 0.0f, 0.0f };
+	COLORREF color = RGB(255, 212, 59);
+	CString typeLabel;
+	CString contents;
+	CString quotedText;
 	float fontSizePt = 12.0f;
 	float charSpacingPt = 0.0f;
 };
@@ -109,6 +125,19 @@ bool HitTestPageAnnotation(
 	float fitzX,
 	float fitzY,
 	PageAnnotHitInfo& outHit);
+
+// 按页面与批注序号精确读取单个批注详情（供侧边栏批注列表点击/双击编辑使用）
+bool GetPageAnnotationInfoAt(
+	CPDFDocument* pDoc,
+	int pageNumber,
+	int annotIndex,
+	PageAnnotHitInfo& outHit);
+
+// 扫描收集整份文档中的所有用户批注（供侧边栏批注汇总列表使用）
+bool CollectDocumentAnnotations(
+	CPDFDocument* pDoc,
+	CCriticalSection* pRenderLock,
+	std::vector<DocumentAnnotationItem>& outItems);
 
 // 修改已有批注的文本内容
 bool UpdatePageAnnotationContents(

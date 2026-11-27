@@ -90,7 +90,7 @@ void CShortcutsDialog::InitializeShortcutsList()
 	AddShortcut(_T("Ctrl + L / Ctrl + R"), _T("向左 / 向右旋转当前页 90 度（自动记忆）"));
 	AddShortcut(_T("Ctrl + S"), _T("将批注与页面旋转保存写回原 PDF"));
 	AddShortcut(_T("Ctrl + D"), _T("查看文档属性与当前页物理尺寸（幅面）"));
-	AddShortcut(_T("F9"), _T("显示 / 隐藏目录侧栏"));
+	AddShortcut(_T("F9"), _T("显示 / 隐藏侧栏（目录 / 缩略图 / 批注列表）"));
 	AddShortcut(_T("F11"), _T("进入 / 退出全屏模式"));
 	AddShortcut(_T(""), _T(""));
 

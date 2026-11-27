@@ -18,6 +18,14 @@ enum PageLayoutMode
 	LAYOUT_TWO_PAGE_SPREAD = 1
 };
 
+enum SidebarTabMode
+{
+	SIDEBAR_TAB_AUTO = -1,
+	SIDEBAR_TAB_OUTLINE = 0,
+	SIDEBAR_TAB_THUMBNAILS = 1,
+	SIDEBAR_TAB_ANNOTATIONS = 2
+};
+
 enum class PDFOpenResult { Success, PasswordRequired, InvalidPassword, Failed };
 
 struct PageZoomState {
@@ -120,6 +128,9 @@ public:
 	PageLayoutMode GetLayoutMode() const { return m_layoutMode; }
 	void SetLayoutMode(PageLayoutMode mode) { m_layoutMode = mode; }
 
+	SidebarTabMode GetSidebarTab() const { return m_sidebarTab; }
+	void SetSidebarTab(SidebarTabMode mode) { m_sidebarTab = mode; }
+
 	bool HasUnsavedAnnotations() const { return m_hasUnsavedAnnotations; }
 	void SetUnsavedAnnotations(bool unsaved) { m_hasUnsavedAnnotations = unsaved; }
 
@@ -147,6 +158,9 @@ public:
 	std::map<PageCacheKey, PageCacheItem>& GetPageCache() { return m_pageCache; }
 	std::list<PageCacheKey>& GetCacheOrder() { return m_cacheOrder; }
 	void ClearPageCache();
+	HBITMAP FindCachedThumbnail(const PageCacheKey& key);
+	void PutCachedThumbnail(const PageCacheKey& key, HBITMAP hBitmap);
+	void ClearThumbnailCache();
 	void InvalidatePageRenderCache(int pageNumber);
 	fz_display_list* GetDisplayList(int pageNumber);
 	void ClearDisplayLists();
@@ -179,6 +193,7 @@ private:
 
 	std::map<int, int> m_pageRotations;
 	PageLayoutMode m_layoutMode;
+	SidebarTabMode m_sidebarTab;
 	bool m_hasUnsavedAnnotations;
 
 	std::vector<PageBounds> m_pageBoundsCache;
@@ -193,6 +208,9 @@ private:
 	std::map<PageCacheKey, PageCacheItem> m_pageCache;
 	std::list<PageCacheKey> m_cacheOrder;
 	static const int CACHE_LIMIT = 50;
+	std::map<PageCacheKey, PageCacheItem> m_thumbnailCache;
+	std::list<PageCacheKey> m_thumbnailCacheOrder;
+	static const int THUMBNAIL_CACHE_LIMIT = 100;
 	std::map<int, fz_display_list*> m_displayLists;
 	std::list<int> m_displayListOrder;
 	static const int DISPLAY_LIST_LIMIT = 24;

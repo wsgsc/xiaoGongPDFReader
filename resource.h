@@ -89,6 +89,9 @@
 #define IDC_ANNOT_COLOR_COMBO            1102
 #define IDC_ANNOT_FONTSIZE_COMBO         1103
 #define IDC_INLINE_ANNOT_EDIT            1104
+#define IDC_SIDEBAR_HEADER               1105
+#define IDC_SIDEBAR_THUMB_LIST           1106
+#define IDC_SIDEBAR_ANNOT_LIST           1107
 #define IDD_PDF_EDIT_DIALOG             105
 #define IDD_PROGRESS_DIALOG             106
 #define IDD_PASSWORD_DIALOG             107
@@ -142,6 +145,9 @@
 #define ID_MENU_ANNOT_UNDERLINE         32806
 #define ID_MENU_ANNOT_STRIKEOUT         32807
 #define ID_MENU_ANNOT_TEXT_NOTE         32808
+#define ID_MENU_SIDEBAR_OUTLINE         32809
+#define ID_MENU_SIDEBAR_THUMBNAILS      32810
+#define ID_MENU_SIDEBAR_ANNOTATIONS     32811
 
 #define WM_PDF_LOAD_COMPLETE   (WM_USER + 104)
 #define WM_PDF_LOAD_CANCELLED  (WM_USER + 105)
@@ -153,8 +159,8 @@
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        137
-#define _APS_NEXT_COMMAND_VALUE         32809
-#define _APS_NEXT_CONTROL_VALUE         1105
+#define _APS_NEXT_COMMAND_VALUE         32812
+#define _APS_NEXT_CONTROL_VALUE         1108
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

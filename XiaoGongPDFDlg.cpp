@@ -748,7 +748,8 @@ void CXiaoGongPDFDlg::SetControlsVisible(bool visible)
 		&m_statusBar, &m_zoomStatus, &m_btnOutline,
 		&m_searchPopup, &m_editSearch, &m_searchMatchCount,
 		&m_btnFind, &m_btnPrevMatch, &m_btnNextMatch, &m_btnCloseSearchPopup,
-		&m_outlineTree, &m_searchResultsList, &m_searchResultsHeader,
+		&m_sidebarHeader, &m_outlineTree, &m_thumbnailListWnd, &m_annotListWnd,
+		&m_searchResultsList, &m_searchResultsHeader,
 		&m_btnCloseSearchResults
 	};
 	for (auto* pCtrl : controls)
@@ -767,8 +768,7 @@ void CXiaoGongPDFDlg::SetControlsVisible(bool visible)
 		m_btnNextMatch.ShowWindow(m_searchToolsVisible ? SW_SHOW : SW_HIDE);
 		m_btnCloseSearchPopup.ShowWindow(m_searchToolsVisible ? SW_SHOW : SW_HIDE);
 	}
-	if (m_outlineTree.GetSafeHwnd())
-		m_outlineTree.ShowWindow(visible && m_outlineVisible && m_doc ? SW_SHOW : SW_HIDE);
+	UpdateSidebarWindowsVisibility(visible);
 	if (m_searchResultsList.GetSafeHwnd())
 		m_searchResultsList.ShowWindow(visible && m_searchResultsVisible && m_doc ? SW_SHOW : SW_HIDE);
 	if (m_searchResultsHeader.GetSafeHwnd())
@@ -889,6 +889,7 @@ BEGIN_MESSAGE_MAP(CXiaoGongPDFDlg, CDialogEx)
 	ON_COMMAND(ID_MENU_ANNOT_UNDERLINE, &CXiaoGongPDFDlg::OnMenuAnnotUnderline)
 	ON_COMMAND(ID_MENU_ANNOT_STRIKEOUT, &CXiaoGongPDFDlg::OnMenuAnnotStrikeout)
 	ON_COMMAND(ID_MENU_ANNOT_TEXT_NOTE, &CXiaoGongPDFDlg::OnMenuAnnotTextNote)
+	ON_COMMAND_RANGE(ID_MENU_SIDEBAR_OUTLINE, ID_MENU_SIDEBAR_ANNOTATIONS, &CXiaoGongPDFDlg::OnMenuSidebarTab)
 	ON_COMMAND_RANGE(ID_MENU_READING_NORMAL, ID_MENU_READING_EYE, &CXiaoGongPDFDlg::OnReadingMode)
 	ON_COMMAND_RANGE(ID_MENU_RECENT_FILE_1, ID_MENU_RECENT_FILE_10, &CXiaoGongPDFDlg::onMenuRecentFile)
 	ON_NOTIFY(TVN_SELCHANGED, IDC_OUTLINE_TREE, &CXiaoGongPDFDlg::OnOutlineSelectionChanged)
@@ -1221,9 +1222,46 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 		pLegacyThumbList->ShowWindow(SW_HIDE);
 	if (CWnd* pPathStrip = GetDlgItem(IDC_EDIT_FILE_PATH))
 		pPathStrip->ShowWindow(SW_HIDE);
+	m_sidebarHeader.CreatePanel(this, IDC_SIDEBAR_HEADER);
+	m_sidebarHeader.m_onTabSelected = [this](SidebarTabMode tab)
+	{
+		SwitchSidebarTab(tab, true);
+	};
 	m_outlineTree.Create(WS_CHILD | WS_TABSTOP | TVS_HASBUTTONS | TVS_HASLINES |
 		TVS_LINESATROOT | TVS_SHOWSELALWAYS, CRect(0, 0, 250, 300), this,
 		IDC_OUTLINE_TREE);
+	m_thumbnailListWnd.CreatePanel(this, IDC_SIDEBAR_THUMB_LIST);
+	m_thumbnailListWnd.m_queryThumbnailFn = [this](int pageIndex, int maxW, int maxH,
+		HBITMAP& outBmp, CSize& outSize, bool renderIfMissing) -> bool
+	{
+		return QueryOrRenderPageThumbnail(pageIndex, maxW, maxH, outBmp, outSize, renderIfMissing);
+	};
+	m_thumbnailListWnd.m_onPageSelected = [this](int pageIndex)
+	{
+		FinishInlineTextAnnot(false);
+		GoToPage(pageIndex);
+	};
+	m_thumbnailListWnd.m_onPageContextMenu = [this](int pageIndex, CPoint screenPt)
+	{
+		ShowThumbnailContextMenu(pageIndex, screenPt);
+	};
+	m_annotListWnd.CreatePanel(this, IDC_SIDEBAR_ANNOT_LIST);
+	m_annotListWnd.m_onItemClicked = [this](const DocumentAnnotationItem& item)
+	{
+		NavigateToSidebarAnnotation(item);
+	};
+	m_annotListWnd.m_onItemDoubleClicked = [this](const DocumentAnnotationItem& item)
+	{
+		EditSidebarAnnotation(item);
+	};
+	m_annotListWnd.m_onItemDelete = [this](const DocumentAnnotationItem& item)
+	{
+		DeleteSidebarAnnotation(item);
+	};
+	m_annotListWnd.m_onItemContextMenu = [this](const DocumentAnnotationItem& item, CPoint screenPt)
+	{
+		ShowSidebarAnnotationContextMenu(item, screenPt);
+	};
 	m_searchResultsHeader.Create(_T("搜索结果"), WS_CHILD | SS_LEFT | SS_CENTERIMAGE,
 		CRect(0, 0, 280, 34), this, IDC_SEARCH_RESULTS_HEADER);
 	m_btnCloseSearchResults.Create(_T("关闭"), WS_CHILD | BS_OWNERDRAW,
@@ -1336,7 +1374,7 @@ BOOL CXiaoGongPDFDlg::OnInitDialog()
 	m_btnCloseSearchResults.SetToolTipText(_T("关闭搜索结果"));
 	m_btnCloseSearchResults.SetColors(RGB(255, 255, 255), RGB(232, 241, 252), RGB(211, 229, 250));
 
-	m_btnOutline.SetWindowText(_T("目录"));
+	m_btnOutline.SetWindowText(_T("侧栏"));
 
 	// 初始化标签页控件
 	InitializeTabControl();
@@ -1599,6 +1637,7 @@ void CXiaoGongPDFDlg::GoToPage(int pageNumber)
 		RenderVisiblePages();
 		UpdatePageControls();
 	}
+	m_thumbnailListWnd.SetCurrentPage(m_currentPage, true);
 }
 
 // 逐个恢复标签页，等待每次后台加载完成后继续。
@@ -2078,12 +2117,13 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 		int contentY = TAB_HEIGHT + TOOLBAR_HEIGHT + 1;
 		int contentHeight = max(1, cy - contentY - STATUS_BAR_HEIGHT);
 		const bool showSearchResults = m_searchResultsVisible && m_doc;
+		const bool showNavSidebar = m_outlineVisible && m_doc && !showSearchResults;
 		m_searchResultsHeader.ShowWindow(showSearchResults ? SW_SHOW : SW_HIDE);
 		m_btnCloseSearchResults.ShowWindow(showSearchResults ? SW_SHOW : SW_HIDE);
 		m_searchResultsList.ShowWindow(showSearchResults ? SW_SHOW : SW_HIDE);
-		m_outlineTree.ShowWindow(m_outlineVisible && m_doc && !showSearchResults ? SW_SHOW : SW_HIDE);
 		if (showSearchResults)
 		{
+			UpdateSidebarWindowsVisibility(false);
 			const int panelWidth = min(320, max(220, cx / 3));
 			m_searchResultsHeader.MoveWindow(12, contentY, panelWidth - 50, 36);
 			m_btnCloseSearchResults.MoveWindow(panelWidth - 38, contentY + 2, 34, 32);
@@ -2093,16 +2133,28 @@ void CXiaoGongPDFDlg::OnSize(UINT nType, int cx, int cy)
 			pdfX = panelWidth + 1;
 			pdfWidth = cx - pdfX;
 		}
-		else if (m_outlineVisible && m_doc)
+		else if (showNavSidebar)
 		{
-			m_outlineTree.MoveWindow(0, contentY,
-				LIST_WIDTH + m_scrollBarWidth, contentHeight);
-			pdfX = LIST_WIDTH + m_scrollBarWidth + 1;
+			const int sidebarWidth = max(264, LIST_WIDTH + m_scrollBarWidth);
+			const int headerH = CPDFSidebarHeaderWnd::HEADER_HEIGHT;
+			const int bodyY = contentY + headerH;
+			const int bodyH = max(1, contentHeight - headerH);
+			if (m_sidebarHeader.GetSafeHwnd())
+				m_sidebarHeader.MoveWindow(0, contentY, sidebarWidth, headerH);
+			if (m_outlineTree.GetSafeHwnd())
+				m_outlineTree.MoveWindow(0, bodyY, sidebarWidth, bodyH);
+			if (m_thumbnailListWnd.GetSafeHwnd())
+				m_thumbnailListWnd.MoveWindow(0, bodyY, sidebarWidth, bodyH);
+			if (m_annotListWnd.GetSafeHwnd())
+				m_annotListWnd.MoveWindow(0, bodyY, sidebarWidth, bodyH);
+			UpdateSidebarWindowsVisibility(true);
+			pdfX = sidebarWidth + 1;
 			pdfWidth = cx - pdfX;
 		}
 		else
 		{
-			// 缩略图隐藏时，PDF 预览占满整个宽度
+			UpdateSidebarWindowsVisibility(false);
+			// 侧栏隐藏时，PDF 预览占满整个宽度
 			pdfX = 0;
 			pdfWidth = cx;
 		}
@@ -2323,6 +2375,31 @@ BOOL CXiaoGongPDFDlg::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
 	}
 
 	m_isRenderingWheelZoom = false;  // 确保最后重置标记
+	if (m_outlineVisible && m_doc && !(m_searchResultsVisible && m_doc))
+	{
+		CWnd* pSidebarList = nullptr;
+		if (m_sidebarTab == SIDEBAR_TAB_THUMBNAILS &&
+			m_thumbnailListWnd.GetSafeHwnd() && m_thumbnailListWnd.IsWindowVisible())
+		{
+			pSidebarList = &m_thumbnailListWnd;
+		}
+		else if (m_sidebarTab == SIDEBAR_TAB_ANNOTATIONS &&
+			m_annotListWnd.GetSafeHwnd() && m_annotListWnd.IsWindowVisible())
+		{
+			pSidebarList = &m_annotListWnd;
+		}
+		if (pSidebarList)
+		{
+			CRect rcSidebar;
+			pSidebarList->GetWindowRect(&rcSidebar);
+			if (rcSidebar.PtInRect(pt))
+			{
+				pSidebarList->SendMessage(WM_MOUSEWHEEL,
+					MAKEWPARAM(nFlags, zDelta), MAKELPARAM(pt.x, pt.y));
+				return TRUE;
+			}
+		}
+	}
 	return CDialogEx::OnMouseWheel(nFlags, zDelta, pt);
 }
 
@@ -2667,10 +2744,8 @@ void CXiaoGongPDFDlg::OnBtnEdit()
 						CalculatePagePositions(m_zoomMode == ZOOM_FIT_WIDTH || m_zoomMode == ZOOM_FIT_PAGE);
 					UpdateScrollBar();
 					RenderVisiblePages();
-					if (m_outlineVisible)
-						UpdateOutlineTree();
-					else if (m_outlineTree.GetSafeHwnd())
-						m_outlineTree.DeleteAllItems();
+					m_sidebarSyncedDoc = nullptr;
+					SyncSidebarForActiveDocument();
 					UpdatePageControls();
 					UpdateStatusBar();
 				}
@@ -2730,17 +2805,18 @@ void CXiaoGongPDFDlg::OnBtnEdit()
 	}
 }
 
-// 目录侧栏开关
+// 侧栏开关（目录 / 缩略图 / 批注列表）
 void CXiaoGongPDFDlg::OnCheckThumbnail()
 {
 	m_outlineVisible = !m_outlineVisible;
 	if (m_outlineVisible)
 		m_searchResultsVisible = false;
 	UpdateOutlineButtonColors();
-	m_btnOutline.SetToolTipText(m_outlineVisible ? _T("隐藏目录") : _T("显示目录"));
-	if (m_outlineVisible && m_outlineTree.GetSafeHwnd() && !m_outlineTree.GetRootItem())
-		UpdateOutlineTree();
-	m_outlineTree.ShowWindow(m_outlineVisible && m_doc ? SW_SHOW : SW_HIDE);
+	m_btnOutline.SetToolTipText(m_outlineVisible ?
+		_T("隐藏侧栏 (F9)") : _T("显示侧栏：目录 / 缩略图 / 批注 (F9)"));
+	if (m_outlineVisible && m_doc)
+		SyncSidebarForActiveDocument();
+	UpdateSidebarWindowsVisibility(true);
 	CRect rect;
 	GetClientRect(&rect);
 	SendMessage(WM_SIZE, SIZE_RESTORED, MAKELPARAM(rect.Width(), rect.Height()));
@@ -2810,6 +2886,7 @@ void CXiaoGongPDFDlg::RotatePage(int degrees)
 	}
 	UpdateScrollBar();
 	RenderVisiblePages();
+	m_thumbnailListWnd.NotifyPageInvalidated(m_currentPage);
 
 	// 保存当前状态并立即持久化单页旋转记录，同时刷新底部页面物理尺寸显示
 	SaveCurrentPageZoomState();
@@ -2974,7 +3051,7 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	m_btnFind.SetWindowText(_T("查找"));
 	m_btnFind.SetIconAndText(true);
 	m_btnFitPage.SetWindowText(_T("适页"));
-	m_btnOutline.SetWindowText(_T("目录"));
+	m_btnOutline.SetWindowText(_T("侧栏"));
 	m_btnOutline.SetIconAndText(true);
 	m_btnMore.SetWindowText(_T("更多"));
 	m_btnMore.SetIconAndText(true);
@@ -3011,7 +3088,7 @@ void CXiaoGongPDFDlg::InitializeToolbar()
 	UpdateFitButton();
 	m_btnZoomIn.SetToolTipText(_T("放大"));
 	m_btnMore.SetToolTipText(_T("更多操作"));
-	m_btnOutline.SetToolTipText(_T("显示目录"));
+	m_btnOutline.SetToolTipText(_T("显示侧栏：目录 / 缩略图 / 批注 (F9)"));
 	m_btnMinimize.SetToolTipText(_T("最小化"));
 	m_btnMaximize.SetToolTipText(_T("最大化"));
 	m_btnCloseWindow.SetToolTipText(_T("关闭"));
@@ -3906,7 +3983,7 @@ void CXiaoGongPDFDlg::OnBtnMore()
 		appendOverflowItem(0, ID_MENU_OPEN, _T("打开"));
 	if (m_btnOutline.GetSafeHwnd() && !m_btnOutline.IsWindowVisible())
 		appendOverflowItem(docFlag | (m_outlineVisible ? MF_CHECKED : 0),
-			IDC_CHECK_THUMBNAIL, _T("目录"));
+			IDC_CHECK_THUMBNAIL, _T("侧栏"));
 	if (m_btnFind.GetSafeHwnd() && !m_btnFind.IsWindowVisible())
 		appendOverflowItem(docFlag, IDC_BTN_FIND, _T("查找"));
 	if (m_btnZoomOut.GetSafeHwnd() && !m_btnZoomOut.IsWindowVisible())
@@ -3932,6 +4009,26 @@ void CXiaoGongPDFDlg::OnBtnMore()
 		appendOverflowItem(0, IDC_BTN_FULLSCREEN, _T("全屏"));
 	if (hasOverflowItems)
 		menu.AppendMenu(MF_SEPARATOR);
+
+	// 侧边栏面板子菜单（目录 / 缩略图 / 批注汇总列表）
+	CMenu sidebarMenu;
+	if (sidebarMenu.CreatePopupMenu())
+	{
+		sidebarMenu.AppendMenu(MF_STRING | docFlag, ID_MENU_SIDEBAR_OUTLINE, _T("目录书签\tF9"));
+		sidebarMenu.AppendMenu(MF_STRING | docFlag, ID_MENU_SIDEBAR_THUMBNAILS, _T("页面缩略图"));
+		sidebarMenu.AppendMenu(MF_STRING | docFlag, ID_MENU_SIDEBAR_ANNOTATIONS, _T("批注汇总列表"));
+		if (m_outlineVisible && m_doc && !m_searchResultsVisible &&
+			m_sidebarTab >= SIDEBAR_TAB_OUTLINE && m_sidebarTab <= SIDEBAR_TAB_ANNOTATIONS)
+		{
+			sidebarMenu.CheckMenuRadioItem(ID_MENU_SIDEBAR_OUTLINE, ID_MENU_SIDEBAR_ANNOTATIONS,
+				ID_MENU_SIDEBAR_OUTLINE + static_cast<int>(m_sidebarTab), MF_BYCOMMAND);
+		}
+		if (menu.AppendMenu(MF_POPUP, reinterpret_cast<UINT_PTR>(sidebarMenu.GetSafeHmenu()),
+			_T("侧栏面板")))
+		{
+			sidebarMenu.Detach();
+		}
+	}
 
 	// 页面视图模式子菜单（单页连续 / 双页并排）
 	CMenu layoutMenu;
@@ -3994,6 +4091,9 @@ void CXiaoGongPDFDlg::ApplyReadingMode(ReadingMode mode)
 	const bool dark = mode == READING_NIGHT;
 	m_pdfVerticalScrollBar.SetDark(dark);
 	m_pdfHorizontalScrollBar.SetDark(dark);
+	m_sidebarHeader.SetDark(dark);
+	m_thumbnailListWnd.SetDark(dark);
+	m_annotListWnd.SetDark(dark);
 	const COLORREF tab = dark ? RGB(36, 39, 43) : RGB(230, 238, 253);
 	const COLORREF toolbar = dark ? RGB(39, 43, 47) : RGB(255, 255, 255);
 	const COLORREF hover = dark ? RGB(55, 65, 72) : RGB(236, 244, 255);
@@ -5043,10 +5143,7 @@ void CXiaoGongPDFDlg::SwitchToDocument(int index)
 	UpdatePageControls();
 	UpdateStatusBar();
 
-	if (m_outlineVisible)
-		UpdateOutlineTree();
-	else if (m_outlineTree.GetSafeHwnd())
-		m_outlineTree.DeleteAllItems();
+	SyncSidebarForActiveDocument();
 }
 
 bool CXiaoGongPDFDlg::CloseDocument(int index, bool promptUnsaved)
@@ -5120,6 +5217,8 @@ bool CXiaoGongPDFDlg::CloseDocument(int index, bool promptUnsaved)
 	}
 
 	// 删除文档对象
+	if (m_sidebarSyncedDoc == doc)
+		m_sidebarSyncedDoc = nullptr;
 	if (doc)
 	{
 		delete doc;
@@ -5160,11 +5259,14 @@ bool CXiaoGongPDFDlg::CloseDocument(int index, bool promptUnsaved)
 				m_isUpdatingSearchEdit = false;
 			}
 			SetWindowText(_T("小龚PDF阅读器"));
+			m_sidebarSyncedDoc = nullptr;
+			m_currentDocHasOutline = false;
 			if (m_outlineTree.GetSafeHwnd())
-			{
 				m_outlineTree.DeleteAllItems();
-				m_outlineTree.ShowWindow(SW_HIDE);
-			}
+			m_thumbnailListWnd.ClearThumbnails();
+			m_annotListWnd.ClearAnnotations();
+			m_sidebarHeader.SetAnnotationCount(0);
+			UpdateSidebarWindowsVisibility(false);
 
 			// ★★★ 彻底清理并隐藏标签页控件
 			if (m_tabCtrl.GetSafeHwnd())
@@ -5311,6 +5413,7 @@ void CXiaoGongPDFDlg::UpdateOutlineTree()
 	if (!m_outlineTree.GetSafeHwnd())
 		return;
 	m_isUpdatingOutline = true;
+	m_currentDocHasOutline = false;
 	m_outlineTree.SetRedraw(FALSE);
 	m_outlineTree.DeleteAllItems();
 	if (m_ctx && m_doc)
@@ -5318,24 +5421,31 @@ void CXiaoGongPDFDlg::UpdateOutlineTree()
 		fz_outline* pOutline = nullptr;
 		fz_var(pOutline);
 		bool failed = false;
-		fz_try(m_ctx)
 		{
-			pOutline = fz_load_outline(m_ctx, m_doc);
-		}
-		fz_catch(m_ctx)
-		{
+			CSingleLock lock(&m_renderLock, TRUE);
+			fz_try(m_ctx)
+			{
+				pOutline = fz_load_outline(m_ctx, m_doc);
+			}
+			fz_catch(m_ctx)
+			{
+				if (pOutline)
+					fz_drop_outline(m_ctx, pOutline);
+				pOutline = nullptr;
+				failed = true;
+			}
 			if (pOutline)
+			{
+				AppendOutlineItems(pOutline, TVI_ROOT);
 				fz_drop_outline(m_ctx, pOutline);
-			pOutline = nullptr;
-			failed = true;
+			}
 		}
-		if (pOutline)
+		m_currentDocHasOutline = (m_outlineTree.GetRootItem() != nullptr);
+		if (!m_currentDocHasOutline)
 		{
-			AppendOutlineItems(pOutline, TVI_ROOT);
-			fz_drop_outline(m_ctx, pOutline);
+			m_outlineTree.InsertItem(failed ?
+				_T("目录读取失败") : _T("此文档没有目录（可点上方“缩略图”浏览）"));
 		}
-		if (!m_outlineTree.GetRootItem())
-			m_outlineTree.InsertItem(failed ? _T("目录读取失败") : _T("此文档没有目录"));
 	}
 	m_outlineTree.SetRedraw(TRUE);
 	m_outlineTree.Invalidate(FALSE);
@@ -6948,7 +7058,9 @@ void CXiaoGongPDFDlg::OnContextMenu(CWnd* pWnd, CPoint point)
 				{
 					lock.Unlock();
 					UpdateDocumentDirtyTitle();
+					m_thumbnailListWnd.NotifyPageInvalidated(hitAnnotPage);
 					RenderVisiblePages();
+					RefreshAnnotationsSidebar();
 					SetStatusBarMessage(_T("已更新批注内容（按 Ctrl+S 保存写回原 PDF）"));
 				}
 			}
@@ -6962,7 +7074,9 @@ void CXiaoGongPDFDlg::OnContextMenu(CWnd* pWnd, CPoint point)
 			{
 				lock.Unlock();
 				UpdateDocumentDirtyTitle();
+				m_thumbnailListWnd.NotifyPageInvalidated(hitAnnotPage);
 				RenderVisiblePages();
+				RefreshAnnotationsSidebar();
 				CString tip;
 				tip.Format(_T("已删除%s（按 Ctrl+S 保存写回原 PDF）"), hitAnnot.typeLabel.GetString());
 				SetStatusBarMessage(tip);
@@ -7819,6 +7933,7 @@ void CXiaoGongPDFDlg::RenderVisiblePages()
 	{
 		m_currentPage = newCurrentPage;
 		UpdatePageControls();
+		m_thumbnailListWnd.SetCurrentPage(m_currentPage, true);
 	}
 }
 
@@ -8487,6 +8602,8 @@ void CXiaoGongPDFDlg::OnSearchResultSelected(NMHDR* pNMHDR, LRESULT* pResult)
 void CXiaoGongPDFDlg::OnCloseSearchResults()
 {
 	m_searchResultsVisible = false;
+	if (m_outlineVisible && m_doc && m_sidebarSyncedDoc != GetActiveDocument())
+		SyncSidebarForActiveDocument();
 	CRect rect;
 	GetClientRect(&rect);
 	SendMessage(WM_SIZE, SIZE_RESTORED, MAKELPARAM(rect.Width(), rect.Height()));
@@ -8594,7 +8711,11 @@ void CXiaoGongPDFDlg::ClearSearchResults(bool keepPanel)
 	m_currentMatchIndex = -1;
 	m_searchKeyword.Empty();
 	if (!keepPanel)
+	{
 		m_searchResultsVisible = false;
+		if (hadPanel && m_outlineVisible && m_doc && m_sidebarSyncedDoc != GetActiveDocument())
+			SyncSidebarForActiveDocument();
+	}
 	RefreshSearchResultsList();
 	if (!keepPanel && hadPanel && m_searchResultsList.GetSafeHwnd())
 		RefreshDocumentLayout();
@@ -10677,10 +10798,8 @@ void CXiaoGongPDFDlg::ReloadDocument(CPDFDocument* pDoc)
 		UpdateScrollBar();
 		RenderVisiblePages();
 
-		if (m_outlineVisible)
-			UpdateOutlineTree();
-		else if (m_outlineTree.GetSafeHwnd())
-			m_outlineTree.DeleteAllItems();
+		m_sidebarSyncedDoc = nullptr;
+		SyncSidebarForActiveDocument();
 		UpdatePageControls();
 		UpdateZoomStatus();
 		UpdateStatusBar();
@@ -10783,7 +10902,9 @@ void CXiaoGongPDFDlg::ApplySelectionMarkupAnnotation(
 
 	ClearSelection();
 	UpdateDocumentDirtyTitle();
+	m_thumbnailListWnd.NotifyPageInvalidated(pageNumber);
 	RenderVisiblePages();
+	RefreshAnnotationsSidebar();
 
 	CString tip;
 	tip.Format(_T("已添加%s批注（按 Ctrl+S 保存写回原 PDF，右键点击批注可删除）"), actionName);
@@ -11038,7 +11159,9 @@ void CXiaoGongPDFDlg::FinishInlineTextAnnot(bool discard)
 			DeletePageAnnotationAt(pDoc, st.pageNumber, st.existingAnnotIndex);
 			lock.Unlock();
 			UpdateDocumentDirtyTitle();
+			m_thumbnailListWnd.NotifyPageInvalidated(st.pageNumber);
 			RenderVisiblePages();
+			RefreshAnnotationsSidebar();
 			SetStatusBarMessage(_T("文字为空，已移除该文字批注（按 Ctrl+S 保存写回原 PDF）"));
 		}
 		else
@@ -11128,7 +11251,9 @@ void CXiaoGongPDFDlg::FinishInlineTextAnnot(bool discard)
 	if (ok)
 	{
 		UpdateDocumentDirtyTitle();
+		m_thumbnailListWnd.NotifyPageInvalidated(st.pageNumber);
 		RenderVisiblePages();
+		RefreshAnnotationsSidebar();
 		SetStatusBarMessage(_T("已保存文字批注到页面（点击文字可再次移动或修改，按 Ctrl+S 写回原 PDF）"));
 	}
 	else
@@ -11168,7 +11293,9 @@ void CXiaoGongPDFDlg::DeleteActiveInlineTextAnnot()
 		if (deleted)
 		{
 			UpdateDocumentDirtyTitle();
+			m_thumbnailListWnd.NotifyPageInvalidated(pageNum);
 			RenderVisiblePages();
+			RefreshAnnotationsSidebar();
 			SetStatusBarMessage(_T("已删除文字批注（按 Ctrl+S 保存写回原 PDF）"));
 			return;
 		}
@@ -12446,6 +12573,8 @@ bool CXiaoGongPDFDlg::SaveDocumentEdits(CPDFDocument* pTargetDoc, bool saveAs)
 						CalculatePagePositions(m_zoomMode == ZOOM_FIT_WIDTH || m_zoomMode == ZOOM_FIT_PAGE);
 					UpdateScrollBar();
 					RenderVisiblePages();
+					m_sidebarSyncedDoc = nullptr;
+					SyncSidebarForActiveDocument();
 					UpdatePageControls();
 					UpdateStatusBar();
 				}
@@ -12499,4 +12628,641 @@ bool CXiaoGongPDFDlg::PromptSaveUnsavedAnnotations(CPDFDocument* pDoc)
 		return true;
 	}
 	return SaveDocumentEdits(pDoc, false);
+}
+
+// ============================================================================
+// 侧边栏（目录 / 缩略图 / 批注汇总列表）集成实现
+// ============================================================================
+
+void CXiaoGongPDFDlg::OnMenuSidebarTab(UINT nID)
+{
+	if (nID < ID_MENU_SIDEBAR_OUTLINE || nID > ID_MENU_SIDEBAR_ANNOTATIONS)
+		return;
+	const SidebarTabMode tab = static_cast<SidebarTabMode>(nID - ID_MENU_SIDEBAR_OUTLINE);
+	OpenSidebarTab(tab);
+}
+
+void CXiaoGongPDFDlg::SwitchSidebarTab(SidebarTabMode tab, bool saveToDoc)
+{
+	if (tab < SIDEBAR_TAB_OUTLINE || tab > SIDEBAR_TAB_ANNOTATIONS)
+		tab = SIDEBAR_TAB_OUTLINE;
+
+	m_sidebarTab = tab;
+	m_sidebarHeader.SetActiveTab(tab);
+
+	if (saveToDoc)
+	{
+		if (CPDFDocument* pDoc = GetActiveDocument())
+			pDoc->SetSidebarTab(tab);
+	}
+
+	UpdateSidebarWindowsVisibility(true);
+
+	if (tab == SIDEBAR_TAB_THUMBNAILS &&
+		m_thumbnailListWnd.GetSafeHwnd() && m_thumbnailListWnd.IsWindowVisible())
+	{
+		m_thumbnailListWnd.EnsurePageVisible(m_currentPage);
+		m_thumbnailListWnd.Invalidate(FALSE);
+		m_thumbnailListWnd.TriggerVisibleRender();
+	}
+	else if (tab == SIDEBAR_TAB_ANNOTATIONS &&
+		m_annotListWnd.GetSafeHwnd() && m_annotListWnd.IsWindowVisible())
+	{
+		m_annotListWnd.Invalidate(FALSE);
+	}
+	else if (tab == SIDEBAR_TAB_OUTLINE &&
+		m_outlineTree.GetSafeHwnd() && m_outlineTree.IsWindowVisible())
+	{
+		m_outlineTree.Invalidate(FALSE);
+	}
+}
+
+void CXiaoGongPDFDlg::OpenSidebarTab(SidebarTabMode tab)
+{
+	if (!m_doc || m_totalPages <= 0)
+		return;
+
+	if (m_outlineVisible && !m_searchResultsVisible && m_sidebarTab == tab)
+	{
+		OnCheckThumbnail();
+		return;
+	}
+
+	const bool wasHidden = (!m_outlineVisible || m_searchResultsVisible);
+	m_outlineVisible = true;
+	m_searchResultsVisible = false;
+	UpdateOutlineButtonColors();
+	m_btnOutline.SetToolTipText(_T("隐藏侧栏 (F9)"));
+
+	if (m_sidebarSyncedDoc != GetActiveDocument())
+		SyncSidebarForActiveDocument();
+
+	SwitchSidebarTab(tab, true);
+
+	if (wasHidden)
+	{
+		CRect rect;
+		GetClientRect(&rect);
+		SendMessage(WM_SIZE, SIZE_RESTORED, MAKELPARAM(rect.Width(), rect.Height()));
+	}
+}
+
+void CXiaoGongPDFDlg::UpdateSidebarWindowsVisibility(bool allowVisible)
+{
+	const bool showSearchResults = m_searchResultsVisible && m_doc;
+	const bool showNavSidebar = allowVisible && !m_isFullscreen &&
+		m_outlineVisible && m_doc && !showSearchResults;
+
+	if (m_sidebarHeader.GetSafeHwnd())
+		m_sidebarHeader.ShowWindow(showNavSidebar ? SW_SHOW : SW_HIDE);
+
+	if (m_outlineTree.GetSafeHwnd())
+	{
+		m_outlineTree.ShowWindow(
+			(showNavSidebar && m_sidebarTab == SIDEBAR_TAB_OUTLINE) ? SW_SHOW : SW_HIDE);
+	}
+
+	if (m_thumbnailListWnd.GetSafeHwnd())
+	{
+		const bool wantShow = showNavSidebar && m_sidebarTab == SIDEBAR_TAB_THUMBNAILS;
+		const bool wasVisible = (m_thumbnailListWnd.IsWindowVisible() != FALSE);
+		m_thumbnailListWnd.ShowWindow(wantShow ? SW_SHOW : SW_HIDE);
+		if (wantShow && !wasVisible)
+		{
+			m_thumbnailListWnd.EnsurePageVisible(m_currentPage);
+			m_thumbnailListWnd.Invalidate(FALSE);
+			m_thumbnailListWnd.TriggerVisibleRender();
+		}
+	}
+
+	if (m_annotListWnd.GetSafeHwnd())
+	{
+		m_annotListWnd.ShowWindow(
+			(showNavSidebar && m_sidebarTab == SIDEBAR_TAB_ANNOTATIONS) ? SW_SHOW : SW_HIDE);
+	}
+}
+
+void CXiaoGongPDFDlg::SyncSidebarForActiveDocument()
+{
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (!pDoc || !m_doc || m_totalPages <= 0)
+	{
+		m_sidebarSyncedDoc = nullptr;
+		m_currentDocHasOutline = false;
+		if (m_outlineTree.GetSafeHwnd())
+			m_outlineTree.DeleteAllItems();
+		m_thumbnailListWnd.ClearThumbnails();
+		m_annotListWnd.ClearAnnotations();
+		m_sidebarHeader.SetAnnotationCount(0);
+		UpdateSidebarWindowsVisibility(true);
+		return;
+	}
+
+	if (!m_outlineVisible)
+	{
+		m_sidebarSyncedDoc = nullptr;
+		if (m_outlineTree.GetSafeHwnd())
+			m_outlineTree.DeleteAllItems();
+		m_thumbnailListWnd.ClearThumbnails();
+		m_annotListWnd.ClearAnnotations();
+		m_sidebarHeader.SetAnnotationCount(0);
+		UpdateSidebarWindowsVisibility(false);
+		return;
+	}
+
+	UpdateOutlineTree();
+	m_thumbnailListWnd.SetDocumentPageCount(m_totalPages, m_currentPage);
+
+	m_sidebarSyncedDoc = pDoc;
+	RefreshAnnotationsSidebar();
+
+	SidebarTabMode targetTab = pDoc->GetSidebarTab();
+	if (targetTab == SIDEBAR_TAB_AUTO)
+	{
+		targetTab = m_currentDocHasOutline ? SIDEBAR_TAB_OUTLINE : SIDEBAR_TAB_THUMBNAILS;
+	}
+	SwitchSidebarTab(targetTab, false);
+}
+
+void CXiaoGongPDFDlg::RefreshAnnotationsSidebar()
+{
+	if (!m_outlineVisible)
+	{
+		m_sidebarSyncedDoc = nullptr;
+		return;
+	}
+
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (!pDoc || !m_doc || m_totalPages <= 0)
+	{
+		m_annotListWnd.ClearAnnotations();
+		m_sidebarHeader.SetAnnotationCount(0);
+		return;
+	}
+
+	std::vector<DocumentAnnotationItem> items;
+	CollectDocumentAnnotations(pDoc, &m_renderLock, items);
+	m_sidebarHeader.SetAnnotationCount(static_cast<int>(items.size()));
+	m_annotListWnd.SetAnnotations(std::move(items));
+}
+
+bool CXiaoGongPDFDlg::QueryOrRenderPageThumbnail(int pageIndex, int maxWidth, int maxHeight,
+	HBITMAP& outBitmap, CSize& outPagePxSize, bool renderIfMissing)
+{
+	outBitmap = nullptr;
+	outPagePxSize = CSize(0, 0);
+
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (!pDoc || !m_ctx || !m_doc || pageIndex < 0 || pageIndex >= m_totalPages)
+		return false;
+
+	fz_rect bounds = {};
+	if (!pDoc->GetPageBaseBounds(pageIndex, bounds) && !TryGetPageBaseBounds(pageIndex, bounds))
+		return false;
+
+	const int rotation = GetPageRotation(pageIndex);
+	float pageW = bounds.x1 - bounds.x0;
+	float pageH = bounds.y1 - bounds.y0;
+	if (pageW <= 0.0f || pageH <= 0.0f)
+		return false;
+	if (rotation == 90 || rotation == 270)
+		std::swap(pageW, pageH);
+
+	const float fitScale = min(
+		static_cast<float>(max(16, maxWidth)) / pageW,
+		static_cast<float>(max(16, maxHeight)) / pageH);
+	const int thumbW = max(1, min(maxWidth, static_cast<int>(std::round(pageW * fitScale))));
+	const int thumbH = max(1, min(maxHeight, static_cast<int>(std::round(pageH * fitScale))));
+	outPagePxSize = CSize(thumbW, thumbH);
+
+	const ::PageCacheKey key{ pageIndex, thumbW, thumbH, rotation };
+	if (HBITMAP hCached = pDoc->FindCachedThumbnail(key))
+	{
+		outBitmap = hCached;
+		return true;
+	}
+
+	if (!renderIfMissing)
+		return true;
+
+	CSingleLock lock(&m_renderLock, TRUE);
+	if (!m_ctx || !m_doc || pDoc != GetActiveDocument())
+		return false;
+	if (HBITMAP hCachedAfterLock = pDoc->FindCachedThumbnail(key))
+	{
+		outBitmap = hCachedAfterLock;
+		return true;
+	}
+
+	BITMAPINFO bmi = {};
+	bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+	bmi.bmiHeader.biWidth = thumbW;
+	bmi.bmiHeader.biHeight = -thumbH;
+	bmi.bmiHeader.biPlanes = 1;
+	bmi.bmiHeader.biBitCount = 32;
+	bmi.bmiHeader.biCompression = BI_RGB;
+
+	BYTE* pBits = nullptr;
+	HDC hScreenDC = ::GetDC(nullptr);
+	HBITMAP hBitmap = ::CreateDIBSection(hScreenDC, &bmi, DIB_RGB_COLORS,
+		reinterpret_cast<void**>(&pBits), nullptr, 0);
+	if (hScreenDC)
+		::ReleaseDC(nullptr, hScreenDC);
+
+	if (!hBitmap || !pBits)
+	{
+		if (hBitmap)
+			::DeleteObject(hBitmap);
+		return false;
+	}
+
+	const float renderScale = min(
+		static_cast<float>(thumbW) / pageW,
+		static_cast<float>(thumbH) / pageH);
+
+	fz_page* pPage = nullptr;
+	fz_pixmap* pPixmap = nullptr;
+	fz_device* pDev = nullptr;
+	bool rendered = false;
+	fz_var(pPage);
+	fz_var(pPixmap);
+	fz_var(pDev);
+	fz_var(rendered);
+
+	fz_try(m_ctx)
+	{
+		pPage = fz_load_page(m_ctx, m_doc, pageIndex);
+		pPixmap = fz_new_pixmap_with_data(m_ctx, fz_device_bgr(m_ctx),
+			thumbW, thumbH, nullptr, 1, thumbW * 4, pBits);
+		fz_clear_pixmap_with_value(m_ctx, pPixmap, 0xff);
+		const fz_matrix ctm = BuildPageRenderMatrix(bounds, renderScale, rotation);
+		pDev = fz_new_draw_device(m_ctx, ctm, pPixmap);
+		fz_run_page(m_ctx, pPage, pDev, fz_identity, nullptr);
+		fz_close_device(m_ctx, pDev);
+		rendered = true;
+	}
+	fz_always(m_ctx)
+	{
+		if (pDev)
+			fz_drop_device(m_ctx, pDev);
+		if (pPixmap)
+			fz_drop_pixmap(m_ctx, pPixmap);
+		if (pPage)
+			fz_drop_page(m_ctx, pPage);
+	}
+	fz_catch(m_ctx)
+	{
+		rendered = false;
+	}
+
+	if (!rendered)
+	{
+		::DeleteObject(hBitmap);
+		return false;
+	}
+
+	pDoc->PutCachedThumbnail(key, hBitmap);
+	outBitmap = hBitmap;
+	return true;
+}
+
+void CXiaoGongPDFDlg::RotateSpecificPage(int pageIndex, int degrees)
+{
+	if (!m_doc || m_totalPages <= 0 || pageIndex < 0 || pageIndex >= m_totalPages)
+		return;
+
+	if (pageIndex == m_currentPage)
+	{
+		RotatePage(degrees);
+		return;
+	}
+
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (!pDoc)
+		return;
+
+	FinishInlineTextAnnot(false);
+	ClearSelection();
+	ClearActiveCaptureRect();
+	InvalidateLinkCache();
+
+	float relPageOffset = 0.0f;
+	bool hasRelPageOffset = false;
+	if (m_currentPage >= 0 &&
+		m_currentPage < static_cast<int>(m_pageRowTops.size()) &&
+		m_currentPage < static_cast<int>(m_pageRowHeights.size()) &&
+		m_pageRowHeights[m_currentPage] > 0)
+	{
+		relPageOffset = static_cast<float>(m_scrollPosition - m_pageRowTops[m_currentPage]) /
+			static_cast<float>(m_pageRowHeights[m_currentPage]);
+		hasRelPageOffset = true;
+	}
+
+	const int currentRotation = GetPageRotation(pageIndex);
+	const int newRotation = (currentRotation + degrees + 360) % 360;
+	m_pageRotations[pageIndex] = newRotation;
+	pDoc->SetPageRotation(pageIndex, newRotation);
+	pDoc->InvalidatePageRenderCache(pageIndex);
+
+	CalculatePagePositions();
+	if (hasRelPageOffset &&
+		m_currentPage >= 0 &&
+		m_currentPage < static_cast<int>(m_pageRowTops.size()) &&
+		m_currentPage < static_cast<int>(m_pageRowHeights.size()))
+	{
+		CRect viewRect;
+		m_pdfView.GetClientRect(&viewRect);
+		const int maxScroll = max(0, m_totalScrollHeight - viewRect.Height());
+		const int targetY = m_pageRowTops[m_currentPage] +
+			static_cast<int>(relPageOffset * m_pageRowHeights[m_currentPage]);
+		m_scrollPosition = max(0, min(targetY, maxScroll));
+	}
+	UpdateScrollBar();
+	RenderVisiblePages();
+	m_thumbnailListWnd.NotifyPageInvalidated(pageIndex);
+
+	SaveDialogStateToDocument(pDoc);
+	SaveReadingPosition(pDoc);
+	UpdateStatusBar();
+}
+
+void CXiaoGongPDFDlg::CopySpecificPageAsImage(int pageIndex)
+{
+	if (!m_doc || m_totalPages <= 0 || pageIndex < 0 || pageIndex >= m_totalPages)
+		return;
+
+	ExportBitmapBuffer buffer;
+	constexpr float SCALE_300_DPI = 300.0f / 72.0f;
+	constexpr double MAX_PAGE_PIXELS = 32.0 * 1024.0 * 1024.0;
+	if (!RenderDocumentPageBuffer(pageIndex, SCALE_300_DPI, MAX_PAGE_PIXELS, buffer))
+	{
+		MessageBox(_T("渲染页面图片失败。"), _T("错误"), MB_OK | MB_ICONERROR);
+		return;
+	}
+
+	if (CopyBgrxBufferToClipboard(GetSafeHwnd(), buffer.bgra.data(),
+		buffer.width, buffer.height, buffer.stride))
+	{
+		CString msg;
+		msg.Format(_T("已将第 %d 页高清图片复制到剪贴板 (%d×%d px)"),
+			pageIndex + 1, buffer.width, buffer.height);
+		SetStatusBarMessage(msg);
+	}
+	else
+	{
+		MessageBox(_T("无法将页面图片复制到剪贴板。"), _T("错误"), MB_OK | MB_ICONERROR);
+	}
+}
+
+void CXiaoGongPDFDlg::ShowThumbnailContextMenu(int pageIndex, CPoint screenPt)
+{
+	if (!m_doc || pageIndex < 0 || pageIndex >= m_totalPages)
+		return;
+
+	enum ThumbCtxCmd : UINT
+	{
+		CMD_THUMB_GOTO = 43001,
+		CMD_THUMB_ROTATE_LEFT,
+		CMD_THUMB_ROTATE_RIGHT,
+		CMD_THUMB_COPY_IMG
+	};
+
+	CMenu popup;
+	if (!popup.CreatePopupMenu())
+		return;
+
+	CString gotoText;
+	gotoText.Format(_T("跳转到第 %d 页"), pageIndex + 1);
+	popup.AppendMenu(MF_STRING, CMD_THUMB_GOTO, gotoText);
+	popup.AppendMenu(MF_SEPARATOR);
+	popup.AppendMenu(MF_STRING, CMD_THUMB_ROTATE_LEFT, _T("向左旋转该页 90°"));
+	popup.AppendMenu(MF_STRING, CMD_THUMB_ROTATE_RIGHT, _T("向右旋转该页 90°"));
+	popup.AppendMenu(MF_SEPARATOR);
+	popup.AppendMenu(MF_STRING, CMD_THUMB_COPY_IMG, _T("复制该页为高清图片"));
+
+	const UINT cmd = static_cast<UINT>(popup.TrackPopupMenu(
+		TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+		screenPt.x, screenPt.y, this));
+
+	switch (cmd)
+	{
+	case CMD_THUMB_GOTO:
+		FinishInlineTextAnnot(false);
+		GoToPage(pageIndex);
+		break;
+	case CMD_THUMB_ROTATE_LEFT:
+		RotateSpecificPage(pageIndex, -90);
+		break;
+	case CMD_THUMB_ROTATE_RIGHT:
+		RotateSpecificPage(pageIndex, 90);
+		break;
+	case CMD_THUMB_COPY_IMG:
+		CopySpecificPageAsImage(pageIndex);
+		break;
+	default:
+		break;
+	}
+}
+
+void CXiaoGongPDFDlg::NavigateToSidebarAnnotation(const DocumentAnnotationItem& item)
+{
+	if (!m_doc || item.pageNumber < 0 || item.pageNumber >= m_totalPages)
+		return;
+
+	FinishInlineTextAnnot(false);
+	ClearActiveCaptureRect();
+
+	const int pageNum = item.pageNumber;
+	m_currentPage = pageNum;
+
+	if (!m_pageYPositions.empty() && pageNum < static_cast<int>(m_pageYPositions.size()))
+	{
+		CRect viewRect;
+		m_pdfView.GetClientRect(&viewRect);
+		const int viewW = max(1, viewRect.Width());
+		const int viewH = max(1, viewRect.Height());
+
+		int targetScrollV = (pageNum < static_cast<int>(m_pageRowTops.size())) ?
+			m_pageRowTops[pageNum] : m_pageYPositions[pageNum];
+
+		fz_rect bounds = {};
+		if (!fz_is_empty_rect(item.fitzBounds) && !fz_is_infinite_rect(item.fitzBounds) &&
+			TryGetPageBaseBounds(pageNum, bounds))
+		{
+			const int rotation = GetPageRotation(pageNum);
+			const CRect annotRect = TransformQuadToBitmapRect(
+				fz_quad_from_rect(item.fitzBounds), bounds, rotation, m_uniformScale);
+
+			const int annotCenterY = m_pageYPositions[pageNum] +
+				(annotRect.top + annotRect.bottom) / 2;
+			targetScrollV = annotCenterY - viewH / 3;
+
+			if (m_layoutMode == LAYOUT_SINGLE_CONTINUOUS && m_totalScrollWidth > viewW)
+			{
+				const float origW = bounds.x1 - bounds.x0;
+				const float origH = bounds.y1 - bounds.y0;
+				const float effW = (rotation == 90 || rotation == 270) ? origH : origW;
+				const int pagePxW = ClampRenderDimension(effW * m_uniformScale);
+				if (pagePxW > viewW)
+				{
+					const int annotCenterX = (annotRect.left + annotRect.right) / 2;
+					const int maxScrollH = max(0, pagePxW - viewW);
+					m_scrollPositionH = max(0, min(annotCenterX - viewW / 2, maxScrollH));
+				}
+			}
+		}
+
+		const int maxScrollV = max(0, m_totalScrollHeight - viewH);
+		m_scrollPosition = max(0, min(targetScrollV, maxScrollV));
+		m_panOffset = CPoint(0, 0);
+
+		UpdateScrollBar();
+		RenderVisiblePages();
+		UpdatePageControls();
+	}
+
+	m_thumbnailListWnd.SetCurrentPage(m_currentPage, true);
+}
+
+void CXiaoGongPDFDlg::EditSidebarAnnotation(const DocumentAnnotationItem& item)
+{
+	if (!m_doc || item.pageNumber < 0 || item.pageNumber >= m_totalPages)
+		return;
+
+	NavigateToSidebarAnnotation(item);
+
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (!pDoc)
+		return;
+
+	PageAnnotHitInfo hitInfo;
+	bool found = false;
+	{
+		CSingleLock lock(&m_renderLock, TRUE);
+		found = GetPageAnnotationInfoAt(pDoc, item.pageNumber, item.annotIndex, hitInfo);
+	}
+	if (!found)
+	{
+		RefreshAnnotationsSidebar();
+		return;
+	}
+
+	if (hitInfo.type == PDF_ANNOT_FREE_TEXT)
+	{
+		StartInlineTextAnnotFromExisting(item.pageNumber, hitInfo);
+		return;
+	}
+
+	ScopedFileWatchSuspend suspendWatch(this);
+	CPDFAnnotNoteDlg noteDlg(true, hitInfo.contents, this);
+	if (noteDlg.DoModal() == IDOK)
+	{
+		bool updated = false;
+		{
+			CSingleLock lock(&m_renderLock, TRUE);
+			updated = UpdatePageAnnotationContents(pDoc, item.pageNumber,
+				hitInfo.annotIndex, noteDlg.m_noteText);
+		}
+		if (updated)
+		{
+			UpdateDocumentDirtyTitle();
+			m_thumbnailListWnd.NotifyPageInvalidated(item.pageNumber);
+			RenderVisiblePages();
+			RefreshAnnotationsSidebar();
+			SetStatusBarMessage(_T("已更新批注内容（按 Ctrl+S 保存写回原 PDF）"));
+		}
+	}
+}
+
+void CXiaoGongPDFDlg::DeleteSidebarAnnotation(const DocumentAnnotationItem& item)
+{
+	if (!m_doc || item.pageNumber < 0 || item.pageNumber >= m_totalPages)
+		return;
+
+	FinishInlineTextAnnot(false);
+
+	CPDFDocument* pDoc = GetActiveDocument();
+	if (!pDoc)
+		return;
+
+	bool deleted = false;
+	{
+		CSingleLock lock(&m_renderLock, TRUE);
+		deleted = DeletePageAnnotationAt(pDoc, item.pageNumber, item.annotIndex);
+	}
+	if (deleted)
+	{
+		UpdateDocumentDirtyTitle();
+		m_thumbnailListWnd.NotifyPageInvalidated(item.pageNumber);
+		RenderVisiblePages();
+		RefreshAnnotationsSidebar();
+
+		CString tip;
+		tip.Format(_T("已删除第 %d 页的%s（按 Ctrl+S 保存写回原 PDF）"),
+			item.pageNumber + 1, item.typeLabel.GetString());
+		SetStatusBarMessage(tip);
+	}
+	else
+	{
+		RefreshAnnotationsSidebar();
+	}
+}
+
+void CXiaoGongPDFDlg::ShowSidebarAnnotationContextMenu(
+	const DocumentAnnotationItem& item, CPoint screenPt)
+{
+	if (!m_doc || item.pageNumber < 0 || item.pageNumber >= m_totalPages)
+		return;
+
+	enum AnnotSideCtxCmd : UINT
+	{
+		CMD_SIDE_ANNOT_GOTO = 43101,
+		CMD_SIDE_ANNOT_EDIT,
+		CMD_SIDE_ANNOT_COPY,
+		CMD_SIDE_ANNOT_DELETE
+	};
+
+	CString copyableText = item.contents;
+	copyableText.Trim();
+	if (copyableText.IsEmpty())
+	{
+		copyableText = item.quotedText;
+		copyableText.Trim();
+	}
+
+	CMenu popup;
+	if (!popup.CreatePopupMenu())
+		return;
+
+	popup.AppendMenu(MF_STRING, CMD_SIDE_ANNOT_GOTO, _T("跳转到批注位置"));
+	popup.AppendMenu(MF_STRING, CMD_SIDE_ANNOT_EDIT,
+		item.type == PDF_ANNOT_FREE_TEXT ? _T("编辑文字批注...") : _T("编辑批注备注..."));
+	popup.AppendMenu(MF_SEPARATOR);
+	popup.AppendMenu(MF_STRING | (copyableText.IsEmpty() ? MF_GRAYED : 0),
+		CMD_SIDE_ANNOT_COPY, _T("复制批注/标记文本"));
+	popup.AppendMenu(MF_SEPARATOR);
+	popup.AppendMenu(MF_STRING, CMD_SIDE_ANNOT_DELETE, _T("删除此批注"));
+
+	const UINT cmd = static_cast<UINT>(popup.TrackPopupMenu(
+		TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+		screenPt.x, screenPt.y, this));
+
+	switch (cmd)
+	{
+	case CMD_SIDE_ANNOT_GOTO:
+		NavigateToSidebarAnnotation(item);
+		break;
+	case CMD_SIDE_ANNOT_EDIT:
+		EditSidebarAnnotation(item);
+		break;
+	case CMD_SIDE_ANNOT_COPY:
+		if (!copyableText.IsEmpty() && CopyTextToClipboard(copyableText))
+			SetStatusBarMessage(_T("已复制批注文本到剪贴板"));
+		break;
+	case CMD_SIDE_ANNOT_DELETE:
+		DeleteSidebarAnnotation(item);
+		break;
+	default:
+		break;
+	}
 }
