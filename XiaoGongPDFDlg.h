@@ -526,6 +526,8 @@ protected:
 	afx_msg void OnVScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar);
 	afx_msg void OnHScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar);
 	void UpdateScrollBar();
+	int GetLayoutRowPixelWidth(int pageNumber) const;
+	int GetVisibleHorizontalContentWidth(int viewHeight) const;
 	void ScrollToVerticalPosition(int position);
 	void ScrollToHorizontalPosition(int position);
 	int GetPageAtPosition(int yPos);

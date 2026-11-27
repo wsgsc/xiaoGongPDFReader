@@ -814,6 +814,10 @@ void CXiaoGongPDFDlg::ScrollToMatchVisible(int pageNum, fz_quad quad)
 		needScroll = true;
 	}
 
+	int maxScrollV = max(0, m_totalScrollHeight - viewRect.Height());
+	if (needScroll)
+		m_scrollPosition = max(0, min(m_scrollPosition, maxScrollV));
+
 	int curOffsetX = 0;
 	int curOffsetY = 0;
 	int pagePixelWidth = 0;
@@ -821,11 +825,13 @@ void CXiaoGongPDFDlg::ScrollToMatchVisible(int pageNum, fz_quad quad)
 	{
 		const int matchLeft = matchRect.left + curOffsetX;
 		const int matchRight = matchRect.right + curOffsetX;
-		if (m_totalScrollWidth > viewRect.Width() &&
+		const int horizContentWidth = max(GetLayoutRowPixelWidth(pageNum),
+			GetVisibleHorizontalContentWidth(viewRect.Height()));
+		if (horizContentWidth > viewRect.Width() &&
 			(matchLeft < margin || matchRight > viewRect.Width() - margin))
 		{
 			const int targetDeltaX = matchLeft - viewRect.Width() / 3;
-			m_scrollPositionH = max(0, min(m_totalScrollWidth - viewRect.Width(),
+			m_scrollPositionH = max(0, min(horizContentWidth - viewRect.Width(),
 				m_scrollPositionH + targetDeltaX));
 			needScroll = true;
 		}
@@ -833,10 +839,7 @@ void CXiaoGongPDFDlg::ScrollToMatchVisible(int pageNum, fz_quad quad)
 
 	if (needScroll)
 	{
-		int maxScroll = m_totalScrollHeight - viewRect.Height();
-		if (maxScroll < 0) maxScroll = 0;
-		if (m_scrollPosition < 0) m_scrollPosition = 0;
-		if (m_scrollPosition > maxScroll) m_scrollPosition = maxScroll;
+		m_scrollPosition = max(0, min(m_scrollPosition, maxScrollV));
 		UpdateScrollBar();
 		RenderVisiblePages();
 	}
@@ -2349,26 +2352,12 @@ BOOL CXiaoGongPDFDlg::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
 		}
 		else
 		{
-			// 滚轮滚动页面
-			CRect viewRect;
-			m_pdfView.GetClientRect(&viewRect);
-
-			int scrollAmount = (zDelta > 0) ? -120 : 120;  // 向上滚动为负，向下滚动为正
-			int newPos = m_scrollPosition + scrollAmount;
-
-			// 限制范围
-			int maxScroll = m_totalScrollHeight - viewRect.Height();
-			if (maxScroll < 0) maxScroll = 0;
-			if (newPos < 0) newPos = 0;
-			if (newPos > maxScroll) newPos = maxScroll;
-
-			if (newPos != m_scrollPosition)
-			{
-				ClearActiveCaptureRect();
-				m_scrollPosition = newPos;
-				UpdateScrollBar();
-				RenderVisiblePages();
-			}
+			// 滚轮滚动页面（按住 Shift 支持横向滚动）
+			int scrollAmount = (zDelta > 0) ? -120 : 120;
+			if (nFlags & MK_SHIFT)
+				ScrollToHorizontalPosition(m_scrollPositionH + scrollAmount);
+			else
+				ScrollToVerticalPosition(m_scrollPosition + scrollAmount);
 
 			return TRUE;
 		}
@@ -5823,8 +5812,9 @@ bool CXiaoGongPDFDlg::StartPanDrag(CPoint pdfViewPoint, bool temporaryPan)
 	SetFocus();
 	CRect viewRect;
 	m_pdfView.GetClientRect(&viewRect);
+	const int horizContentWidth = GetVisibleHorizontalContentWidth(viewRect.Height());
 	m_canDrag = (m_totalScrollHeight > viewRect.Height()) ||
-		(m_totalScrollWidth > viewRect.Width());
+		(horizContentWidth > viewRect.Width());
 	m_isDragging = true;
 	m_tempHandDrag = temporaryPan;
 	m_lastMousePos = pdfViewPoint;
@@ -6783,11 +6773,12 @@ void CXiaoGongPDFDlg::OnMouseMove(UINT nFlags, CPoint point)
 			CRect viewRect;
 			m_pdfView.GetClientRect(&viewRect);
 			const int maxScrollY = max(0, m_totalScrollHeight - viewRect.Height());
-			const int maxScrollX = max(0, m_totalScrollWidth - viewRect.Width());
 
 			const int oldScrollY = m_scrollPosition;
 			const int oldScrollX = m_scrollPositionH;
 			m_scrollPosition = max(0, min(maxScrollY, m_scrollPosition - delta.y));
+			const int horizContentWidth = GetVisibleHorizontalContentWidth(viewRect.Height());
+			const int maxScrollX = max(0, horizContentWidth - viewRect.Width());
 			m_scrollPositionH = max(0, min(maxScrollX, m_scrollPositionH - delta.x));
 
 			UpdateScrollBar();
@@ -7927,17 +7918,22 @@ void CXiaoGongPDFDlg::OnVScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar)
 
 	CRect viewRect;
 	m_pdfView.GetClientRect(&viewRect);
-	int pageSize = viewRect.Height();
-
+	const int pageSize = viewRect.Height();
 	int newPos = m_scrollPosition;
 
 	switch (nSBCode)
 	{
+	case SB_TOP:
+		newPos = 0;
+		break;
+	case SB_BOTTOM:
+		newPos = max(0, m_totalScrollHeight - pageSize);
+		break;
 	case SB_LINEUP:
-		newPos -= 20;
+		newPos -= 40;
 		break;
 	case SB_LINEDOWN:
-		newPos += 20;
+		newPos += 40;
 		break;
 	case SB_PAGEUP:
 		newPos -= pageSize;
@@ -7947,47 +7943,100 @@ void CXiaoGongPDFDlg::OnVScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar)
 		break;
 	case SB_THUMBPOSITION:
 	case SB_THUMBTRACK:
+	default:
+		// m_pdfView 原生滚动条始终隐藏（改用 CPDFScrollBar），忽略驱动合成的 SB_THUMBTRACK 以防跳回首页
+		return;
+	}
+
+	ScrollToVerticalPosition(newPos);
+}
+
+int CXiaoGongPDFDlg::GetLayoutRowPixelWidth(int pageNumber) const
+{
+	if (!m_doc || pageNumber < 0 || pageNumber >= m_totalPages)
+		return 0;
+
+	const CPDFDocument* pDoc = (m_activeDocIndex >= 0 &&
+		m_activeDocIndex < static_cast<int>(m_documents.size())) ?
+		m_documents[m_activeDocIndex] : nullptr;
+	if (!pDoc)
+		return 0;
+
+	int leftP = pageNumber;
+	int rightP = -1;
+	GetLayoutRowPages(pageNumber, leftP, rightP);
+
+	float wL = 0.0f, hL = 0.0f;
+	if (!pDoc->GetPageBounds(leftP, wL, hL))
+		return 0;
+
+	const int leftWidthPx = ClampRenderDimension(wL * m_uniformScale);
+	int rowW = leftWidthPx;
+	if (rightP >= 0)
 	{
-		// ★★★ 修复：将滚动条位置映射回内容坐标系
-		// 获取当前滚动条信息
-		SCROLLINFO si = { 0 };
-		si.cbSize = sizeof(SCROLLINFO);
-		si.fMask = SIF_ALL;
-		::GetScrollInfo(m_pdfView.GetSafeHwnd(), SB_VERT, &si);
-
-		// 滚动条坐标系：nPos ∈ [0, si.nMax - si.nPage + 1]
-		// 内容坐标系：newPos ∈ [0, m_totalScrollHeight - viewRect.Height()]
-		int scrollbarMaxPos = max(0, si.nMax - si.nPage + 1);
-		int contentMaxScroll = max(0, m_totalScrollHeight - viewRect.Height());
-
-		if (scrollbarMaxPos > 0 && contentMaxScroll > 0)
-		{
-			// 线性映射：将滚动条位置映射到内容位置
-			newPos = (int)((float)nPos / scrollbarMaxPos * contentMaxScroll);
-		}
-		else
-		{
-			newPos = 0;
-		}
-		break;
+		float wR = 0.0f, hR = 0.0f;
+		if (!pDoc->GetPageBounds(rightP, wR, hR))
+			return 0;
+		rowW += SPREAD_GAP + ClampRenderDimension(wR * m_uniformScale);
 	}
-	}
-
-	// 限制范围
-	int maxScroll = m_totalScrollHeight - viewRect.Height();
-	if (maxScroll < 0) maxScroll = 0;
-	if (newPos < 0) newPos = 0;
-	if (newPos > maxScroll) newPos = maxScroll;
-
-	if (newPos != m_scrollPosition)
+	else if (m_layoutMode == LAYOUT_TWO_PAGE_SPREAD)
 	{
-		ClearActiveCaptureRect();
-		m_scrollPosition = newPos;
-		UpdateScrollBar();
-		RenderVisiblePages();
+		rowW += SPREAD_GAP + leftWidthPx;
+	}
+	return rowW;
+}
+
+int CXiaoGongPDFDlg::GetVisibleHorizontalContentWidth(int viewHeight) const
+{
+	if (!m_doc || m_totalPages <= 0)
+		return 0;
+	if (m_pageRowTops.size() != static_cast<size_t>(m_totalPages) ||
+		m_pageRowHeights.size() != static_cast<size_t>(m_totalPages))
+	{
+		return m_totalScrollWidth;
 	}
 
-	CDialogEx::OnVScroll(nSBCode, nPos, pScrollBar);
+	const int visibleTop = max(0, m_scrollPosition);
+	const int visibleBottom = visibleTop + max(1, viewHeight);
+	auto first = std::lower_bound(m_pageRowTops.begin(), m_pageRowTops.end(), visibleTop);
+	int firstIndex = static_cast<int>(first - m_pageRowTops.begin());
+	if (firstIndex >= m_totalPages)
+		firstIndex = m_totalPages - 1;
+	if (firstIndex > 0)
+		--firstIndex;
+	while (firstIndex > 0 && m_pageRowTops[firstIndex - 1] == m_pageRowTops[firstIndex])
+		--firstIndex;
+
+	int visibleWidth = 0;
+	bool boundsMissing = false;
+	int idx = max(0, firstIndex);
+	while (idx < m_totalPages && m_pageRowTops[idx] <= visibleBottom)
+	{
+		int leftP = idx;
+		int rightP = -1;
+		GetLayoutRowPages(idx, leftP, rightP);
+		if (m_pageRowTops[leftP] + m_pageRowHeights[leftP] >= visibleTop)
+		{
+			const int rowW = GetLayoutRowPixelWidth(leftP);
+			if (rowW <= 0)
+			{
+				boundsMissing = true;
+				break;
+			}
+			visibleWidth = max(visibleWidth, rowW);
+		}
+		idx = (rightP >= 0) ? (rightP + 1) : (leftP + 1);
+	}
+
+	if (boundsMissing)
+		return m_totalScrollWidth;
+	if (visibleWidth <= 0 && m_currentPage >= 0 && m_currentPage < m_totalPages)
+	{
+		const int curRowW = GetLayoutRowPixelWidth(m_currentPage);
+		if (curRowW > 0)
+			visibleWidth = curRowW;
+	}
+	return visibleWidth;
 }
 
 void CXiaoGongPDFDlg::ScrollToVerticalPosition(int position)
@@ -8011,7 +8060,8 @@ void CXiaoGongPDFDlg::ScrollToHorizontalPosition(int position)
 		return;
 	CRect viewRect;
 	m_pdfView.GetClientRect(&viewRect);
-	position = max(0, min(position, max(0, m_totalScrollWidth - viewRect.Width())));
+	const int horizContentWidth = GetVisibleHorizontalContentWidth(viewRect.Height());
+	position = max(0, min(position, max(0, horizContentWidth - viewRect.Width())));
 	if (position == m_scrollPositionH)
 		return;
 	ClearActiveCaptureRect();
@@ -8020,22 +8070,34 @@ void CXiaoGongPDFDlg::ScrollToHorizontalPosition(int position)
 	RenderVisiblePages();
 }
 
-// ★★★ 横向滚动条消息处理
+// 横向滚动条消息处理
 void CXiaoGongPDFDlg::OnHScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar)
 {
+	if (!m_doc)
+	{
+		CDialogEx::OnHScroll(nSBCode, nPos, pScrollBar);
+		return;
+	}
+
 	CRect viewRect;
 	m_pdfView.GetClientRect(&viewRect);
-	int pageSize = viewRect.Width();
-
+	const int pageSize = viewRect.Width();
+	const int horizContentWidth = GetVisibleHorizontalContentWidth(viewRect.Height());
 	int newPos = m_scrollPositionH;
 
 	switch (nSBCode)
 	{
+	case SB_LEFT:
+		newPos = 0;
+		break;
+	case SB_RIGHT:
+		newPos = max(0, horizContentWidth - pageSize);
+		break;
 	case SB_LINELEFT:
-		newPos -= 20;
+		newPos -= 40;
 		break;
 	case SB_LINERIGHT:
-		newPos += 20;
+		newPos += 40;
 		break;
 	case SB_PAGELEFT:
 		newPos -= pageSize;
@@ -8045,47 +8107,12 @@ void CXiaoGongPDFDlg::OnHScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar)
 		break;
 	case SB_THUMBPOSITION:
 	case SB_THUMBTRACK:
-	{
-		// ★★★ 修复：将滚动条位置映射回内容坐标系
-		// 获取当前滚动条信息
-		SCROLLINFO siH = { 0 };
-		siH.cbSize = sizeof(SCROLLINFO);
-		siH.fMask = SIF_ALL;
-		::GetScrollInfo(m_pdfView.GetSafeHwnd(), SB_HORZ, &siH);
-		
-		// 滚动条坐标系：nPos ∈ [0, siH.nMax - siH.nPage + 1]
-		// 内容坐标系：newPos ∈ [0, m_totalScrollWidth - viewRect.Width()]
-		int scrollbarMaxPosH = max(0, siH.nMax - siH.nPage + 1);
-		int contentMaxScrollH = max(0, m_totalScrollWidth - viewRect.Width());
-		
-		if (scrollbarMaxPosH > 0 && contentMaxScrollH > 0)
-		{
-			// 线性映射：将滚动条位置映射到内容位置
-			newPos = (int)((float)nPos / scrollbarMaxPosH * contentMaxScrollH);
-		}
-		else
-		{
-			newPos = 0;
-		}
-		break;
-	}
+	default:
+		// m_pdfView 原生滚动条始终隐藏（改用 CPDFScrollBar），忽略驱动合成的 SB_THUMBTRACK 以防跳变
+		return;
 	}
 
-	// 限制范围
-	int maxScroll = m_totalScrollWidth - viewRect.Width();
-	if (maxScroll < 0) maxScroll = 0;
-	if (newPos < 0) newPos = 0;
-	if (newPos > maxScroll) newPos = maxScroll;
-
-	if (newPos != m_scrollPositionH)
-	{
-		ClearActiveCaptureRect();
-		m_scrollPositionH = newPos;
-		UpdateScrollBar();
-		RenderVisiblePages();
-	}
-
-	CDialogEx::OnHScroll(nSBCode, nPos, pScrollBar);
+	ScrollToHorizontalPosition(newPos);
 }
 
 // 更新滚动条
@@ -8105,80 +8132,20 @@ void CXiaoGongPDFDlg::UpdateScrollBar()
 		return;
 	}
 
-	CRect viewRect;
-	m_pdfView.GetClientRect(&viewRect);
-
-	// The custom bars use document coordinates directly, without the 16-bit scroll message limit.
+	// 自定义滚动条直接使用文档像素坐标，不受 Win32 16-bit 滚动上限限制
 	m_pdfView.ShowScrollBar(SB_VERT, FALSE);
 	m_pdfView.ShowScrollBar(SB_HORZ, FALSE);
+
+	CRect viewRect;
 	m_pdfView.GetClientRect(&viewRect);
 	m_scrollPosition = max(0, min(m_scrollPosition,
 		max(0, m_totalScrollHeight - viewRect.Height())));
-	int horizontalContentWidth = m_totalScrollWidth;
-	if (m_doc &&
-		m_pageRowTops.size() == static_cast<size_t>(m_totalPages) &&
-		m_pageRowHeights.size() == static_cast<size_t>(m_totalPages))
-	{
-		CPDFDocument* pDoc = GetActiveDocument();
-		if (pDoc)
-		{
-			const int visibleTop = m_scrollPosition;
-			const int visibleBottom = visibleTop + viewRect.Height();
-			auto first = std::lower_bound(m_pageRowTops.begin(),
-				m_pageRowTops.end(), visibleTop);
-			int firstIndex = static_cast<int>(first - m_pageRowTops.begin());
-			if (firstIndex >= m_totalPages)
-				firstIndex = m_totalPages - 1;
-			if (firstIndex > 0)
-				--firstIndex;
-			while (firstIndex > 0 && m_pageRowTops[firstIndex - 1] == m_pageRowTops[firstIndex])
-				--firstIndex;
-
-			int visibleWidth = 0;
-			bool boundsMissing = false;
-			int idx = max(0, firstIndex);
-			while (idx < m_totalPages && m_pageRowTops[idx] <= visibleBottom)
-			{
-				int leftP = idx;
-				int rightP = -1;
-				GetLayoutRowPages(idx, leftP, rightP);
-				if (m_pageRowTops[leftP] + m_pageRowHeights[leftP] >= visibleTop)
-				{
-					float wL = 0.0f, hL = 0.0f;
-					if (!pDoc->GetPageBounds(leftP, wL, hL))
-					{
-						boundsMissing = true;
-						break;
-					}
-					const int leftWidthPx = ClampRenderDimension(wL * m_uniformScale);
-					int rowW = leftWidthPx;
-					if (rightP >= 0)
-					{
-						float wR = 0.0f, hR = 0.0f;
-						if (!pDoc->GetPageBounds(rightP, wR, hR))
-						{
-							boundsMissing = true;
-							break;
-						}
-						rowW += SPREAD_GAP + ClampRenderDimension(wR * m_uniformScale);
-					}
-					else if (m_layoutMode == LAYOUT_TWO_PAGE_SPREAD)
-					{
-						rowW += SPREAD_GAP + leftWidthPx;
-					}
-					visibleWidth = max(visibleWidth, rowW);
-				}
-				idx = (rightP >= 0) ? (rightP + 1) : (leftP + 1);
-			}
-			if (!boundsMissing)
-				horizontalContentWidth = visibleWidth;
-		}
-	}
+	int horizontalContentWidth = GetVisibleHorizontalContentWidth(viewRect.Height());
 	m_scrollPositionH = max(0, min(m_scrollPositionH,
 		max(0, horizontalContentWidth - viewRect.Width())));
-	const bool showHorizontalBar = m_doc && horizontalContentWidth > viewRect.Width();
+	bool showHorizontalBar = m_doc && horizontalContentWidth > viewRect.Width();
 	if (m_pdfHorizontalScrollBar.GetSafeHwnd() &&
-		m_pdfHorizontalScrollBar.IsWindowVisible() != showHorizontalBar &&
+		(m_pdfHorizontalScrollBar.IsWindowVisible() != FALSE) != showHorizontalBar &&
 		m_statusBar.GetSafeHwnd())
 	{
 		CRect pdfRect, statusRect;
@@ -8197,6 +8164,10 @@ void CXiaoGongPDFDlg::UpdateScrollBar()
 		m_pdfView.GetClientRect(&viewRect);
 		m_scrollPosition = max(0, min(m_scrollPosition,
 			max(0, m_totalScrollHeight - viewRect.Height())));
+		horizontalContentWidth = GetVisibleHorizontalContentWidth(viewRect.Height());
+		m_scrollPositionH = max(0, min(m_scrollPositionH,
+			max(0, horizontalContentWidth - viewRect.Width())));
+		showHorizontalBar = m_doc && horizontalContentWidth > viewRect.Width();
 	}
 	if (m_pdfVerticalScrollBar.GetSafeHwnd())
 	{
@@ -11169,13 +11140,39 @@ void CXiaoGongPDFDlg::FinishInlineTextAnnot(bool discard)
 	const float effW = max(20.0f, (rot == 90 || rot == 270) ? origH : origW);
 	const float effH = max(20.0f, (rot == 90 || rot == 270) ? origW : origH);
 
+	float targetWidthPt = st.widthPt;
+	if (!st.userResizedWidth && !finalText.IsEmpty())
+	{
+		const int firstBreak = finalText.FindOneOf(_T("\r\n"));
+		const CString firstPara = (firstBreak >= 0) ? finalText.Left(firstBreak) : finalText;
+		const float paraWidthPt = MeasureFreeTextSpanPt(
+			firstPara, firstPara.GetLength(), st.fontSizePt, st.charSpacingPt) + 18.0f;
+		const float autoMaxW = min(300.0f, max(80.0f, effW - st.localXPt - 4.0f));
+		if (paraWidthPt > targetWidthPt)
+			targetWidthPt = min(autoMaxW, paraWidthPt);
+	}
+
 	std::vector<FreeTextVisualLine> wrappedLines;
 	LayoutFreeTextVisualLines(nullptr, nullptr, 1.0f, finalText, st.fontSizePt, st.charSpacingPt,
-		max(24.0f, st.widthPt - 8.0f), wrappedLines);
-	const float boxW = max(32.0f, min(st.widthPt + 4.0f, effW - st.localXPt));
+		max(20.0f, targetWidthPt - 8.0f), wrappedLines);
+
+	float maxLineW = 0.0f;
+	for (const auto& ln : wrappedLines)
+	{
+		if (!ln.text.IsEmpty())
+		{
+			maxLineW = max(maxLineW, MeasureFreeTextSpanPt(
+				ln.text, ln.text.GetLength(), st.fontSizePt, st.charSpacingPt));
+		}
+	}
+
+	const float boxW = max(32.0f, min(effW - 4.0f, max(targetWidthPt, maxLineW + 8.0f)));
 	const float boxH = max(st.fontSizePt * 1.45f + 6.0f,
-		min(effH - st.localYPt,
-			static_cast<float>(wrappedLines.size()) * st.fontSizePt * 1.32f + 8.0f));
+		min(effH - 4.0f,
+			static_cast<float>(wrappedLines.size()) * st.fontSizePt * 1.32f +
+			st.fontSizePt * 0.16f + 6.0f));
+	const float localXPt = max(2.0f, min(st.localXPt, max(2.0f, effW - boxW - 2.0f)));
+	const float localYPt = max(2.0f, min(st.localYPt, max(2.0f, effH - boxH - 2.0f)));
 
 	auto rotPtToFitz = [&](float rx, float ry, float& outFx, float& outFy)
 	{
@@ -11201,10 +11198,10 @@ void CXiaoGongPDFDlg::FinishInlineTextAnnot(bool discard)
 	};
 
 	float fx[4] = {}, fy[4] = {};
-	rotPtToFitz(st.localXPt, st.localYPt, fx[0], fy[0]);
-	rotPtToFitz(st.localXPt + boxW, st.localYPt, fx[1], fy[1]);
-	rotPtToFitz(st.localXPt, st.localYPt + boxH, fx[2], fy[2]);
-	rotPtToFitz(st.localXPt + boxW, st.localYPt + boxH, fx[3], fy[3]);
+	rotPtToFitz(localXPt, localYPt, fx[0], fy[0]);
+	rotPtToFitz(localXPt + boxW, localYPt, fx[1], fy[1]);
+	rotPtToFitz(localXPt, localYPt + boxH, fx[2], fy[2]);
+	rotPtToFitz(localXPt + boxW, localYPt + boxH, fx[3], fy[3]);
 
 	float minFx = fx[0], maxFx = fx[0], minFy = fy[0], maxFy = fy[0];
 	for (int i = 1; i < 4; ++i)
@@ -11372,7 +11369,6 @@ int CXiaoGongPDFDlg::HitTestInlineAnnotCharIndex(CPoint viewPt)
 
 	const float padXPt = 4.0f;
 	const float padYPt = 3.0f;
-	const float charSpacingPx = m_inlineAnnot.charSpacingPt * scale;
 	const float lineStepPx = max(10.0f, m_inlineAnnot.fontSizePt * 1.32f * scale);
 	const int textTopPx = offsetY + static_cast<int>(std::round((m_inlineAnnot.localYPt + padYPt) * scale));
 	const int textLeftPx = offsetX + static_cast<int>(std::round((m_inlineAnnot.localXPt + padXPt) * scale));
@@ -11392,7 +11388,8 @@ int CXiaoGongPDFDlg::HitTestInlineAnnotCharIndex(CPoint viewPt)
 	{
 		if (i < ln.text.GetLength() && ln.text[i - 1] >= 0xD800 && ln.text[i - 1] <= 0xDBFF)
 			continue;
-		const int w = MeasureTextWithCharSpacingPx(dc.GetSafeHdc(), hFont, ln.text, i, charSpacingPx);
+		const int w = MeasureTextWithCharSpacingPx(dc.GetSafeHdc(), hFont, ln.text, i,
+			m_inlineAnnot.fontSizePt, m_inlineAnnot.charSpacingPt, scale);
 		if (relX <= (prevW + w) / 2)
 		{
 			bestOffset = i - ((i >= 2 && ln.text[i - 2] >= 0xD800 && ln.text[i - 2] <= 0xDBFF) ? 2 : 1);
@@ -11430,7 +11427,6 @@ bool CXiaoGongPDFDlg::HandleInlineAnnotKeyNav(UINT vk, bool shift)
 		CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, _T("微软雅黑"));
 
 	HFONT hFont = static_cast<HFONT>(font.GetSafeHandle());
-	const float charSpacingPx = m_inlineAnnot.charSpacingPt * scale;
 
 	std::vector<FreeTextVisualLine> lines;
 	LayoutFreeTextVisualLines(dc.GetSafeHdc(), hFont, scale,
@@ -11470,8 +11466,9 @@ bool CXiaoGongPDFDlg::HandleInlineAnnotKeyNav(UINT vk, bool shift)
 			return true;
 
 		const int colChars = max(0, min(lines[curLine].text.GetLength(), selEnd - lines[curLine].startChar));
-		const int curX = (colChars > 0) ?
-			MeasureTextWithCharSpacingPx(dc.GetSafeHdc(), hFont, lines[curLine].text, colChars, charSpacingPx) : 0;
+		const int curX = (colChars > 0) ? MeasureTextWithCharSpacingPx(
+			dc.GetSafeHdc(), hFont, lines[curLine].text, colChars,
+			m_inlineAnnot.fontSizePt, m_inlineAnnot.charSpacingPt, scale) : 0;
 
 		const FreeTextVisualLine& dst = lines[targetLine];
 		int bestOff = dst.text.GetLength();
@@ -11480,7 +11477,8 @@ bool CXiaoGongPDFDlg::HandleInlineAnnotKeyNav(UINT vk, bool shift)
 		{
 			if (i < dst.text.GetLength() && dst.text[i - 1] >= 0xD800 && dst.text[i - 1] <= 0xDBFF)
 				continue;
-			const int w = MeasureTextWithCharSpacingPx(dc.GetSafeHdc(), hFont, dst.text, i, charSpacingPx);
+			const int w = MeasureTextWithCharSpacingPx(dc.GetSafeHdc(), hFont, dst.text, i,
+				m_inlineAnnot.fontSizePt, m_inlineAnnot.charSpacingPt, scale);
 			if (curX <= (prevW + w) / 2)
 			{
 				bestOff = i - ((i >= 2 && dst.text[i - 2] >= 0xD800 && dst.text[i - 2] <= 0xDBFF) ? 2 : 1);
@@ -11547,7 +11545,6 @@ void CXiaoGongPDFDlg::DrawInlineTextAnnotOverlay(CDC* pDC, const CRect& clientRe
 
 	const float padXPt = 4.0f;
 	const float padYPt = 3.0f;
-	const float charSpacingPx = m_inlineAnnot.charSpacingPt * scale;
 	HFONT hTextFont = static_cast<HFONT>(textFont.GetSafeHandle());
 
 	// 未手动拖拽宽度手柄时，单行输入（及增大文字间距时）自动适度向右延展至上限后再自动折行
@@ -11555,9 +11552,9 @@ void CXiaoGongPDFDlg::DrawInlineTextAnnotOverlay(CDC* pDC, const CRect& clientRe
 	{
 		int firstBreak = fullText.FindOneOf(_T("\r\n"));
 		CString firstPara = (firstBreak >= 0) ? fullText.Left(firstBreak) : fullText;
-		const int paraPx = MeasureTextWithCharSpacingPx(
-			pDC->GetSafeHdc(), hTextFont, firstPara, firstPara.GetLength(), charSpacingPx);
-		const float textW = static_cast<float>(paraPx) / scale + padXPt * 2.0f + 10.0f;
+		const float textW = MeasureFreeTextSpanPt(
+			firstPara, firstPara.GetLength(), m_inlineAnnot.fontSizePt, m_inlineAnnot.charSpacingPt) +
+			padXPt * 2.0f + 10.0f;
 		const float autoMaxW = min(300.0f, max(80.0f, effW - m_inlineAnnot.localXPt - 4.0f));
 		if (textW > m_inlineAnnot.widthPt)
 			m_inlineAnnot.widthPt = min(autoMaxW, textW);
@@ -11570,7 +11567,8 @@ void CXiaoGongPDFDlg::DrawInlineTextAnnotOverlay(CDC* pDC, const CRect& clientRe
 
 	const float lineStepPt = m_inlineAnnot.fontSizePt * 1.32f;
 	const float boxHeightPt = max(m_inlineAnnot.fontSizePt * 1.45f + padYPt * 2.0f,
-		static_cast<float>(lines.size()) * lineStepPt + padYPt * 2.0f);
+		static_cast<float>(lines.size()) * lineStepPt +
+		m_inlineAnnot.fontSizePt * 0.16f + padYPt * 2.0f);
 
 	const int boxLeft = offsetX + static_cast<int>(std::round(m_inlineAnnot.localXPt * scale));
 	const int boxTop = offsetY + static_cast<int>(std::round(m_inlineAnnot.localYPt * scale));
@@ -11713,10 +11711,12 @@ void CXiaoGongPDFDlg::DrawInlineTextAnnotOverlay(CDC* pDC, const CRect& clientRe
 			{
 				const int preLen = ovStart - ln.startChar;
 				const int selLen = ovEnd - ovStart;
-				const int x1 = textLeftPx + (preLen > 0 ?
-					MeasureTextWithCharSpacingPx(pDC->GetSafeHdc(), hTextFont, ln.text, preLen, charSpacingPx) : 0);
-				const int x2 = textLeftPx +
-					MeasureTextWithCharSpacingPx(pDC->GetSafeHdc(), hTextFont, ln.text, preLen + selLen, charSpacingPx);
+				const int x1 = textLeftPx + (preLen > 0 ? MeasureTextWithCharSpacingPx(
+					pDC->GetSafeHdc(), hTextFont, ln.text, preLen,
+					m_inlineAnnot.fontSizePt, m_inlineAnnot.charSpacingPt, scale) : 0);
+				const int x2 = textLeftPx + MeasureTextWithCharSpacingPx(
+					pDC->GetSafeHdc(), hTextFont, ln.text, preLen + selLen,
+					m_inlineAnnot.fontSizePt, m_inlineAnnot.charSpacingPt, scale);
 				const int y1 = textTopBasePx + static_cast<int>(std::round(i * lineStepPx));
 				graphics.FillRectangle(&selBrush, x1, y1, max(2, x2 - x1), glyphHeightPx);
 			}
@@ -11741,7 +11741,8 @@ void CXiaoGongPDFDlg::DrawInlineTextAnnotOverlay(CDC* pDC, const CRect& clientRe
 			if (lines[i].text.IsEmpty())
 				continue;
 			const int yPx = textTopBasePx + static_cast<int>(std::round(i * lineStepPx));
-			DrawTextWithCharSpacingPx(pDC->GetSafeHdc(), textLeftPx, yPx, lines[i].text, charSpacingPx);
+			DrawTextWithCharSpacingPx(pDC->GetSafeHdc(), textLeftPx, yPx, lines[i].text,
+				m_inlineAnnot.fontSizePt, m_inlineAnnot.charSpacingPt, scale);
 		}
 	}
 	pDC->RestoreDC(savedDc);
@@ -11762,8 +11763,9 @@ void CXiaoGongPDFDlg::DrawInlineTextAnnotOverlay(CDC* pDC, const CRect& clientRe
 	}
 	const FreeTextVisualLine& caretLine = lines[caretLineIdx];
 	const int caretCharsInLine = max(0, min(caretLine.text.GetLength(), selEnd - caretLine.startChar));
-	const int caretViewX = textLeftPx + (caretCharsInLine > 0 ?
-		MeasureTextWithCharSpacingPx(pDC->GetSafeHdc(), hTextFont, caretLine.text, caretCharsInLine, charSpacingPx) : 0);
+	const int caretViewX = textLeftPx + (caretCharsInLine > 0 ? MeasureTextWithCharSpacingPx(
+		pDC->GetSafeHdc(), hTextFont, caretLine.text, caretCharsInLine,
+		m_inlineAnnot.fontSizePt, m_inlineAnnot.charSpacingPt, scale) : 0);
 	const int caretViewY = textTopBasePx + static_cast<int>(std::round(caretLineIdx * lineStepPx));
 
 	if (m_inlineAnnotEdit.GetSafeHwnd())
@@ -13063,36 +13065,48 @@ void CXiaoGongPDFDlg::NavigateToSidebarAnnotation(const DocumentAnnotationItem& 
 
 		int targetScrollV = (pageNum < static_cast<int>(m_pageRowTops.size())) ?
 			m_pageRowTops[pageNum] : m_pageYPositions[pageNum];
+		bool hasTargetAnnotRect = false;
+		CRect annotRect(0, 0, 0, 0);
 
 		fz_rect bounds = {};
 		if (!fz_is_empty_rect(item.fitzBounds) && !fz_is_infinite_rect(item.fitzBounds) &&
 			TryGetPageBaseBounds(pageNum, bounds))
 		{
 			const int rotation = GetPageRotation(pageNum);
-			const CRect annotRect = TransformQuadToBitmapRect(
+			annotRect = TransformQuadToBitmapRect(
 				fz_quad_from_rect(item.fitzBounds), bounds, rotation, m_uniformScale);
+			hasTargetAnnotRect = true;
 
 			const int annotCenterY = m_pageYPositions[pageNum] +
 				(annotRect.top + annotRect.bottom) / 2;
 			targetScrollV = annotCenterY - viewH / 3;
-
-			if (m_layoutMode == LAYOUT_SINGLE_CONTINUOUS && m_totalScrollWidth > viewW)
-			{
-				const float origW = bounds.x1 - bounds.x0;
-				const float origH = bounds.y1 - bounds.y0;
-				const float effW = (rotation == 90 || rotation == 270) ? origH : origW;
-				const int pagePxW = ClampRenderDimension(effW * m_uniformScale);
-				if (pagePxW > viewW)
-				{
-					const int annotCenterX = (annotRect.left + annotRect.right) / 2;
-					const int maxScrollH = max(0, pagePxW - viewW);
-					m_scrollPositionH = max(0, min(annotCenterX - viewW / 2, maxScrollH));
-				}
-			}
 		}
 
 		const int maxScrollV = max(0, m_totalScrollHeight - viewH);
 		m_scrollPosition = max(0, min(targetScrollV, maxScrollV));
+
+		if (hasTargetAnnotRect)
+		{
+			const int horizContentWidth = GetVisibleHorizontalContentWidth(viewH);
+			if (horizContentWidth > viewW)
+			{
+				int leftP = pageNum, rightP = -1;
+				GetLayoutRowPages(pageNum, leftP, rightP);
+				int offsetInRow = 0;
+				if (rightP >= 0 && pageNum == rightP)
+				{
+					float wL = 0.0f, hL = 0.0f;
+					if (CPDFDocument* pDoc = GetActiveDocument())
+					{
+						if (pDoc->GetPageBounds(leftP, wL, hL))
+							offsetInRow = ClampRenderDimension(wL * m_uniformScale) + SPREAD_GAP;
+					}
+				}
+				const int annotCenterX = offsetInRow + (annotRect.left + annotRect.right) / 2;
+				const int maxScrollH = max(0, horizContentWidth - viewW);
+				m_scrollPositionH = max(0, min(annotCenterX - viewW / 2, maxScrollH));
+			}
+		}
 		m_panOffset = CPoint(0, 0);
 
 		UpdateScrollBar();

@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -98,43 +99,108 @@ namespace
 		}
 	}
 
-	float EstimateCharAdvancePt(WCHAR ch, float fontSizePt)
+	struct PdfFreeTextFontMetricsTable
 	{
-		if (ch == _T('\t'))
-			return fontSizePt * 2.0f;
-		if (ch < 0x7F)
+		float helvAsciiEm[128] = {};
+		float cjkLatinExtEm[0x0530 - 0x0080] = {};
+		float cjkGeneralSymEm[0x2800 - 0x2000] = {};
+		float cjkPunctEm[0x3040 - 0x3000] = {};
+		float cjkFullwidthEm[0xFFF0 - 0xFF00] = {};
+		float cjkIdeographEm = 1.0f;
+	};
+
+	const PdfFreeTextFontMetricsTable& GetPdfFreeTextFontMetrics()
+	{
+		static PdfFreeTextFontMetricsTable s_table;
+		static std::once_flag s_once;
+		std::call_once(s_once, []()
 		{
-			if (ch == _T(' ') || ch == _T('i') || ch == _T('l') || ch == _T('I') ||
-				ch == _T('.') || ch == _T(',') || ch == _T(':') || ch == _T(';') || ch == _T('!'))
+			for (int i = 0; i < 128; ++i)
+				s_table.helvAsciiEm[i] = 0.556f;
+			for (float& v : s_table.cjkLatinExtEm)
+				v = 0.60f;
+			for (float& v : s_table.cjkGeneralSymEm)
+				v = 1.0f;
+			for (float& v : s_table.cjkPunctEm)
+				v = 1.0f;
+			for (float& v : s_table.cjkFullwidthEm)
+				v = 1.0f;
+			s_table.cjkIdeographEm = 1.0f;
+
+			fz_context* pCtx = fz_new_context(nullptr, nullptr, 512 * 1024);
+			if (!pCtx)
+				return;
+
+			fz_font* pHelv = nullptr;
+			fz_font* pCjk = nullptr;
+			fz_var(pHelv);
+			fz_var(pCjk);
+			fz_try(pCtx)
 			{
-				return fontSizePt * 0.30f;
+				pHelv = fz_new_base14_font(pCtx, "Helvetica");
+				pCjk = fz_new_cjk_font(pCtx, FZ_ADOBE_GB);
+
+				auto queryEm = [&](fz_font* pFont, int cp, float fallback) -> float
+				{
+					if (!pFont)
+						return fallback;
+					const int gid = fz_encode_character(pCtx, pFont, cp);
+					if (gid <= 0)
+						return fallback;
+					const float adv = fz_advance_glyph(pCtx, pFont, gid, 0);
+					return (adv > 0.01f && adv <= 3.0f) ? adv : fallback;
+				};
+
+				for (int cp = 0x20; cp <= 0x7E; ++cp)
+					s_table.helvAsciiEm[cp] = queryEm(pHelv, cp, 0.556f);
+
+				for (int cp = 0x0080; cp < 0x0530; ++cp)
+					s_table.cjkLatinExtEm[cp - 0x0080] = queryEm(pCjk, cp, 0.60f);
+
+				for (int cp = 0x2000; cp < 0x2800; ++cp)
+					s_table.cjkGeneralSymEm[cp - 0x2000] = queryEm(pCjk, cp, 1.0f);
+
+				for (int cp = 0x3000; cp < 0x3040; ++cp)
+					s_table.cjkPunctEm[cp - 0x3000] = queryEm(pCjk, cp, 1.0f);
+
+				for (int cp = 0xFF00; cp < 0xFFF0; ++cp)
+					s_table.cjkFullwidthEm[cp - 0xFF00] = queryEm(pCjk, cp, 1.0f);
+
+				s_table.cjkIdeographEm = queryEm(pCjk, 0x4E2D, 1.0f);
 			}
-			if (ch == _T('m') || ch == _T('w') || ch == _T('M') || ch == _T('W'))
-				return fontSizePt * 0.82f;
-			return fontSizePt * 0.56f;
-		}
-		return fontSizePt * 1.0f;
+			fz_always(pCtx)
+			{
+				if (pCjk)
+					fz_drop_font(pCtx, pCjk);
+				if (pHelv)
+					fz_drop_font(pCtx, pHelv);
+			}
+			fz_catch(pCtx)
+			{
+			}
+			fz_drop_context(pCtx);
+		});
+		return s_table;
 	}
 
-	float MeasureSpanPt(HDC hDC, HFONT hFont, float pxPerPt,
-		LPCTSTR pChars, int count, float fontSizePt, float charSpacingPt)
+	float GetPdfFreeTextCodepointAdvanceEm(uint32_t cp)
 	{
-		if (count <= 0 || !pChars)
+		const PdfFreeTextFontMetricsTable& tbl = GetPdfFreeTextFontMetrics();
+		if (cp == _T('\t'))
+			return tbl.helvAsciiEm[_T(' ')] * 4.0f;
+		if (cp < 0x20)
 			return 0.0f;
-		if (hDC && hFont && pxPerPt > 0.01f)
-		{
-			const int px = MeasureTextWithCharSpacingPx(
-				hDC, hFont, pChars, count, charSpacingPt * pxPerPt);
-			return static_cast<float>(px) / pxPerPt;
-		}
-		float sum = 0.0f;
-		for (int i = 0; i < count; ++i)
-		{
-			if (pChars[i] >= 0xDC00 && pChars[i] <= 0xDFFF)
-				continue;
-			sum += EstimateCharAdvancePt(pChars[i], fontSizePt) + charSpacingPt;
-		}
-		return sum;
+		if (cp <= 0x7E)
+			return tbl.helvAsciiEm[cp];
+		if (cp >= 0x0080 && cp < 0x0530)
+			return tbl.cjkLatinExtEm[cp - 0x0080];
+		if (cp >= 0x2000 && cp < 0x2800)
+			return tbl.cjkGeneralSymEm[cp - 0x2000];
+		if (cp >= 0x3000 && cp < 0x3040)
+			return tbl.cjkPunctEm[cp - 0x3000];
+		if (cp >= 0xFF00 && cp < 0xFFF0)
+			return tbl.cjkFullwidthEm[cp - 0xFF00];
+		return tbl.cjkIdeographEm;
 	}
 
 	// 解析 FreeText 批注上的 /DA 与 /DS 默认样式（字号、颜色、文字间距 letter-spacing）
@@ -227,7 +293,9 @@ namespace
 		for (int i = 0; i < lineText.GetLength(); ++i)
 		{
 			const WCHAR wc = lineText[i];
-			const bool isAscii = (wc >= 0x20 && wc <= 0x7E);
+			if (wc < 0x20 && wc != _T('\t'))
+				continue;
+			const bool isAscii = (wc == _T('\t')) || (wc >= 0x20 && wc <= 0x7E);
 			const int nextMode = isAscii ? 1 : 2;
 			if (nextMode != curMode)
 			{
@@ -249,6 +317,11 @@ namespace
 
 			if (curMode == 1)
 			{
+				if (wc == _T('\t'))
+				{
+					fz_append_string(pCtx, pBuf, "    ");
+					continue;
+				}
 				if (wc == _T('(') || wc == _T(')') || wc == _T('\\'))
 					fz_append_byte(pCtx, pBuf, '\\');
 				fz_append_byte(pCtx, pBuf, static_cast<unsigned char>(wc));
@@ -325,7 +398,6 @@ namespace
 			pBuf = fz_new_buffer(pCtx, 512);
 			fz_append_printf(pCtx, pBuf, "q\n%g %g %g %g %g %g cm\n",
 				tfm.a, tfm.b, tfm.c, tfm.d, tfm.e, tfm.f);
-			fz_append_printf(pCtx, pBuf, "0 0 %g %g re\nW\nn\n", w, h);
 			fz_append_string(pCtx, pBuf, "BT\n");
 			fz_append_printf(pCtx, pBuf, "%g %g %g rg\n", r, g, b);
 			if (charSpacingPt > 0.005f)
@@ -367,35 +439,58 @@ namespace
 	}
 }
 
-int MeasureTextWithCharSpacingPx(
-	HDC hDC,
-	HFONT hFont,
+float MeasureFreeTextSpanPt(
 	LPCTSTR pText,
 	int unitCount,
-	float charSpacingPx)
+	float fontSizePt,
+	float charSpacingPt)
 {
-	if (!hDC || !pText || unitCount <= 0)
-		return 0;
+	if (!pText || unitCount <= 0 || fontSizePt <= 0.0f)
+		return 0.0f;
 
-	HGDIOBJ hOld = hFont ? ::SelectObject(hDC, hFont) : nullptr;
-	SIZE sz = { 0, 0 };
-	const BOOL ok = ::GetTextExtentPoint32W(hDC, pText, unitCount, &sz);
-	if (hOld)
-		::SelectObject(hDC, hOld);
-	if (!ok)
-		return 0;
-
-	if (charSpacingPx <= 0.005f)
-		return sz.cx;
-
-	int glyphCount = 0;
+	float sumPt = 0.0f;
 	for (int i = 0; i < unitCount; ++i)
 	{
-		if (pText[i] >= 0xDC00 && pText[i] <= 0xDFFF)
+		const WCHAR wc = pText[i];
+		if (wc == _T('\t'))
+		{
+			// \t 展开为 4 个 ASCII 空格，每个空格在 PDF 中也会叠加一次 Tc 字距
+			sumPt += GetPdfFreeTextCodepointAdvanceEm(_T('\t')) * fontSizePt + charSpacingPt * 4.0f;
 			continue;
-		++glyphCount;
+		}
+		if (wc < 0x20)
+			continue;
+
+		uint32_t cp = static_cast<uint32_t>(wc);
+		int codeUnits = 1;
+		if (i + 1 < unitCount &&
+			wc >= 0xD800 && wc <= 0xDBFF &&
+			pText[i + 1] >= 0xDC00 && pText[i + 1] <= 0xDFFF)
+		{
+			cp = 0x10000U + ((static_cast<uint32_t>(wc - 0xD800) << 10) |
+				static_cast<uint32_t>(pText[i + 1] - 0xDC00));
+			codeUnits = 2;
+			++i;
+		}
+		// UniGB-UCS2-H 代理对占 2 个 2-byte 字符码，Tc 按字符码次数累加
+		sumPt += GetPdfFreeTextCodepointAdvanceEm(cp) * fontSizePt + charSpacingPt * codeUnits;
 	}
-	return static_cast<int>(std::round(static_cast<float>(sz.cx) + glyphCount * charSpacingPx));
+	return sumPt;
+}
+
+int MeasureTextWithCharSpacingPx(
+	HDC /*hDC*/,
+	HFONT /*hFont*/,
+	LPCTSTR pText,
+	int unitCount,
+	float fontSizePt,
+	float charSpacingPt,
+	float scale)
+{
+	if (!pText || unitCount <= 0 || scale <= 0.0f)
+		return 0;
+	const float spanPt = MeasureFreeTextSpanPt(pText, unitCount, fontSizePt, charSpacingPt);
+	return static_cast<int>(std::round(spanPt * scale));
 }
 
 void DrawTextWithCharSpacingPx(
@@ -403,41 +498,41 @@ void DrawTextWithCharSpacingPx(
 	int x,
 	int y,
 	const CString& lineText,
-	float charSpacingPx)
+	float fontSizePt,
+	float charSpacingPt,
+	float scale)
 {
 	const int len = lineText.GetLength();
-	if (!hDC || len <= 0)
+	if (!hDC || len <= 0 || scale <= 0.0f)
 		return;
-
-	if (charSpacingPx <= 0.005f)
-	{
-		::ExtTextOutW(hDC, x, y, 0, nullptr, lineText, len, nullptr);
-		return;
-	}
-
-	std::vector<INT> baseCum(static_cast<size_t>(len), 0);
-	SIZE sz = { 0, 0 };
-	if (!::GetTextExtentExPointW(hDC, lineText, len, 0, nullptr, baseCum.data(), &sz))
-	{
-		::ExtTextOutW(hDC, x, y, 0, nullptr, lineText, len, nullptr);
-		return;
-	}
 
 	std::vector<INT> dx(static_cast<size_t>(len), 0);
+	float cumPt = 0.0f;
 	int prevOriginPx = 0;
-	int glyphSeen = 0;
 	for (int i = 0; i < len; ++i)
 	{
+		const WCHAR wc = lineText[i];
 		if (i + 1 < len &&
-			lineText[i] >= 0xD800 && lineText[i] <= 0xDBFF &&
+			wc >= 0xD800 && wc <= 0xDBFF &&
 			lineText[i + 1] >= 0xDC00 && lineText[i + 1] <= 0xDFFF)
 		{
+			const uint32_t cp = 0x10000U + ((static_cast<uint32_t>(wc - 0xD800) << 10) |
+				static_cast<uint32_t>(lineText[i + 1] - 0xDC00));
+			cumPt += GetPdfFreeTextCodepointAdvanceEm(cp) * fontSizePt + charSpacingPt * 2.0f;
+			const int nextOriginPx = static_cast<int>(std::round(cumPt * scale));
 			dx[i] = 0;
+			dx[i + 1] = max(0, nextOriginPx - prevOriginPx);
+			prevOriginPx = nextOriginPx;
+			++i;
 			continue;
 		}
-		++glyphSeen;
-		const int nextOriginPx = static_cast<int>(std::round(
-			static_cast<float>(baseCum[i]) + glyphSeen * charSpacingPx));
+
+		if (wc == _T('\t'))
+			cumPt += GetPdfFreeTextCodepointAdvanceEm(_T('\t')) * fontSizePt + charSpacingPt * 4.0f;
+		else if (wc >= 0x20)
+			cumPt += GetPdfFreeTextCodepointAdvanceEm(static_cast<uint32_t>(wc)) * fontSizePt + charSpacingPt;
+
+		const int nextOriginPx = static_cast<int>(std::round(cumPt * scale));
 		dx[i] = max(0, nextOriginPx - prevOriginPx);
 		prevOriginPx = nextOriginPx;
 	}
@@ -446,9 +541,9 @@ void DrawTextWithCharSpacingPx(
 }
 
 void LayoutFreeTextVisualLines(
-	HDC hMeasureDC,
-	HFONT hMeasureFont,
-	float pxPerPt,
+	HDC /*hMeasureDC*/,
+	HFONT /*hMeasureFont*/,
+	float /*pxPerPt*/,
 	const CString& fullText,
 	float fontSizePt,
 	float charSpacingPt,
@@ -495,7 +590,7 @@ void LayoutFreeTextVisualLines(
 					if (fullText[cur] == _T(' ') || fullText[cur] == _T('\t'))
 						lastSpaceBreak = next;
 
-					const float wPt = MeasureSpanPt(hMeasureDC, hMeasureFont, pxPerPt,
+					const float wPt = MeasureFreeTextSpanPt(
 						static_cast<LPCTSTR>(fullText) + segStart, next - segStart, fontSizePt, charSpacingPt);
 					if (wPt > safeAvailPt && cur > segStart)
 					{
@@ -663,7 +758,7 @@ bool UpsertFreeTextAnnotation(
 		(fitzRect.y1 - fitzRect.y0) : (fitzRect.x1 - fitzRect.x0);
 	std::vector<FreeTextVisualLine> wrappedLines;
 	LayoutFreeTextVisualLines(nullptr, nullptr, 1.0f, noteText, clampedFontSize, clampedCharSpacing,
-		max(24.0f, boxVisualW - FREETEXT_PAD_X_PT * 2.0f), wrappedLines);
+		max(20.0f, boxVisualW - FREETEXT_PAD_X_PT * 2.0f), wrappedLines);
 
 	pdf_page* pPdfPage = nullptr;
 	pdf_annot* pCreatedAnnot = nullptr;
@@ -872,7 +967,7 @@ bool AddTextNoteAnnotation(
 		for (const auto& ln : lines)
 		{
 			maxLineW = max(maxLineW,
-				MeasureSpanPt(nullptr, nullptr, 1.0f, ln.text, ln.text.GetLength(),
+				MeasureFreeTextSpanPt(ln.text, ln.text.GetLength(),
 					clampedFontSize, clampedCharSpacing));
 		}
 		float boxW = min(240.0f, maxLineW + FREETEXT_PAD_X_PT * 2.0f + 8.0f);

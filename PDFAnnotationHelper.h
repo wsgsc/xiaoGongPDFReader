@@ -51,21 +51,32 @@ struct FreeTextVisualLine
 	int endChar = 0;
 };
 
-// 按指定文字间距测量单行前 unitCount 个 UTF-16 单元的像素宽度
+// 按 PDF FreeText 外观流真实字体度量（Helvetica + Heiti）计算前 unitCount 个 UTF-16 单元的宽度（pt）
+float MeasureFreeTextSpanPt(
+	LPCTSTR pText,
+	int unitCount,
+	float fontSizePt,
+	float charSpacingPt);
+
+// 按与 PDF 外观流一致的字符步进测量单行前 unitCount 个 UTF-16 单元的屏幕像素宽度
 int MeasureTextWithCharSpacingPx(
 	HDC hDC,
 	HFONT hFont,
 	LPCTSTR pText,
 	int unitCount,
-	float charSpacingPx);
+	float fontSizePt,
+	float charSpacingPt,
+	float scale);
 
-// 按指定文字间距无闪烁绘制单行文本（支持任意缩放与字间距亚像素累计）
+// 按与 PDF 外观流一致的逐字步进无闪烁绘制单行文本（保证屏幕预览与保存后换行和字宽一致）
 void DrawTextWithCharSpacingPx(
 	HDC hDC,
 	int x,
 	int y,
 	const CString& lineText,
-	float charSpacingPx);
+	float fontSizePt,
+	float charSpacingPt,
+	float scale);
 
 // 计算内联文字批注的视觉折行结果（支持 \r\n 显式换行、字间距与宽度自动折行）
 void LayoutFreeTextVisualLines(
