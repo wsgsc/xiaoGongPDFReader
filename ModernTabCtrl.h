@@ -12,7 +12,7 @@ constexpr UINT WM_TAB_CONTEXT_MENU    = WM_APP + 102; // wParam: tabIndex, lPara
 // - 圆角边框
 // - 渐变背景
 // - 悬停效果与完整路径提示
-// - 清晰的选中状态与拖拽移动窗口
+// - 清晰的选中状态、标签左右拖拽排序与空白处拖拽窗口
 // - 可选的关闭按钮、中键关闭与右键菜单
 
 class CModernTabCtrl : public CTabCtrl
@@ -22,6 +22,7 @@ class CModernTabCtrl : public CTabCtrl
 public:
 	static constexpr int MIN_TAB_WIDTH = 135;
 	static constexpr int MAX_TAB_WIDTH = 250;
+	static constexpr int BLANK_DRAG_RESERVE = 44;
 
 	CModernTabCtrl();
 	virtual ~CModernTabCtrl();
@@ -31,6 +32,8 @@ public:
 	void SetTabHeight(int height);                // 设置标签页高度
 	void SetColors(COLORREF normal, COLORREF hover, COLORREF selected);  // 设置颜色
 	void HideOverflowButtons();
+	int CalculateTabWidth(int availableWidth, int tabCount) const;
+	int HitTestTabScreen(CPoint screenPoint);
 	virtual BOOL PreTranslateMessage(MSG* pMsg);
 
 protected:
@@ -59,8 +62,9 @@ private:
 	void DrawCloseButton(CDC* pDC, CRect rect, BOOL isHovered);
 	BOOL IsCloseButtonVisible(int index);
 	CRect GetCloseButtonRect(int index);
+	CRect GetCloseButtonRectForTabRect(const CRect& tabRect) const;
 	CRect GetTabRect(int index);
-	int CalculateTabWidth(int availableWidth, int tabCount) const;
+	int GetTabsViewportWidth(int clientWidth) const;
 	int GetMaxScrollOffset() const;
 	void ClampScrollOffset();
 	void EnsureTabVisible(int index);
@@ -76,8 +80,12 @@ private:
 	BOOL m_bTracking;          // 是否正在跟踪鼠标
 	BOOL m_tabDragArmed;
 	BOOL m_tabDragging;
+	BOOL m_tabReordering;      // 是否正在左右拖拽调整标签顺序
 	int m_tabPressedIndex;
 	int m_middlePressedIndex;  // 中键按下的标签索引
+	CPoint m_tabPressClientPt; // 按下标签时的客户区坐标
+	int m_dragGrabOffsetX;     // 拖拽标签时鼠标相对标签左边缘偏移
+	int m_dragCursorClientX;   // 拖拽标签时当前鼠标客户区 X 坐标
 	CPoint m_tabDragStartScreen;
 	CRect m_tabDragStartWindow;
 	int m_scrollOffset;        // 标签溢出时的水平滚动偏移

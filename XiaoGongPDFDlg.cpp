@@ -3198,35 +3198,16 @@ BOOL CXiaoGongPDFDlg::PreTranslateMessage(MSG* pMsg)
 {
 	if (pMsg->message == WM_LBUTTONDOWN && !m_isFullscreen &&
 		m_tabCtrl.GetSafeHwnd() && m_tabCtrl.IsWindowVisible() &&
-		(pMsg->hwnd == m_tabCtrl.GetSafeHwnd() || pMsg->hwnd == GetSafeHwnd()))
+		pMsg->hwnd == GetSafeHwnd())
 	{
 		CPoint screenPoint(GET_X_LPARAM(pMsg->lParam), GET_Y_LPARAM(pMsg->lParam));
 		::ClientToScreen(pMsg->hwnd, &screenPoint);
 		CRect tabRect;
 		m_tabCtrl.GetWindowRect(&tabRect);
-		if (tabRect.PtInRect(screenPoint))
+		if (tabRect.PtInRect(screenPoint) && m_tabCtrl.HitTestTabScreen(screenPoint) < 0)
 		{
-			int lastTabRight = tabRect.left;
-			bool foundTabOnRow = false;
-			const int tabCount = m_tabCtrl.GetItemCount();
-			for (int i = 0; i < tabCount; ++i)
-			{
-				CRect itemRect;
-				if (m_tabCtrl.GetItemRect(i, &itemRect))
-				{
-					m_tabCtrl.ClientToScreen(&itemRect);
-					if (screenPoint.y >= itemRect.top && screenPoint.y < itemRect.bottom)
-					{
-						lastTabRight = max(lastTabRight, itemRect.right);
-						foundTabOnRow = true;
-					}
-				}
-			}
-			if ((tabCount == 0 || foundTabOnRow) && screenPoint.x >= lastTabRight)
-			{
-				StartWindowDrag();
-				return TRUE;
-			}
+			StartWindowDrag();
+			return TRUE;
 		}
 	}
 	if (pMsg->message == WM_KEYUP && pMsg->wParam == VK_SPACE)
@@ -4835,9 +4816,7 @@ void CXiaoGongPDFDlg::UpdateTabWidth()
 	CRect rect;
 	m_tabCtrl.GetClientRect(&rect);
 	const int tabCount = max(1, m_tabCtrl.GetItemCount());
-	const int availableWidth = rect.Width() / tabCount;
-	const int tabWidth = min(CModernTabCtrl::MAX_TAB_WIDTH,
-		max(CModernTabCtrl::MIN_TAB_WIDTH, availableWidth));
+	const int tabWidth = m_tabCtrl.CalculateTabWidth(rect.Width(), tabCount);
 	m_tabCtrl.SendMessage(TCM_SETITEMSIZE, 0, MAKELPARAM(tabWidth, TITLE_BAR_HEIGHT));
 	m_tabCtrl.HideOverflowButtons();
 	m_tabCtrl.Invalidate(FALSE);
