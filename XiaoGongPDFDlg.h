@@ -61,7 +61,6 @@ public:
 	afx_msg void OnMenuAnnotUnderline();
 	afx_msg void OnMenuAnnotStrikeout();
 	afx_msg void OnMenuAnnotTextNote();
-	afx_msg void OnMenuSidebarTab(UINT nID);
 
 	// 初始文件路径（从命令行参数传入）
 	CString m_initialFilePath;
@@ -677,7 +676,6 @@ protected:
 
 	// 侧边栏（目录 / 缩略图 / 批注列表）相关函数
 	void SwitchSidebarTab(SidebarTabMode tab, bool saveToDoc = true);
-	void OpenSidebarTab(SidebarTabMode tab);
 	void SyncSidebarForActiveDocument();
 	void RefreshAnnotationsSidebar();
 	void UpdateSidebarWindowsVisibility(bool allowVisible);

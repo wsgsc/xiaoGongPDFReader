@@ -892,7 +892,6 @@ BEGIN_MESSAGE_MAP(CXiaoGongPDFDlg, CDialogEx)
 	ON_COMMAND(ID_MENU_ANNOT_UNDERLINE, &CXiaoGongPDFDlg::OnMenuAnnotUnderline)
 	ON_COMMAND(ID_MENU_ANNOT_STRIKEOUT, &CXiaoGongPDFDlg::OnMenuAnnotStrikeout)
 	ON_COMMAND(ID_MENU_ANNOT_TEXT_NOTE, &CXiaoGongPDFDlg::OnMenuAnnotTextNote)
-	ON_COMMAND_RANGE(ID_MENU_SIDEBAR_OUTLINE, ID_MENU_SIDEBAR_ANNOTATIONS, &CXiaoGongPDFDlg::OnMenuSidebarTab)
 	ON_COMMAND_RANGE(ID_MENU_READING_NORMAL, ID_MENU_READING_EYE, &CXiaoGongPDFDlg::OnReadingMode)
 	ON_COMMAND_RANGE(ID_MENU_RECENT_FILE_1, ID_MENU_RECENT_FILE_10, &CXiaoGongPDFDlg::onMenuRecentFile)
 	ON_NOTIFY(TVN_SELCHANGED, IDC_OUTLINE_TREE, &CXiaoGongPDFDlg::OnOutlineSelectionChanged)
@@ -3979,26 +3978,6 @@ void CXiaoGongPDFDlg::OnBtnMore()
 		appendOverflowItem(0, IDC_BTN_FULLSCREEN, _T("全屏"));
 	if (hasOverflowItems)
 		menu.AppendMenu(MF_SEPARATOR);
-
-	// 侧边栏面板子菜单（目录 / 缩略图 / 批注汇总列表）
-	CMenu sidebarMenu;
-	if (sidebarMenu.CreatePopupMenu())
-	{
-		sidebarMenu.AppendMenu(MF_STRING | docFlag, ID_MENU_SIDEBAR_OUTLINE, _T("目录书签\tF9"));
-		sidebarMenu.AppendMenu(MF_STRING | docFlag, ID_MENU_SIDEBAR_THUMBNAILS, _T("页面缩略图"));
-		sidebarMenu.AppendMenu(MF_STRING | docFlag, ID_MENU_SIDEBAR_ANNOTATIONS, _T("批注汇总列表"));
-		if (m_outlineVisible && m_doc && !m_searchResultsVisible &&
-			m_sidebarTab >= SIDEBAR_TAB_OUTLINE && m_sidebarTab <= SIDEBAR_TAB_ANNOTATIONS)
-		{
-			sidebarMenu.CheckMenuRadioItem(ID_MENU_SIDEBAR_OUTLINE, ID_MENU_SIDEBAR_ANNOTATIONS,
-				ID_MENU_SIDEBAR_OUTLINE + static_cast<int>(m_sidebarTab), MF_BYCOMMAND);
-		}
-		if (menu.AppendMenu(MF_POPUP, reinterpret_cast<UINT_PTR>(sidebarMenu.GetSafeHmenu()),
-			_T("侧栏面板")))
-		{
-			sidebarMenu.Detach();
-		}
-	}
 
 	// 页面视图模式子菜单（单页连续 / 双页并排）
 	CMenu layoutMenu;
@@ -12615,14 +12594,6 @@ bool CXiaoGongPDFDlg::PromptSaveUnsavedAnnotations(CPDFDocument* pDoc)
 // 侧边栏（目录 / 缩略图 / 批注汇总列表）集成实现
 // ============================================================================
 
-void CXiaoGongPDFDlg::OnMenuSidebarTab(UINT nID)
-{
-	if (nID < ID_MENU_SIDEBAR_OUTLINE || nID > ID_MENU_SIDEBAR_ANNOTATIONS)
-		return;
-	const SidebarTabMode tab = static_cast<SidebarTabMode>(nID - ID_MENU_SIDEBAR_OUTLINE);
-	OpenSidebarTab(tab);
-}
-
 void CXiaoGongPDFDlg::SwitchSidebarTab(SidebarTabMode tab, bool saveToDoc)
 {
 	if (tab < SIDEBAR_TAB_OUTLINE || tab > SIDEBAR_TAB_ANNOTATIONS)
@@ -12655,36 +12626,6 @@ void CXiaoGongPDFDlg::SwitchSidebarTab(SidebarTabMode tab, bool saveToDoc)
 		m_outlineTree.GetSafeHwnd() && m_outlineTree.IsWindowVisible())
 	{
 		m_outlineTree.Invalidate(FALSE);
-	}
-}
-
-void CXiaoGongPDFDlg::OpenSidebarTab(SidebarTabMode tab)
-{
-	if (!m_doc || m_totalPages <= 0)
-		return;
-
-	if (m_outlineVisible && !m_searchResultsVisible && m_sidebarTab == tab)
-	{
-		OnCheckThumbnail();
-		return;
-	}
-
-	const bool wasHidden = (!m_outlineVisible || m_searchResultsVisible);
-	m_outlineVisible = true;
-	m_searchResultsVisible = false;
-	UpdateOutlineButtonColors();
-	m_btnOutline.SetToolTipText(_T("隐藏侧栏 (F9)"));
-
-	if (m_sidebarSyncedDoc != GetActiveDocument())
-		SyncSidebarForActiveDocument();
-
-	SwitchSidebarTab(tab, true);
-
-	if (wasHidden)
-	{
-		CRect rect;
-		GetClientRect(&rect);
-		SendMessage(WM_SIZE, SIZE_RESTORED, MAKELPARAM(rect.Width(), rect.Height()));
 	}
 }
 
